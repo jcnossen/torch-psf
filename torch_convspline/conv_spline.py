@@ -2,21 +2,17 @@
 3D catmull rom splines evaluated using conv2d pytorch operations
 
 author: Jelmer Cnossen
+license: MIT
 """
 import os
 import numpy as np
 import torch
 import tqdm
 import matplotlib.pyplot as plt
-#from pytweezer.tirf.torch_splines import CatmullRomSpline1D, CatmullRomSpline2D
 from typing import Tuple
 #from torch.func import jacrev, jacfwd
 #from block_copy import BlockCopy
-from pytweezer.tracking.torch_levmar import lm_update
 
-from pytweezer.tracking.torch_levmar import LM_MLE
-
-#from pytweezer.cuda.pytwcuda import slice_volumes as cuda_slice
 
 
 def _S(X):
@@ -270,7 +266,7 @@ def eval_image_spline3D_deriv(position, output_shape:Tuple[int,int], images:torc
 
     #assert images.dtype == torch.float32
     if use_fast_slice:
-        from pytweezer.utils.fast_slice import fast_slice
+        from torch_convspline.fast_slice import fast_slice
         subimages = fast_slice(images, pixel_ix - 1, (4, output_shape[0] + 3, output_shape[1] + 3))
     else:
         subimages = slice_volumes(images, pixel_ix - 1, (4, output_shape[0] + 3, output_shape[1] + 3))
@@ -289,134 +285,4 @@ def eval_image_spline3D_deriv(position, output_shape:Tuple[int,int], images:torc
     #return weights
 
 
-def calc_deriv(pos, output_shape, images):
-    def non_batched(p, image):
-        return eval_image_spline2D(p[None], output_shape, image[None]).flatten()
 
-    def calc_deriv(p, image):
-        ev = non_batched(p, image)
-        return ev, jacfwd(non_batched)(p, image)
-
-    ev, deriv = torch.vmap(calc_deriv)(pos, images)
-    return (ev.view(len(ev), *output_shape), 
-            deriv.view(len(ev), *output_shape, -1).permute(0,3,1,2))
-
-
-
-#@torch.jit.script
-def lm_alphabeta(mu, jac, smp):
-    """
-    mu: [numsamples]
-    jac: [numsamples, numparams]
-    smp: [numsamples]
-    """
-    invmu = 1.0 / torch.clip(mu, min=1e-9)
-    af = smp*invmu**2
-
-    jacm = torch.matmul(jac[:,:,None], jac[:,None,:])
-    alpha = jacm * af[:,None,None]
-    alpha = alpha.sum(0)
-
-    beta = (jac * (smp*invmu-1)[:,None]).sum(0)
-    return alpha, beta
-
-
-def levmar_fit_spline3D(initial_pos, lut, iterations, lambda_, samples):
-    pos = initial_pos.clone()
-    output_shape = samples.shape[1:]
-
-    for i in range(iterations):
-        images = eval_image_spline3D_deriv(pos, output_shape, lut, deriv=True)
-        ev = images[:, 0]
-        jac = images[:, 1:].permute(0,2,3,1).reshape(len(images), -1, 3)
-
-        alpha, beta = lm_alphabeta(ev.flatten(), jac, samples.view(len(images),-1))
-        
-        pos = lm_update(pos, alpha, beta, lambda_)
-        print(pos)
-    return pos
-
-"""
-def lm_alphabeta(pos, images, samples):
-    output_shape = samples.shape[1:]
-    def non_batched(p, image):
-        return eval_image_spline2D(p[None], output_shape, image[None]).flatten()
-
-    def calc_update(p, image, smp):
-        ev = non_batched(p, image)
-        jac = jacfwd(non_batched)(p, image)
-        alpha, beta = lm_alphabeta(ev, jac, smp.flatten())
-        return alpha, beta
-
-    alpha,beta = torch.vmap(calc_update)(pos, images, samples)
-    return alpha,beta
-"""
-
-def benchmark_evals(zs, pos3D, shape, its):
-    with tqdm.tqdm(total=M*its) as pbar:
-        
-        for i in range(its):
-            r = eval_image_spline3D_deriv(position = pos3D, output_shape=shape, images = zs)
-            #r = eval_image_spline2D(cornerpos, shape, images, deriv=True)
-            #calc_deriv(cornerpos, shape, images)
-            #lm_update(cornerpos, images, samples)
-            pbar.update(M)
-
-
-
-
-if __name__ == '__main__':
-    lut_fn = os.path.split(__file__)[0] + '/../../data/lut000.jpg'
-    lut_fn = os.path.abspath(lut_fn)
-    lut = plt.imread(lut_fn)[:,:,0].astype(np.float32)
-    
-    from pytweezer.legacy.pyqtrk.benchmark import generate_image
-
-    print('Generating z-stack')
-    N = len(lut)
-    roisize = 100
-    zstack = np.array( [ generate_image([roisize/2,roisize/2,i], roisize, roisize, lut, 
-                                       minradius = 2, maxradius = roisize/3)
-                        for i in np.linspace(0,len(lut)-1,N, endpoint=False)])
-    
-    #plt.figure(); plt.imshow(zstack[len(zstack)//2])
-
-    from pytweezer import image_view
-    #image_view(zstack)
-
-    shape = roisize,roisize
-    dev = torch.device('cuda:0')
-
-    zstack = torch.tensor(zstack, dtype=torch.float32, device=dev)
-    M = 256*2
-    pos3D = torch.tensor([[10, roisize/2 - shape[0]/2, roisize/2 - shape[1]/2]], dtype=torch.float32, device=dev)
-    pos3D = pos3D.repeat(M,1)
-    pos3D[:,0] += torch.linspace(-5,5,M).to(dev)
-    pos3D[:,1] += torch.linspace(-5,5,M).to(dev)
-    pos3D[:,2] += torch.linspace(-5,5,M).to(dev)
-    spl = ConvSplineInterp3D(shape)
-    r = eval_image_spline3D(pos3D, shape, zstack.expand(M,-1,-1,-1))
-    #r = spl.forward(pos3D, zstack.expand(M,-1,-1,-1))
-    image_view(r)
-
-    #images = zstack[len(zstack)//2].repeat(N, 1,1)
-    #cornerpos = torch.tensor([[roisize/2 - shape[0]/2, roisize/2 - shape[1]/2]], dtype=torch.float32, device=dev).repeat(len(images),1)
-    #cornerpos[:,1] += torch.linspace(-10,10,N).to(dev)
-    #cornerpos[:,0] += torch.linspace(-10,10,N).to(dev)
-    #r = eval_image_spline2D(cornerpos, shape, images, deriv=True)
-    #image_view(r)
-
-    #samples = torch.poisson(images)
-    #lm_update(cornerpos, images, samples)
-
-    #if False:
-
-    # create lambda with output_shape baked in
-
-    #zs = zs = zstack.expand(M,-1,-1,-1).contiguous()
-    #benchmark_evals(zs, pos3D, shape, its=4000)
-
-    #ev,deriv = calc_deriv(cornerpos, shape, images)
-    #image_view(deriv)
-
-#    plt.figure(); plt.imshow(_S(r[0]))
