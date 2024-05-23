@@ -286,3 +286,10 @@ def eval_image_spline3D_deriv(position, output_shape:Tuple[int,int], images:torc
 
 
 
+if __name__ == '__main__':
+    # random 3D volume
+
+    src = torch.rand(1, 10, 10, 10)
+    output = eval_image_spline3D(torch.tensor([[5.5,0,0]]), (10,10), src)
+
+    plt.imshow(_S(output[0]))
