@@ -285,7 +285,6 @@ def eval_image_spline3D_deriv(position, output_shape:Tuple[int,int], images:torc
     #return weights
 
 
-
 if __name__ == '__main__':
     # random 3D volume
 

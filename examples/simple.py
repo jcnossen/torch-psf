@@ -25,12 +25,17 @@ roisize = 16
 psf = SplinePSF(zstack, (roisize,roisize))
 evals = torch.zeros((100, 5))
 evals[:,:2] = roisize/2
-evals[:,2] = torch.linspace(0, D-1, len(evals))
+evals[:,2] = torch.linspace(0, D-4, len(evals))
 evals[:,3] = 500
 evals[:,4] = 3
 
-zscan = psf.forward(evals)
-zscan = torch.poisson(zscan)
+#zscan = psf.forward(evals)
+#zscan = torch.poisson(zscan)
 
-from smlmtorch.ui.array_view_pyqt import image_view
-image_view(zscan)
+#deriv = psf.forward_with_deriv(evals)
+
+#from smlmtorch.ui.array_view_pyqt import image_view
+#image_view(deriv)
+
+print(psf.crlb(evals))
+

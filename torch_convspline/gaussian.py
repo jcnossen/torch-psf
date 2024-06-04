@@ -15,17 +15,12 @@ def gaussian2D(params, width: int, height: int):
 
     x = torch.arange(0, width, dtype=torch.float32, device=device)
     y = torch.arange(0, height, dtype=torch.float32, device=device)
-
-    # Use [None] instead of meshgrid
-    xx, yy = torch.meshgrid(x, y, indexing='xy')
-    xx = xx[None]
-    yy = yy[None]
     
     # Calculate error function
-    erf_x1 = erf((xx - x0[:,None,None] + 0.5) / (sqrt2 * sigma_x[:,None,None]))
-    erf_x2 = erf((xx - x0[:,None,None] - 0.5) / (sqrt2 * sigma_x[:,None,None]))
-    erf_y1 = erf((yy - y0[:,None,None] + 0.5) / (sqrt2 * sigma_y[:,None,None]))
-    erf_y2 = erf((yy - y0[:,None,None] - 0.5) / (sqrt2 * sigma_y[:,None,None]))
+    erf_x1 = erf((x[None,None,:] - x0[:,None,None] + 0.5) / (sqrt2 * sigma_x[:,None,None]))
+    erf_x2 = erf((x[None,None,:] - x0[:,None,None] - 0.5) / (sqrt2 * sigma_x[:,None,None]))
+    erf_y1 = erf((y[None,:,None] - y0[:,None,None] + 0.5) / (sqrt2 * sigma_y[:,None,None]))
+    erf_y2 = erf((y[None,:,None] - y0[:,None,None] - 0.5) / (sqrt2 * sigma_y[:,None,None]))
 
     # Integrate Gaussian over pixel
     gaussian = 0.25 * (erf_x1 - erf_x2) * (erf_y1 - erf_y2)
