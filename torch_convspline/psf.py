@@ -4,7 +4,7 @@ from torch_convspline import eval_image_spline3D, eval_image_spline3D_deriv
 from torch import nn
 import torch
 from torch import Tensor
-
+import numpy as np
 
 @torch.jit.script
 def poisson_crlb(mu:Tensor, jac:Tensor):
@@ -29,11 +29,17 @@ class SplinePSF(nn.Module):
 
     0,0,0 creates a 3D PSF sampled from the center of the zstack
     """
-    def __init__(self, zstack, output_shape):
+    def __init__(self, zstack, output_shape, zstep=1, device=None):
         super().__init__()
+
+        self.device = device
+
+        if type(zstack) is np.ndarray:
+            zstack = torch.from_numpy(zstack.astype(np.float32)).to(device)
 
         self.zstack = zstack
         self.output_shape = output_shape
+        self.zstep = zstep # um per layer
     
     def crlb(self, params):
         r = self.forward_with_deriv(params)
@@ -48,11 +54,12 @@ class SplinePSF(nn.Module):
         return crlb
     
     def _prepare(self, params):
+        """ params order is x,y,z """
         return torch.stack(
             [
-                self.zstack.shape[2]//2 - params[:, 2],
+                params[:, 2] / self.zstep + self.zstack.shape[0]//2,
                 self.zstack.shape[1]//2 - params[:, 1],
-                params[:, 0]
+                self.zstack.shape[2]//2 - params[:, 0]
             ],
             dim=1
         )

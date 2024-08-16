@@ -58,7 +58,7 @@ def slice_images(images, roipos, shape:Tuple[int,int]):
     I = I[:,None,None]
     return images[I,Y,X]
 
-@torch.jit.script
+#@torch.jit.script
 def slice_volumes(images, roipos, shape:Tuple[int,int,int]):
     rz = torch.arange(shape[0], device=images.device, dtype=torch.long)
     ry = torch.arange(shape[1], device=images.device, dtype=torch.long)
