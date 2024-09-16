@@ -2,12 +2,12 @@
 Fast blitting of 3D volumes using CUDA / CuPy
 Author: Jelmer Cnossen
 
-Results on RTX 2080 (Mobile):
+Results on RTX 4060 (Mobile):
 
-Meshgrid based iterations/s: 120.24. Transfer speed: 14.68 GB/s
-Fast slice f32 iterations/s: 1124.47. Transfer speed: 137.26 GB/s
-Fast slice f16 iterations/s: 1745.82. Transfer speed: 106.56 GB/s
-Fast slice pre-alloc f32 iterations/s: 1124.28. Transfer speed: 137.24 GB/s
+Meshgrid based iterations/s: 104.04. Transfer speed: 12.70 GB/s
+Fast slice f32 iterations/s: 880.36. Transfer speed: 107.47 GB/s
+Fast slice f16 iterations/s: 1395.27. Transfer speed: 85.16 GB/s
+Fast slice pre-alloc f32 iterations/s: 880.66. Transfer speed: 107.50 GB/s
 """
 import torch
 import torch.nn as nn
