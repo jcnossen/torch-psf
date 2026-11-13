@@ -170,11 +170,11 @@ def fit_vec_insitu(spl, d, zc0, iters=80, lr=2e-3, route='K', loc_iters=3, log=N
     for it in range(iters):
         with torch.no_grad():
             big.zcoef.copy_(zc); small.zcoef.copy_(zc)
-        spl.knots = spl.stack_from_vectorial(big, C.insitu_pos)
+        spl.knots = spl.stack_from_vectorial(big, C.insitu_pos, chunk=spl.nz)
         th, nll = localize(spl, d, th, iters=30 if th is None else loc_iters) if loc is None else loc(spl, d, th)
         if route == 'K':
             gK, tot = knot_grad(spl, d, th)
-            g = spl.vjp_vectorial(big, C.insitu_pos, gK)['zcoef']
+            g = spl.vjp_vectorial(big, C.insitu_pos, gK, chunk=spl.nz)['zcoef']      # one build + one backward
         else:
             g, tot = vec_grad_direct(small, d, th)
         torch.cuda.synchronize()
@@ -210,10 +210,10 @@ def fit_pupil_insitu(spl, d, zc0, iters=200, lr_z=1e-3, lr_p=2e-3, lr_a=1e-2, la
     t0 = time.time()
     for it in range(iters):
         set_model()
-        spl.knots = spl.stack_from_vectorial(big, C.insitu_pos)
+        spl.knots = spl.stack_from_vectorial(big, C.insitu_pos, chunk=spl.nz)
         th, nll = localize(spl, d, th, iters=30 if th is None else 3) if loc is None else loc(spl, d, th)
         gK, tot = knot_grad(spl, d, th)
-        g = spl.vjp_vectorial(big, C.insitu_pos, gK, names=('zcoef', 'pupil_phase', 'pupil_amp'))
+        g = spl.vjp_vectorial(big, C.insitu_pos, gK, names=('zcoef', 'pupil_phase', 'pupil_amp'), chunk=spl.nz)
         gr = dict(zcoef=g['zcoef'], phase=g['pupil_phase'] * mask, la=g['pupil_amp'] * big.pupil_amp * mask)
         if lam > 0:
             for k in ('phase', 'la'):

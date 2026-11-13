@@ -1,0 +1,23 @@
+s0 A true PSF                     dnll   0.00 wrongz 0.000 rms  10.1  15.5  22.1 tilt x    0.2 y    0.5 z   -2.3  mean z   -0.3  I 1.004 clamp nan 0s
+s0 A beads: Zernike               dnll  15.65 wrongz 0.032 rms  20.4  53.4  74.0 tilt x   16.3 y  119.3 z   70.7  mean z   66.6  I 1.055 clamp nan 6s
+/home/jc/torch-spline-3d-insitu/study/insitu/fit.py:85: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:822.)
+  tot += float(l)
+s0 A beads: spline                dnll  17.53 wrongz 0.018 rms  28.3  27.6  75.8 tilt x   23.3 y   20.4 z  -86.6  mean z   64.0  I 0.728 clamp nan 1s
+s0 A movie: shared spline         dnll   0.26 wrongz 0.002 rms  27.6  25.1  72.6 tilt x   25.4 y   23.7 z  -85.9  mean z   63.4  I 0.729 clamp 0.0001 6s
+s0 A movie: Zernike               dnll   0.01 wrongz 0.000 rms  10.1  15.6  22.1 tilt x    1.9 y   -1.4 z   -3.3  mean z    0.6  I 1.002 clamp 0.0009 8s
+s0 A movie: Zernike + knots       dnll   0.20 wrongz 0.001 rms  11.1  17.8  27.3 tilt x    1.1 y    2.0 z  -17.3  mean z   -1.1  I 1.003 clamp 0.0010 12s
+s0 A movie: free pupil            dnll   0.05 wrongz 0.000 rms  10.4  15.6  22.1 tilt x   -2.3 y    0.3 z   -3.2  mean z    1.0  I 1.004 clamp 0.0008 34s
+s0 A clean: Zernike               dnll   0.01 wrongz 0.000 rms  10.1  15.6  22.1 tilt x    0.9 y   -0.5 z   -6.2  mean z   -1.3  I 1.000 clamp 0.0000 7s
+s0 A clean: Zernike + knots       dnll   0.11 wrongz 0.001 rms  11.0  17.5  27.0 tilt x   -1.4 y    2.0 z  -17.0  mean z   -3.5  I 1.001 clamp nan 9s
+s0 A clean: free pupil            dnll   0.00 wrongz 0.000 rms  10.1  15.6  22.0 tilt x    0.2 y    3.4 z   -4.4  mean z    0.0  I 1.000 clamp 0.0000 31s
+s0 B true PSF                     dnll   0.00 wrongz 0.000 rms  10.7  15.0  22.9 tilt x    0.2 y   -0.4 z   -1.1  mean z   -0.0  I 1.006 clamp nan 0s
+s0 B beads: Zernike               dnll  17.05 wrongz 0.036 rms  22.6  77.4  66.0 tilt x   19.5 y  182.5 z   46.8  mean z   57.6  I 0.889 clamp nan 3s
+s0 B beads: spline                dnll  17.76 wrongz 0.033 rms  26.9  31.1  80.2 tilt x   25.1 y   22.9 z  -92.4  mean z   67.6  I 0.621 clamp nan 1s
+s0 B movie: shared spline         dnll   0.31 wrongz 0.006 rms  26.5  28.7  76.8 tilt x   27.7 y   36.3 z  -99.9  mean z   66.0  I 0.625 clamp 0.0003 5s
+s0 B movie: Zernike               dnll   2.85 wrongz 0.001 rms  11.8  25.1  25.5 tilt x    7.1 y   44.7 z   19.4  mean z    2.9  I 0.855 clamp 0.0007 8s
+s0 B movie: Zernike + knots       dnll   0.23 wrongz 0.001 rms  12.2  24.8  28.5 tilt x    6.4 y   43.2 z   20.2  mean z    2.5  I 0.864 clamp 0.0010 12s
+s0 B movie: free pupil            dnll   0.03 wrongz 0.000 rms  10.8  15.2  23.0 tilt x   -0.7 y    8.5 z   -0.3  mean z   -0.6  I 0.917 clamp 0.0009 33s
+s0 B clean: Zernike               dnll   2.76 wrongz 0.000 rms  11.7  27.3  24.8 tilt x   -0.8 y   50.0 z   13.2  mean z   -1.5  I 0.855 clamp 0.0001 8s
+s0 B clean: Zernike + knots       dnll   0.15 wrongz 0.001 rms  11.9  27.8  27.4 tilt x   -3.1 y   51.5 z   10.4  mean z   -2.7  I 0.863 clamp nan 11s
+s0 B clean: free pupil            dnll   0.01 wrongz 0.000 rms  10.8  16.0  23.1 tilt x   -0.6 y   16.6 z   -2.4  mean z   -2.5  I 0.907 clamp 0.0002 32s

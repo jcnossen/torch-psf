@@ -1,0 +1,8 @@
+/home/jc/torch-spline-3d-insitu/study/insitu/fit.py:85: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:822.)
+  tot += float(l)
+{'npupil': 64, 'oversample': 3, 'vec_err': 0.00386, 'spline_err_vs_vec': 0.00188, 'us_K': 2.27473, 'us_V': 9.20764, 'us_loc': 2.49206, 'fixed_two_builds': 0.0567, 'fixed_one_pass': 0.00616, 'breakeven': 889.21814, 'cos': 1.0, 'rel_diff': 0.00212, 'grad_10000': 3.1847, 'iter_10000': 2.4543, 'grad_100000': 3.94099, 'iter_100000': 2.45441, 'grad_1e+06': 4.03686, 'iter_1e+06': 2.45442}
+{'npupil': 128, 'oversample': 4, 'vec_err': 0.00148, 'spline_err_vs_vec': 0.00189, 'us_K': 2.30844, 'us_V': 22.6534, 'us_loc': 2.49372, 'fixed_two_builds': 0.05217, 'fixed_one_pass': 0.00571, 'breakeven': 280.83724, 'cos': 1.0, 'rel_diff': 0.00211, 'grad_10000': 7.8663, 'iter_10000': 4.99936, 'grad_100000': 9.57626, 'iter_100000': 5.21039, 'grad_1e+06': 9.78905, 'iter_1e+06': 5.23397}
+{'npupil': 256, 'oversample': 6, 'vec_err': 0.00024, 'spline_err_vs_vec': 0.00188, 'us_K': 2.30389, 'us_V': 114.83848, 'us_loc': 2.49467, 'fixed_two_builds': 0.27157, 'fixed_one_pass': 0.01975, 'breakeven': 175.49276, 'cos': 1.0, 'rel_diff': 0.00229, 'grad_10000': 26.83898, 'iter_10000': 18.19121, 'grad_100000': 45.90999, 'iter_100000': 23.60295, 'grad_1e+06': 49.42175, 'iter_1e+06': 24.36371}
+K whole fit 16000 emitters, 40 its: 6.9 s, final Zernike rms error 0.001186072127893567
+V whole fit 16000 emitters, 40 its: 9.3 s, final Zernike rms error 0.0011792712612077594

@@ -1,0 +1,249 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb,graphicx,booktabs,hyperref,caption}
+\captionsetup{font=small}
+\input{numbers.tex}
+\title{Fast in-situ estimation of pupil-based point spread functions by collecting the likelihood gradient on a spline}
+\author{Draft, \today. Simulation study; no real data yet.}
+\date{}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+In 3D single-molecule localization microscopy the point spread function (PSF) of the sample differs from the PSF
+measured on beads, so it has to be estimated from the blinking data itself (``in situ''). Maximum-likelihood
+methods do this by evaluating a vectorial pupil model for every emitter in every iteration, which limits them to
+a few thousand emitters. We separate the two costs. The pupil model is evaluated only on the knots of a cubic
+spline (\nknotimg{} images), all emitters are evaluated on the spline, the likelihood gradient is summed on the
+knots, and one backward pass through the pupil model turns it into the gradient for the pupil parameters. The
+result equals the gradient of the per-emitter route up to the interpolation error of the spline. On simulated
+astigmatic data the gradient is \gradspeedA{} times cheaper at $10^5$ emitters for a pupil model whose own
+numerical error matches that of the spline, and a whole iteration (gradient plus re-localization) is
+\iterspeedA{} times cheaper; below about \breakevenA{} emitters there is no gain. The same route fits a free
+pixel map of pupil phase and amplitude. We also show which properties of a PSF blinking data cannot determine,
+why a free-form spline PSF fitted in situ therefore keeps position errors that a pupil model does not, and
+report an implementation pitfall (a limit on the fitted offset inside the patch) that biased flexible PSF models
+in an earlier version of this study.
+\end{abstract}
+
+\section{Introduction}
+
+A 3D localization is only as accurate as the PSF model it is fitted with. The usual calibration, a z-stack of
+beads on the coverslip, measures a different PSF from the one in the sample: the emitters sit at some depth in a
+medium with a lower refractive index, and aberrations change between calibration and experiment. In-situ methods
+estimate the PSF from the single-molecule data. INSPR~\cite{inspr} and VISPR~\cite{vispr} sort spots into z
+classes, average them and run phase retrieval on the averages. uiPSF~\cite{uipsf} and the vectorial fit of
+Droste et al.~\cite{droste} maximize the likelihood of all spots jointly over the PSF parameters and the emitter
+parameters; both evaluate the pupil model for every emitter and report a few thousand emitters with run times
+from half a minute (Zernike model on a CPU~\cite{droste}) to tens of minutes (field-dependent model on a
+GPU~\cite{uipsf}).
+
+Cubic-spline PSFs~\cite{cspline} are the standard for fast localization, because evaluating a spline costs far
+less than evaluating a pupil model. Here the spline is used \emph{inside} the PSF estimation: as a layer between
+the pupil model and the data that makes the cost of the pupil model independent of the number of emitters. The
+questions of this study are (i) how much faster this is, and from how many emitters; (ii) whether the result is
+the same; (iii) whether the spline knots themselves can serve as a free-form (``model-free'') in-situ PSF, and
+when a pupil model with a few Zernike terms is not sufficient.
+
+\section{Method}
+
+\subsection{Spline PSF evaluated by a strided convolution}
+
+The pixel-integrated PSF is taken as shift invariant within a patch: pixel $(i,j)$ of a $P\times P$ patch with
+the emitter at offset $(x,y)$ from the patch centre and height $z$ has the expected value
+$g(o_j-x,\;o_i-y,\;z)$, with $o$ the pixel offset from the centre. $g$ is stored as knots $c_{klm}$ on a grid
+with spacing $1/S$ pixel laterally and $h_z$ axially, and interpolated with the Catmull--Rom cubic,
+\begin{equation}
+g(u,v,z)=\sum_{a,b,e=0}^{3} w_a(t_z)\,w_b(t_v)\,w_e(t_u)\;c_{k+a,\,l+b,\,m+e},
+\end{equation}
+where $(k,l,m)$ and $t\in[0,1)^3$ are the integer and fractional knot coordinates and $w(t)$ are the four cubic
+weights. All pixels of a patch are $S$ knots apart and share the same $t$. A patch is therefore one
+$4\times4\times4$ kernel applied to the knot array with stride $S$, and a batch of patches is one grouped
+convolution. The derivatives with respect to $x,y,z$ use $w'(t)$ in one of the three factors. With $S=2$ and
+$h_z=40$\,nm the spline differs from the pupil model it was built from by \splineerr\,\% (relative L2 norm).
+
+\subsection{Likelihood and its gradient on the knots}
+
+Patch $n$ has photon counts $d_{np}$ and emitter parameters $\theta_n=(x,y,z,I,b)_n$. With Poisson noise,
+\begin{equation}
+\mu_{np}=I_n\,g_p(\theta_n;c)+b_n,\qquad L=\sum_{n,p}\mu_{np}-d_{np}\log\mu_{np}.
+\end{equation}
+The expected image is linear in the knots, $\mu_{np}=I_n\sum_k A_{np,k}(\theta_n)\,c_k+b_n$, where $A$ holds the
+64 interpolation weights per pixel. Hence
+\begin{equation}
+\frac{\partial L}{\partial c_k}=\sum_{n,p}I_n\,A_{np,k}\Bigl(1-\frac{d_{np}}{\mu_{np}}\Bigr),
+\label{eq:knotgrad}
+\end{equation}
+the transpose of the patch evaluation applied to the residual images: one scatter-add per emitter.
+
+\subsection{Passing the gradient through the pupil model}
+
+Let the knots be the pupil model sampled on the knot grid, $c=B(\phi)$, where $\phi$ are the parameters of the
+pupil model: Zernike coefficients, a pixel map of pupil phase and amplitude, or optical constants. By the chain
+rule
+\begin{equation}
+\frac{\partial L}{\partial\phi}=\Bigl(\frac{\partial B}{\partial\phi}\Bigr)^{\!\top}\frac{\partial L}{\partial c}.
+\end{equation}
+One iteration is: (1) build the knots, $n_zS^2$ evaluations of the pupil model (here \nknotimg{} images);
+(2) update the emitter parameters on the spline (three damped Newton steps per patch, warm start);
+(3) sum Eq.~\eqref{eq:knotgrad} over all emitters; (4) one backward pass through the build; (5) Adam step on
+$\phi$. Steps 1 and 4 do not depend on the number of emitters $N$. The cost of a gradient is
+$N\,t_\text{spline}+t_\text{fixed}$, against $N\,t_\text{pupil}$ when the pupil model is evaluated per emitter.
+
+This is reverse-mode differentiation through an interpolation table, nothing more. Compared with the z-binned
+phase retrieval of INSPR and VISPR, the knot gradient is also a pooling of all emitters onto a z grid, but it
+pools the exact likelihood gradient at the fitted sub-pixel positions instead of averaged images, so no
+resolution is lost in the pooling and the fit is a maximum-likelihood fit.
+
+The gradient is exact for the spline-interpolated likelihood. Against the likelihood of the pupil model itself
+it is exact up to the interpolation error; section~\ref{sec:gradacc} quantifies the difference.
+
+\subsection{What blinking data cannot determine}
+\label{sec:gauge}
+
+Every emitter is seen at one unknown position. The likelihood is therefore unchanged when
+\begin{itemize}\setlength\itemsep{0pt}
+\item each z plane of the PSF is shifted laterally, $g(u,v,z)\to g(u-\delta_x(z),v-\delta_y(z),z)$, and the
+emitters move with it, $x_n\to x_n+\delta_x(z_n)$;
+\item the z axis is relabelled, $z\to f(z)$ with $f$ monotone;
+\item each plane is rescaled, $g\to a(z)\,g$ with $I_n\to I_n/a(z_n)$.
+\end{itemize}
+A spline with free knots has all three freedoms. A pupil model has none of them as free functions: the physics
+of defocus ties lateral shift, z scale and brightness to the shape of the PSF. A bead stack fixes all three
+(known stage positions, the same bead in every plane), but for the bead PSF. This predicts that free knots
+fitted to blinking data can improve the fit of the images but cannot correct a position error that depends on
+z, and that a free pupil map can.
+
+\section{Simulation}
+
+\begin{figure}[t]\centering\includegraphics[width=0.95\linewidth]{../fig/data.png}
+\caption{Simulated data: bead stack (top) and one frame of the blinking movie.}\end{figure}
+
+Vectorial PSF~\cite{vectorial}: NA 1.49 oil objective ($n=1.518$), sample in water ($n=1.33$), 680\,nm, 108\,nm
+pixels, freely rotating dipole, supercritical-angle light included, 0.10 waves of astigmatism, and small random
+Zernike aberrations (Noll 5--21).
+
+\begin{itemize}\setlength\itemsep{0pt}
+\item \emph{Bead stack}: 6 beads on the coverslip, 26 focus planes 40\,nm apart, 40{,}000 photons per frame.
+\item \emph{Movie}: 6000 frames of $128\times128$ pixels, 700 blinking sites at heights 0--800\,nm, fixed focus,
+4000 photons per frame (log-normal), background 30 photons per pixel.
+\item \emph{Detection}: difference of Gaussians, isolated spots, $15\times15$ patches centred on the peak.
+\item \emph{Clean patches}: 11{,}000 isolated emitters simulated directly, without a detection step.
+\item \emph{Test set}: 6000 isolated emitters with known positions, heights 50--750\,nm, independent seed.
+\item \emph{Bead versus sample}: besides the index mismatch, four aberrations change by 0.02--0.04 waves between
+calibration and experiment (Noll 5, 7, 8, 11). The size of this change is a choice, not taken from data.
+\item \emph{Scenario A}: the pupil is a Zernike series Noll 5--21, the class of the fitted Zernike model.
+\item \emph{Scenario B}: A plus a phase screen of Noll 22--66 (0.06 waves rms) and a patch of the pupil with
+60\,\% amplitude loss.
+\end{itemize}
+The data are generated with a pupil grid of 128 samples and image oversampling 4; the fitted models use a grid
+of 64 and oversampling 3, so the simulation is not the fitted model and the structure of scenario B does not lie
+on the pixels of the fitted pupil map. All accuracy results are mean $\pm$ standard deviation over \nseeds{}
+seeds (new beads, movie, clean patches and test set per seed).
+
+Scoring, on the test set: \emph{likelihood deficit}, the mean extra negative log-likelihood per emitter compared
+with the true PSF; \emph{wrong z}, the fraction with a z error above 150\,nm (excluded from the other columns,
+and from nothing else); rms errors; \emph{tilt}, the change of the mean error over the 700\,nm z range, from a
+straight-line fit of error against true height (for z this is the error of the z scale); and the ratio of
+estimated to true photon count.
+
+Simplifications: Poisson noise only, point-like beads, PSF constant over the field, uniform background, and NA,
+refractive indices and wavelength known to the fit.
+
+\section{Results}
+
+\subsection{Speed}
+
+\begin{table}[t]\centering\small\input{tab_speed.tex}
+\caption{Cost of one gradient with respect to the Zernike coefficients (\gpu, \nbench{} emitters measured,
+$10^6$ extrapolated linearly). ``Model error'': relative L2 difference of the vectorial model at that setting
+from a 256/7 reference. ``Localize'': three Newton steps per emitter on the spline, paid by both routes.
+``Whole iteration'' includes it.}\label{tab:speed}\end{table}
+
+\begin{figure}[t]\centering\includegraphics[width=0.95\linewidth]{fig_speed.pdf}
+\caption{Left: seconds per gradient against the number of emitters for three settings of the pupil model.
+Right: the same fit run with both routes.}\label{fig:speed}\end{figure}
+
+Table~\ref{tab:speed} and Fig.~\ref{fig:speed}. The cost of the pupil model depends on how finely the pupil and
+the image are sampled, so each setting is listed with its own numerical error. The spline has an error of
+\splineerr\,\%; the setting with a comparable error is 128/4. \speedtext
+
+In both routes the emitter positions are updated on the spline; the comparison is between two ways of getting
+the pupil gradient, not against a pipeline that also localizes with the pupil model, which would be slower
+still and was not measured. Neither route is optimized beyond batching: the spline gather and scatter are plain
+PyTorch autograd, and the pupil model is a matrix Fourier transform in single precision.
+
+\subsection{Is it the same gradient?}
+\label{sec:gradacc}
+
+\gradtext
+
+\subsection{Accuracy}
+
+\begin{table}[p]\centering\small
+\textbf{Scenario A} (pupil is a Zernike series)\\[2pt]\input{tab_accA.tex}\\[10pt]
+\textbf{Scenario B} (pupil has structure outside the Zernike series)\\[2pt]\input{tab_accB.tex}
+\caption{PSF estimates scored on the test emitters, mean $\pm$ sd over \nseeds{} seeds.}\label{tab:acc}\end{table}
+
+\begin{figure}[t]\centering\includegraphics[width=0.9\linewidth]{fig_bias.pdf}
+\caption{Mean position error against true emitter height for PSFs estimated from the movie patches. Error bars:
+sd over seeds.}\label{fig:bias}\end{figure}
+
+\acctext
+
+\subsection{A pitfall: a limit on the fitted offset}
+
+\pitfalltext
+
+\subsection{An illumination pattern as a second position ruler}
+
+\begin{table}[t]\centering\small\input{tab_pattern.tex}
+\caption{PSF estimated from emitters seen in 6 frames under a shifting sinusoidal illumination pattern (known
+exactly), and from the same frames without pattern. Ranges: smallest and largest mean error over 7 height bins
+(nm). One seed.}\label{tab:pattern}\end{table}
+
+\patterntext
+
+\section{Relation to other methods}
+
+\begin{itemize}\setlength\itemsep{1pt}
+\item INSPR~\cite{inspr}, VISPR~\cite{vispr}: z classes, averaging, phase retrieval on the averages. The route
+here is the exact-likelihood counterpart of this pooling (section 2.3).
+\item uiPSF~\cite{uipsf}: automatic differentiation and L-BFGS over PSF and emitter parameters, with the pupil
+model evaluated per emitter; its voxel PSF is offered for bead data only.
+\item Droste et al.~\cite{droste}: alternating maximum likelihood with field-dependent Zernike coefficients,
+1000--5000 emitters; the optical transfer function is precomputed on patches of the field, a saving over the
+field that is similar in spirit to the saving over emitters here.
+\item Spline and lookup-table localization~\cite{cspline,hauser}: tabulated PSFs, not used to learn the pupil.
+\end{itemize}
+To our knowledge no published in-situ method back-propagates the likelihood through a tabulated PSF to a pupil
+model. The literature search behind this statement was made from preprints and code repositories and was not
+exhaustive.
+
+For a field-constant Zernike PSF a few thousand emitters suffice, and at that size the route has no advantage.
+It matters where many emitters are needed: a pupil map with thousands of free pixels, aberrations that vary
+over the field or in time, and very large data sets. None of these is demonstrated here.
+
+\section{Limitations}
+
+\limittext
+
+\begin{thebibliography}{9}\small
+\bibitem{inspr} F. Xu et al., Three-dimensional nanoscopy of whole cells and tissues with in situ point spread
+function retrieval, Nat. Methods 17, 531 (2020).
+\bibitem{vispr} H. Yang et al., VISPR: in situ vectorial PSF retrieval, Photonics Research (2024),
+doi:10.1364/PRJ.520469.
+\bibitem{uipsf} S. Liu et al., Universal inverse modeling of point spread functions for SMLM accurately predicts
+their complex aberrations, Nat. Methods 21 (2024), doi:10.1038/s41592-024-02282-x.
+\bibitem{droste} I. Droste et al., vectorial in-situ PSF fitting with field-dependent aberrations, Optica (2025);
+bioRxiv 2024.12.11.627909.
+\bibitem{cspline} Y. Li et al., Real-time 3D single-molecule localization using experimental point spread
+functions, Nat. Methods 15, 367 (2018).
+\bibitem{hauser} F. Hauser and J. Jacak, lookup-table based 3D localization (2021), PMC8407837.
+\bibitem{vectorial} S. Stallinga and B. Rieger, Accuracy of the Gaussian point spread function model in 2D
+localization microscopy, Opt. Express 18, 24461 (2010).
+\bibitem{siemons} M. Siemons et al., Opt. Express 30 (2022), doi:10.1364/OE.461750.
+\end{thebibliography}
+References are not yet checked against the published versions (titles of \cite{vispr,droste,hauser} are
+descriptive placeholders).
+\end{document}

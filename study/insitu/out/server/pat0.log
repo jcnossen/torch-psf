@@ -1,0 +1,11 @@
+/home/jc/torch-spline-3d-insitu/study/insitu/fit.py:85: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:822.)
+  tot += float(l)
+/home/jc/torch-spline-3d-insitu/study/insitu/run_pattern.py:114: UserWarning: torch.searchsorted(): input value tensor is non-contiguous, this will lower the performance due to extra data copy when converting non-contiguous tensor to contiguous, please use contiguous input value tensor if possible. This message will only appear once per program. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/BucketizationUtils.h:32.)
+  ib = torch.bucketize(z, b).clamp(1, 7) - 1
+M 0.0 A Zernike      dnll   0.00  rms x 10.1 y 15.8 z 22.5  mean err over z: x   -0.2..  0.8  y   -0.3..  0.3  z   -4.7..  1.2 nm  10s
+M 0.0 A free pupil   dnll   0.01  rms x 10.1 y 15.8 z 22.5  mean err over z: x   -1.1..  0.3  y   -0.7..  2.5  z   -1.4..  1.0 nm  26s
+M 0.0 A free knots   dnll   0.16  rms x 10.6 y 16.6 z 25.4  mean err over z: x   -0.3..  0.7  y   -0.3..  1.1  z   -7.7..  1.8 nm  5s
+M 0.0 B Zernike      dnll   2.72  rms x 11.7 y 28.5 z 25.2  mean err over z: x   -5.2..  1.2  y   -1.7.. 43.0  z   -6.7..  4.4 nm  10s
+M 0.0 B free pupil   dnll   0.02  rms x 10.7 y 16.9 z 22.9  mean err over z: x   -2.4.. -0.9  y   -2.8.. 13.9  z   -2.5..  0.6 nm  27s
+M 0.0 B free knots   dnll   0.29  rms x 11.8 y 28.4 z 26.3  mean err over z: x   -5.2..  0.7  y   -1.8.. 44.1  z   -9.1..  4.5 nm  5s
