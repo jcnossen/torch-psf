@@ -9,10 +9,11 @@
 \newcommand{\nbench}{16{,}000}
 
 \newcommand{\speedtext}{%
-At that setting the pupil model costs 23\,$\mu$s per emitter and the spline 2.3\,$\mu$s; the fixed cost of the
+At that setting the pupil-model gradient runs at 43{,}000 emitters per second and the spline gradient at
+430{,}000; the fixed cost of the
 knot route (one build of the knots that keeps the computation graph, and one backward pass) is 7\,ms. The
 gradient is cheaper from about 320 emitters on, 7.6 times at $10^4$ and 10 times at $10^5$ emitters and above.
-Re-localizing the emitters costs another 2.5\,$\mu$s per emitter in both routes, so a whole iteration is 5.0 to
+Re-localizing the emitters runs at 400{,}000 emitters per second in both routes, so a whole iteration is 5.0 to
 5.3 times cheaper. With the coarser 64/3 setting, whose error (0.39\,\%) is twice that of the spline, the
 numbers are 4 (gradient) and 2.5 (iteration); a complete fit of 16{,}000 emitters, 40 iterations, took 5.3\,s
 through the knots and 8.9\,s per emitter, and both ended at the same Zernike error (Fig.~\ref{fig:speed},

@@ -86,8 +86,8 @@ convolution and a scatter-add), which automatic differentiation provides. No gra
 \end{enumerate}
 The whole evaluation is about twenty lines of Python and has no custom kernel. It runs on any device PyTorch
 supports, uses the vendor-optimized convolution, and can sit inside any other differentiable model, which is
-what section~\ref{sec:passthrough} uses. On an RTX 3090, value plus knot gradient cost 2.3\,$\mu$s per emitter
-for $15\times15$ patches, and three Newton steps of localization 2.5\,$\mu$s. Storing knots at $S=2$ instead of
+what section~\ref{sec:passthrough} uses. On an RTX 3090 it evaluates about 6 million $15\times15$ patches per second, and 1.4 to 2 million per
+second including the gradient on the knots (Table~\ref{tab:conv}). Storing knots at $S=2$ instead of
 $S=1$ is what makes cubic interpolation accurate enough: the interpolation error is \splineerr\,\% at $S=2$ and
 about 2\,\% at $S=1$. We are not aware of an earlier spline PSF evaluated as a grouped, strided convolution, but
 we did not search the literature for this specifically.
@@ -118,19 +118,19 @@ evaluating the \emph{pupil model} per emitter (section~\ref{sec:speed}), not aga
 
 \begin{table}[t]\centering\small
 \begin{tabular}{lrrr}\toprule
-cost per spot ($\mu$s), $15\times15$ pixels & convolution & coefficient table & coefficient table\\
+million spots per second, $15\times15$ pixels & convolution & coefficient table & coefficient table\\
  & (PyTorch) & (PyTorch) & (native CUDA)\\ \midrule
-value & 0.17 & 0.31 & 0.41$^{a}$\\
-value and $x,y,z$ derivatives & 0.30--0.32 & 0.35--0.37 & 1.8--2.1$^{a}$\\
-value and gradient on the PSF values & 0.49--0.71 & not valid$^{b}$ & not valid$^{b}$\\
-Levenberg--Marquardt fit, per iteration & 0.49 & n/a & 0.53\\
+value & 5.9 & 3.2 & 2.4$^{a}$\\
+value and $x,y,z$ derivatives & 3.1--3.3 & 2.7--2.9 & 0.48--0.56$^{a}$\\
+value and gradient on the PSF values & 1.4--2.0 & not valid$^{b}$ & not valid$^{b}$\\
+Levenberg--Marquardt iterations & 2.0 & n/a & 1.9\\
 memory of the PSF (MB) & 0.31 & 15.8 & \\ \bottomrule
 \end{tabular}
-\caption{Convolution form against the conventional coefficient form, RTX 3090, 200{,}000 spots. Ranges: runs
+\caption{Throughput of the convolution form against the conventional coefficient form: million spots per second, all spots of a batch evaluated in parallel on one RTX 3090 (batches of 5000 to 20{,}000). Ranges: runs
 at different times on a GPU shared with other jobs; the ratio between the two PyTorch columns was 1.7--1.8
 (value) and 1.2 (derivatives) within single runs. $^{a}$\,includes copying the result to
-host memory, which the library interface requires. Fit: convolution form 14.8\,$\mu$s for 30 fixed
-iterations; native library 12.2\,$\mu$s with on average 23 iterations (it stops early). $^{b}$\,A gradient on the 64 coefficients per voxel does not give a continuous spline, so the coefficient table cannot be optimized directly. It can only be done by keeping knots as the parameters and rebuilding the table from them inside the computation (0.73--1.0\,$\mu$s in PyTorch), which is the knot parameterization of this paper with a slower evaluator and 51 times the memory.}\label{tab:conv}
+host memory, which the library interface requires. Complete fits: convolution form 68{,}000 per second with 30 fixed
+iterations; native library 82{,}000 per second with on average 23 iterations (it stops early). $^{b}$\,A gradient on the 64 coefficients per voxel does not give a continuous spline, so the coefficient table cannot be optimized directly. It can only be done by keeping knots as the parameters and rebuilding the table from them inside the computation (1.0--1.4 million spots per second in PyTorch), which is the knot parameterization of this paper with a slower evaluator and 51 times the memory.}\label{tab:conv}
 \end{table}
 
 \subsection{Likelihood and its gradient on the knots}
@@ -233,7 +233,7 @@ refractive indices and wavelength known to the fit.
 \begin{table}[t]\centering\small\resizebox{\linewidth}{!}{\input{tab_speed.tex}}
 \caption{Cost of one gradient with respect to the Zernike coefficients (\gpu, \nbench{} emitters measured,
 $10^6$ extrapolated linearly). ``Model error'': relative L2 difference of the vectorial model at that setting
-from a 256/7 reference. ``Localize'': three Newton steps per emitter on the spline, paid by both routes.
+from a 256/7 reference. Rates in thousand emitters per second, batches evaluated in parallel. ``Localize'': three Newton steps per emitter on the spline, done in both routes.
 ``Whole iteration'' includes it.}\label{tab:speed}\end{table}
 
 \begin{figure}[t]\centering\includegraphics[width=0.95\linewidth]{fig_speed.pdf}

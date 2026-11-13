@@ -55,11 +55,11 @@ ax.set_xlabel('emitter height (nm)'); ax.set_ylabel('count'); ax.legend(fontsize
 
 # speed
 S = json.load(open(O + 'speed3.json'))
-t = [r'\begin{tabular}{lrrrrrrrr}\toprule', r'pupil grid, & model & \multicolumn{3}{c}{per emitter ($\mu$s)} & fixed & break- & \multicolumn{2}{c}{speed-up at $10^4$ / $10^5$ / $10^6$ emitters}\\',
+t = [r'\begin{tabular}{lrrrrrrrr}\toprule', r'pupil grid, & model & \multicolumn{3}{c}{thousand emitters per second} & fixed & break- & \multicolumn{2}{c}{speed-up at $10^4$ / $10^5$ / $10^6$ emitters}\\',
      r'oversampling & error & vectorial & spline & localize & (s) & even & gradient & whole iteration\\ \midrule']
 for r in S['table']:
     fx = np.nanmin([r['fixed_two_builds'], r['fixed_one_pass']])
-    t.append(f"{r['npupil']}, {r['oversample']} & {100 * r['vec_err']:.2f}\\,\\% & {r['us_V']:.0f} & {r['us_K']:.1f} & {r['us_loc']:.1f} & {fx:.3f} & {r['breakeven']:.0f} & "
+    t.append(f"{r['npupil']}, {r['oversample']} & {100 * r['vec_err']:.2f}\\,\\% & {1e3 / r['us_V']:.0f} & {1e3 / r['us_K']:.0f} & {1e3 / r['us_loc']:.0f} & {fx:.3f} & {r['breakeven']:.0f} & "
              f"{r['grad_10000']:.1f} / {r['grad_100000']:.1f} / {r['grad_1e+06']:.0f} & {r['iter_10000']:.1f} / {r['iter_100000']:.1f} / {r['iter_1e+06']:.1f}\\\\")
 t.append(r'\bottomrule\end{tabular}')
 open(D + 'tab_speed.tex', 'w').write('\n'.join(t))
