@@ -1,0 +1,110 @@
+% numbers and result paragraphs; sources: study/insitu/out/server/*.json, docs/CRITIC_INSITU_1.md
+\newcommand{\nknotimg}{124}
+\newcommand{\splineerr}{0.19}
+\newcommand{\gradspeedA}{10}
+\newcommand{\iterspeedA}{5}
+\newcommand{\breakevenA}{300}
+\newcommand{\nseeds}{3}
+\newcommand{\gpu}{RTX 3090}
+\newcommand{\nbench}{16{,}000}
+
+\newcommand{\speedtext}{%
+At that setting the pupil model costs 23\,$\mu$s per emitter and the spline 2.3\,$\mu$s; the fixed cost of the
+knot route (one build of the knots that keeps the computation graph, and one backward pass) is 7\,ms. The
+gradient is cheaper from about 320 emitters on, 7.6 times at $10^4$ and 10 times at $10^5$ emitters and above.
+Re-localizing the emitters costs another 2.5\,$\mu$s per emitter in both routes, so a whole iteration is 5.0 to
+5.3 times cheaper. With the coarser 64/3 setting, whose error (0.39\,\%) is twice that of the spline, the
+numbers are 4 (gradient) and 2.5 (iteration); a complete fit of 16{,}000 emitters, 40 iterations, took 5.3\,s
+through the knots and 8.9\,s per emitter, and both ended at the same Zernike error (Fig.~\ref{fig:speed},
+right). The 256/6 setting gives a factor 46 for the gradient at $10^5$ emitters, but that pupil model is ten
+times more accurate than the spline it is compared with, so this row is not a like-for-like comparison.}
+
+\newcommand{\gradtext}{%
+At the starting point of a fit (Zernikes from the bead stack, or the truth plus 0.01 waves) the two gradients
+agree to 0.2\,\% (cosine similarity 1.000000). Near the optimum the gradient is small, and the interpolation
+error of the spline becomes visible: at the true parameters the two routes differ by 4\,\% for the Zernikes, 4\,\%
+for a pupil phase map and 12\,\% for a pupil amplitude map (measured by the reviewer of this study,
+\texttt{critic/grad\_speed.py}, 2000 emitters). On noise-free data this moves the optimum of the Zernike
+coefficients by $1.6\times10^{-5}$ waves rms. That is far below any physical relevance, but it is the size of
+the statistical error at about $10^6$ emitters, so beyond that a finer spline ($S=3$) or a final step with the
+per-emitter route would be needed. In the fits of this study the Zernike error at convergence is set by the
+difference between the simulated and the fitted pupil sampling ($5$--$8\times10^{-4}$ waves in scenario A).}
+
+\newcommand{\acctext}{%
+Table~\ref{tab:acc} and Fig.~\ref{fig:bias}.
+
+\emph{Beads only.} With the aberration change chosen here, a PSF from the bead stack alone is far off on the
+sample data: 15--18 nats per emitter, z errors of 65--80\,nm rms, and for the Zernike model a y error that
+changes by 120--180\,nm over the z range. This is a statement about the chosen aberration change, not a general
+one, and the bead spline uses the paraxial depth scaling without the empirical correction that is common
+practice.
+
+\emph{Scenario A.} The Zernike model refined on the movie patches, starting from the bead fit, is
+indistinguishable from the true PSF in every column (8\,s for 11{,}600 patches). Free knots on top add noise
+(z rms 22 to 27\,nm, a z-scale error of $-13\pm4$\,nm). A free pupil map on top changes nothing within the
+spread over seeds.
+
+\emph{Scenario B.} The refined Zernike model leaves a likelihood deficit of 2.7 nats per emitter, a y error
+that grows by $45\pm1$\,nm over the z range, a z-scale error of $19\pm2$\,nm and a photon count that is 15\,\%
+low. Free knots on top remove most of the deficit (0.22) and leave the y tilt ($43\pm1$\,nm), the z tilt and the
+photon count where they were. This is the prediction of section~\ref{sec:gauge}: the three quantities that
+blinking data do not determine stay at the values of the starting model. The free pupil map removes the deficit
+(0.05), brings y and z precision to those of the true PSF, and reduces the y tilt to $8\pm5$\,nm on the movie
+patches and $18\pm1$\,nm on clean patches; the photon count stays 9--10\,\% low. So the pupil physics removes
+most of the z-dependent error but not all of it. Why the residual is larger on clean patches than on movie
+patches was not investigated.
+
+\emph{Shared spline.} A single free-knot spline fitted to beads and movie together fits the movie images
+(deficit 0.2--0.3) but keeps the geometry of the bead stack: z offset 65\,nm, z-scale error of 75--107\,nm over
+the range, photon counts 27--38\,\% low. A model-free spline is therefore not a usable in-situ PSF on its own
+when the bead PSF and the sample PSF differ.
+
+The movie gives few emitters at the top of the z range: the detection finds 57--67\,\% of the on-events below
+500\,nm, 17\,\% at 600--700\,nm and 4\,\% at 700--800\,nm (Fig.~\ref{fig:zhist}), and the patches come from 700
+sites, so they are not 11{,}600 independent emitters.}
+
+\newcommand{\pitfalltext}{%
+The spline stores the PSF on a support that allows emitter offsets up to $x_\text{max}$ from the patch centre,
+and the localizer clamps the offset at that limit. In the first version of this study $x_\text{max}$ was
+1.5 pixels. The patches are centred on the detection peak, and for a defocused, aberrated spot the peak is not
+at the emitter: here it moves away by 1.2 pixels on average at 600--700\,nm height and by more than 3 pixels for
+some spots. About 3\,\% of the patches then had the emitter beyond the limit, all at large z and on the same
+side. The localizer could not reach them, and a flexible PSF model absorbed the difference: the free pupil map
+showed a y tilt of 28--38\,nm in scenario A, where the Zernike start was already correct. The 17-term Zernike
+model was too stiff to follow and stayed correct, which hid the problem. Controls located it: the same emitters
+cropped at their true position gave no tilt, isolated emitters cropped at their detection peak gave 58\,nm, and
+with $x_\text{max}=3$ pixels (all results above) the tilt is $1\pm3$\,nm. The independent review found the clamp
+as the mechanism. The fraction of fitted emitters at the limit is now reported for every fit (below 0.1\,\%
+here). Any localizer with a bounded offset has this failure mode when it is used inside a PSF estimation.}
+
+\newcommand{\patterntext}{%
+A lateral shift of the PSF with z is invisible in ordinary blinking data (section~\ref{sec:gauge}). A second,
+PSF-independent measurement of the lateral position removes that freedom. We simulated emitters seen in 6
+frames under a sinusoidal illumination pattern (2 orientations, 3 phases, pitch 220\,nm, modulation 0.9;
+12{,}000 photons in total, 3000 emitters, clean patches); the emitter position is shared by the PSF term and the
+pattern term of the likelihood. Table~\ref{tab:pattern}: with the pattern, the free pupil map in scenario B has
+mean errors within $\pm1$\,nm in y and $\pm3$\,nm in z over the whole range, against a y error up to 14\,nm from
+the same frames without pattern. Free knots lose their y error (44 to 2\,nm) but keep a z error of $-12$ to
+$+21$\,nm: a lateral pattern says nothing about the labelling of the z axis.
+
+This is a best case. The pattern (pitch, phases, modulation, registration to the camera) is taken as exactly
+known, whereas in an experiment it is estimated from the same localizations; the emitters have three times the
+photons of the movie; and the fit has to start from a PSF that is already roughly right (it first refines the
+Zernikes on the summed frames), because from the bead PSF emitters lock onto the wrong fringe.}
+
+\newcommand{\limittext}{%
+\begin{itemize}\setlength\itemsep{0pt}
+\item Simulation only. Data and fit share the vectorial model, NA, refractive indices, wavelength, dipole model
+and Poisson noise; only the pupil sampling differs. A check by the reviewer with a sample index of 1.35 instead
+of the 1.33 assumed by the fit gave a deficit of 0.10 nats and a z bias of $-22$ to $-5$\,nm for the Zernike
+model: the optical constants have to be fitted or known.
+\item Three seeds; the aberration change between beads and sample and the content of scenario B are single
+arbitrary choices.
+\item The speed comparison is between two routes in one code base on one GPU. No comparison with uiPSF or the
+code of Droste et al.\ on the same data.
+\item Field-constant PSF, uniform background, $15\times15$ patches, isolated spots only.
+\item The regularization of the free-knot fits was chosen by looking at the test likelihood of scenario A.
+\item The pattern experiment assumes a perfectly known pattern.
+\item The settings where the speed matters most (field-dependent or time-dependent PSFs, very large data sets)
+are not tested.
+\end{itemize}}

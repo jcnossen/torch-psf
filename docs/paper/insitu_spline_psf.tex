@@ -147,6 +147,9 @@ and from nothing else); rms errors; \emph{tilt}, the change of the mean error ov
 straight-line fit of error against true height (for z this is the error of the z scale); and the ratio of
 estimated to true photon count.
 
+\begin{figure}[t]\centering\includegraphics[width=0.45\linewidth]{fig_zhist.pdf}
+\caption{On-events of the movie and detected patches against emitter height (scenario A, mean of 3 seeds).}\label{fig:zhist}\end{figure}
+
 Simplifications: Poisson noise only, point-like beads, PSF constant over the field, uniform background, and NA,
 refractive indices and wavelength known to the fit.
 
@@ -154,7 +157,7 @@ refractive indices and wavelength known to the fit.
 
 \subsection{Speed}
 
-\begin{table}[t]\centering\small\input{tab_speed.tex}
+\begin{table}[t]\centering\small\resizebox{\linewidth}{!}{\input{tab_speed.tex}}
 \caption{Cost of one gradient with respect to the Zernike coefficients (\gpu, \nbench{} emitters measured,
 $10^6$ extrapolated linearly). ``Model error'': relative L2 difference of the vectorial model at that setting
 from a 256/7 reference. ``Localize'': three Newton steps per emitter on the spline, paid by both routes.
@@ -181,8 +184,8 @@ PyTorch autograd, and the pupil model is a matrix Fourier transform in single pr
 \subsection{Accuracy}
 
 \begin{table}[p]\centering\small
-\textbf{Scenario A} (pupil is a Zernike series)\\[2pt]\input{tab_accA.tex}\\[10pt]
-\textbf{Scenario B} (pupil has structure outside the Zernike series)\\[2pt]\input{tab_accB.tex}
+\textbf{Scenario A} (pupil is a Zernike series)\\[2pt]\resizebox{\linewidth}{!}{\input{tab_accA.tex}}\\[10pt]
+\textbf{Scenario B} (pupil has structure outside the Zernike series)\\[2pt]\resizebox{\linewidth}{!}{\input{tab_accB.tex}}
 \caption{PSF estimates scored on the test emitters, mean $\pm$ sd over \nseeds{} seeds.}\label{tab:acc}\end{table}
 
 \begin{figure}[t]\centering\includegraphics[width=0.9\linewidth]{fig_bias.pdf}
@@ -197,7 +200,7 @@ sd over seeds.}\label{fig:bias}\end{figure}
 
 \subsection{An illumination pattern as a second position ruler}
 
-\begin{table}[t]\centering\small\input{tab_pattern.tex}
+\begin{table}[t]\centering\small\resizebox{\linewidth}{!}{\input{tab_pattern.tex}}
 \caption{PSF estimated from emitters seen in 6 frames under a shifting sinusoidal illumination pattern (known
 exactly), and from the same frames without pattern. Ranges: smallest and largest mean error over 7 height bins
 (nm). One seed.}\label{tab:pattern}\end{table}
@@ -242,7 +245,6 @@ functions, Nat. Methods 15, 367 (2018).
 \bibitem{hauser} F. Hauser and J. Jacak, lookup-table based 3D localization (2021), PMC8407837.
 \bibitem{vectorial} S. Stallinga and B. Rieger, Accuracy of the Gaussian point spread function model in 2D
 localization microscopy, Opt. Express 18, 24461 (2010).
-\bibitem{siemons} M. Siemons et al., Opt. Express 30 (2022), doi:10.1364/OE.461750.
 \end{thebibliography}
 References are not yet checked against the published versions (titles of \cite{vispr,droste,hauser} are
 descriptive placeholders).

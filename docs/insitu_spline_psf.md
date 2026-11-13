@@ -5,6 +5,14 @@ Code: `torch_convspline/knotpsf.py`, `torch_convspline/vectorial.py`, `study/ins
 Reproduce: `python study/insitu/run_study.py`, `bench_speed.py`, `bench_speed2.py`, `make_figs.py`
 (`bench_speed*.py` read `out_dev_A.pt`, written by `check_fit.py A`).
 
+> **Superseded (2026-11-13, evening).** An independent review ([CRITIC_INSITU_1.md](CRITIC_INSITU_1.md)) found that
+> the position tilt of the free pupil fit in sections 3.3-3.4 was caused by a +-1.5 px limit on the fitted offset in
+> `KnotPSF`, not by the detection step as such, and that the speed table mixed gradient-only numbers with an
+> unfair model setting. Everything was rerun with the limit at 3 px, one scoring rule, a finer simulation grid than
+> the fitted model, and 3 seeds (`run_all.py`, `bench_speed3.py`, results in `study/insitu/out/server/`).
+> **The current numbers and text are in [paper/insitu_spline_psf.pdf](paper/insitu_spline_psf.pdf).**
+> The numbers below are the first version and are kept only as a record.
+
 ## Summary
 
 1. **Speed (the main claim).** The likelihood gradient with respect to the Zernike coefficients can be collected

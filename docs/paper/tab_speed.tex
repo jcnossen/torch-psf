@@ -1,0 +1,7 @@
+\begin{tabular}{lrrrrrrrr}\toprule
+pupil grid, & model & \multicolumn{3}{c}{per emitter ($\mu$s)} & fixed & break- & \multicolumn{2}{c}{speed-up at $10^4$ / $10^5$ / $10^6$ emitters}\\
+oversampling & error & vectorial & spline & localize & (s) & even & gradient & whole iteration\\ \midrule
+64, 3 & 0.39\,\% & 10 & 2.3 & 2.5 & 0.006 & 874 & 3.3 / 4.0 / 4 & 2.5 / 2.5 / 2.5\\
+128, 4 & 0.15\,\% & 23 & 2.3 & 2.5 & 0.007 & 323 & 7.6 / 9.6 / 10 & 5.0 / 5.2 / 5.3\\
+256, 6 & 0.02\,\% & 118 & 2.4 & 2.5 & 0.020 & 171 & 27.1 / 45.8 / 49 & 18.5 / 23.8 / 24.5\\
+\bottomrule\end{tabular}
