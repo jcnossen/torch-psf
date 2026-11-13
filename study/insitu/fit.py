@@ -178,6 +178,52 @@ def fit_vec_insitu(spl, d, zc0, iters=80, lr=2e-3, route='K', loc_iters=3, log=N
     return zc, th
 
 
+def fit_pupil_insitu(spl, d, zc0, iters=200, lr_z=1e-3, lr_p=2e-3, lr_a=1e-2, lam=0.0, th=None, log=None):
+    """Free pupil from SMLM patches through the knot route: the Zernikes (Noll 5-21) plus a pixel map of pupil phase
+    (waves) and of log pupil amplitude. The physics of the pupil model still ties lateral shift, z scale and brightness
+    to the PSF shape. Piston, tilt and defocus are projected out of the phase map (global shifts of all emitters) and
+    the mean out of the log amplitude (global brightness). lam: roughness penalty on both maps."""
+    from torch_convspline.vectorial import zernike
+    big = C.model_vec(spl.Pl, zc0)
+    mask = big.mask.bool()
+    low = torch.stack([zernike(j, big.rho.clamp(max=1), big.phi)[mask] for j in (1, 2, 3, 4)], 1)     # [npix, 4]
+    Q, _ = torch.linalg.qr(low)
+    prm = dict(zcoef=zc0.clone().to(C.DEV), phase=torch.zeros_like(big.pupil_phase), la=torch.zeros_like(big.pupil_phase))
+    lr = dict(zcoef=lr_z, phase=lr_p, la=lr_a)
+    m = {k: torch.zeros_like(v) for k, v in prm.items()}; v2 = {k: torch.zeros_like(v) for k, v in prm.items()}
+
+    def lap(x):
+        return (4 * x[1:-1, 1:-1] - x[2:, 1:-1] - x[:-2, 1:-1] - x[1:-1, 2:] - x[1:-1, :-2]) * mask[1:-1, 1:-1]
+
+    def set_model():
+        with torch.no_grad():
+            big.zcoef.copy_(prm['zcoef']); big.pupil_phase.copy_(prm['phase'] * mask); big.pupil_amp.copy_(torch.exp(prm['la']))
+
+    t0 = time.time()
+    for it in range(iters):
+        set_model()
+        spl.knots = spl.stack_from_vectorial(big, C.insitu_pos)
+        th, nll = localize(spl, d, th, iters=30 if th is None else 3)
+        gK, tot = knot_grad(spl, d, th)
+        g = spl.vjp_vectorial(big, C.insitu_pos, gK, names=('zcoef', 'pupil_phase', 'pupil_amp'))
+        gr = dict(zcoef=g['zcoef'], phase=g['pupil_phase'] * mask, la=g['pupil_amp'] * big.pupil_amp * mask)
+        if lam > 0:
+            for k in ('phase', 'la'):
+                x = prm[k].clone().requires_grad_(True)
+                gr[k] = gr[k] + torch.autograd.grad(lam * (lap(x) ** 2).sum(), x)[0]
+        if log is not None:
+            log(it, tot, time.time() - t0, prm)
+        for k in prm:
+            m[k] = 0.9 * m[k] + 0.1 * gr[k]; v2[k] = 0.999 * v2[k] + 0.001 * gr[k] ** 2
+            prm[k] = prm[k] - lr[k] * (m[k] / (1 - 0.9 ** (it + 1))) / ((v2[k] / (1 - 0.999 ** (it + 1))).sqrt() + 1e-12)
+        ph = prm['phase'][mask]
+        prm['phase'][mask] = ph - Q @ (Q.T @ ph)
+        prm['la'][mask] = prm['la'][mask] - prm['la'][mask].mean()
+        prm['phase'] = prm['phase'] * mask; prm['la'] = prm['la'] * mask
+    set_model()
+    return spl.stack_from_vectorial(big, C.insitu_pos), prm, th
+
+
 # ------------------------------------------------------------------------------------------- evaluation
 @torch.no_grad()
 def evaluate(spl, knots, test, nll_true=None):

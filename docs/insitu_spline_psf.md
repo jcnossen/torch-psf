@@ -21,7 +21,10 @@ Reproduce: `python study/insitu/run_study.py`, `bench_speed.py`, `bench_speed2.p
    to 30 nm across the z range. Free spline knots on top of the Zernike model remove the likelihood deficit
    (0.25 nats) but **not** the position error: a lateral shift of the PSF that depends on z cannot be seen in
    blinking data. This is a property of the data, not of the optimizer (section 2.4).
-4. **A spline shared between beads and SMLM data does not work** when the two PSFs differ. It fits the SMLM
+4. **A free pupil map (phase and amplitude pixels) through the same route** fits the images best (0.12 nats)
+   but has the same problem in a milder form: a y shift proportional to z (up to 30-40 nm over 700 nm) that the
+   data do not pin down. It appears even when the Zernike start was already correct.
+5. **A spline shared between beads and SMLM data does not work** when the two PSFs differ. It fits the SMLM
    images well but keeps the z axis and lateral shifts of the bead stack (100 nm z offset here).
 
 ## 1. Simulation
@@ -175,10 +178,43 @@ Mean error against true emitter height.
   section 2.4 predicts. The failure rate goes up (7 % -> 14 %); cause not investigated.
 * The shared spline keeps the bead geometry: 100 nm z offset, z scale 0.9, x shift up to 45 nm.
 
+### 3.3 Free pupil map through the knot route
+
+`study/insitu/run_pupil.py`, `diag_pupil.py`. Parameters: the 17 Zernikes plus a pixel map of pupil phase and of
+log amplitude on the 64 x 64 pupil grid (about 3,200 pixels each inside the aperture). Start: the Zernike in-situ
+fit. 200 Adam iterations through the knot route, 0.35 s per iteration with 11,000 emitters. Piston, tilt and
+defocus are projected out of the phase map.
+
+| | likelihood deficit | z rms (nm) | mean y error over the z range (nm) | mean z error over the z range (nm) |
+|---|---|---|---|---|
+| A, Zernike | 0.01 | 21.5 | -1 .. +4 | -2 .. +3 |
+| A, free phase + amplitude | 0.06 | 21.2 | -2 .. +29 | -5 .. +3 |
+| A, free phase only | 0.04 | 21.7 | -2 .. +23 | +2 .. +6 |
+| B, Zernike | 2.80 | 24.3 | -4 .. +32 | -8 .. +15 |
+| B, free phase + amplitude | 0.12 | 21.6 | -6 .. +41 | -4 .. +11 |
+| B, free phase only | 0.15 | 22.6 | -3 .. +39 | +2 .. +14 |
+| B, free knots (3.2) | 0.25 | 25.7 | -5 .. +37 | -8 .. +13 |
+
+* The free pupil gives the best image fit in scenario B (deficit 0.12) and z precision equal to the true PSF.
+* It does **not** remove the y error that grows with z. In scenario A, where the Zernike start is already
+  correct, freeing the pupil creates such an error (up to 29 nm; 23 nm with the amplitude held fixed).
+* The recovered pupil in B is not the true one: phase differs by 0.06 waves rms (as large as the high-order
+  screen itself), log-amplitude correlation with the truth is 0.21. A different pupil explains the images
+  equally well.
+* 700 iterations instead of 200 change nothing. A roughness penalty on the maps strong enough to matter brings
+  back the Zernike result (deficit 1.9-2.5) with the same y error.
+* For the pupil fits the "failures" of the criterion in 3.2 (5-16 %) are almost all y errors above half a pixel
+  at the top of the z range, i.e. this tilt, not wrong z branches (wrong z: 0.1 %).
+
+So a lateral shift proportional to z ("tilt of the z axis") is weakly determined by blinking data even with a
+pupil model, once the pupil is free: odd phase terms in the pupil trade against a z-dependent emitter shift. The
+17-term Zernike series is rigid enough to exclude it when it contains the truth. Only y is affected here,
+probably because of the astigmatism orientation; not investigated.
+
 ## 4. When would a Zernike vectorial model not suffice?
 
 From the simulation: a free-form in-situ PSF pays off in the image fit, but the position accuracy stays limited
-by the three freedoms of section 2.4. A free-form model needs something extra to fix them: a second detection
+by the three freedoms of section 2.4, and the free pupil of section 3.3 by the first of them. A free-form model needs something extra to fix them: a second detection
 plane (biplane), a physical model for the low-order part plus a penalty that keeps the free part from carrying a
 lateral shift, or a known structure in the sample.
 
@@ -188,9 +224,8 @@ helix (uiPSF reports its Zernike model as blurry there), light that misses the m
 higher-order aberrations (named by Droste et al. as their residual mismatch), residual blur (uiPSF adds a
 Gaussian blur term), fixed dipoles, bead size, 4Pi and light-sheet geometries.
 
-Note that route 2.3 is not limited to Zernikes: $\phi$ can be a free pixel map of the pupil phase and amplitude
-(about 10^4 parameters, as in uiPSF's in-situ pupil mode). That model keeps the physics that fixes the three
-freedoms, represents scenario B exactly, and costs the same per iteration. Not tested here.
+Route 2.3 is not limited to Zernikes: $\phi$ can be a free pixel map of the pupil. Section 3.3 tests this. It
+fits the images best of all, but it does not fix the positions either.
 
 ## 5. Relation to other in-situ methods
 
@@ -214,7 +249,8 @@ aberrations, a free pupil map, per-tile or time-resolved PSFs. None of these is 
 
 * One seed per scenario; no error bars on any number above.
 * No comparison against uiPSF or Vectorfit on the same data.
-* Free pupil map, field dependence, biplane: not tested.
+* Field dependence, biplane, or a tie between the tilt of the z axis and the bead stack: not tested.
+* Why the free pupil tilts only in y, and whether more emitters or a wider z range remove it: not investigated.
 * The regularization weights of the free-knot fits were chosen by looking at the test-set likelihood of scenario
   A, with a handful of settings; they are not tuned and not validated on held-out data.
 * Real data: none.

@@ -108,8 +108,8 @@ class KnotPSF:
 
     def vjp_vectorial(self, big, pos_fn, gK, names=('zcoef',), chunk=4):
         """(d knots / d theta)^T gK for the named vectorial parameters: one build + backward, chunked over z."""
-        base = {k: v.detach() for k, v in big.named_parameters()}
-        out = {k: torch.zeros_like(base[k]) for k in names}
+        base = {k: v.detach() for k, v in list(big.named_parameters()) + list(big.named_buffers())}   # buffers too:
+        out = {k: torch.zeros_like(base[k]) for k in names}                # free pupil maps are buffers
         for z in range(0, self.nz, chunk):
             z1 = min(z + chunk, self.nz)
             prm = dict(base)
