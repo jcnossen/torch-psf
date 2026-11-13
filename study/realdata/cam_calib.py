@@ -13,7 +13,8 @@ import sys, json
 import numpy as np, tifffile
 
 out, files = sys.argv[1], sys.argv[2:]
-mm = [tifffile.memmap(f) for f in files]
+from rdcommon import open_stack
+mm = [open_stack(f) for f in files]
 T = [m.shape[0] for m in mm]
 cum = np.cumsum([0] + T)
 TT = cum[-1]
@@ -64,5 +65,22 @@ for name, mx in (('median', m), ('trimmed_mean', tm)):
     print('  bins (mean, var, line residual %):', [(round(a), round(b), round(100 * (b - icpt - slope * a) / b, 2)) for a, b in zip(bc, bv)][::4])
 # the median of the MAD-based variance is biased low for a skewed (gamma-like) distribution; check the ratio of the
 # MAD-based variance to the plain variance of the differences on the cleanest pixels (lowest 20 % of variance)
+# per-pixel temporal regression: each pixel's own (mean, var) over the blocks (the background changes in time), which
+# removes pixel-to-pixel differences in content (structure with many blinking emitters); robust medians over pixels
+import os
+skip = int(os.environ.get('CAL_SKIP', '0'))        # blocks starting before this frame are left out of the temporal fit
+Mb = np.stack([r[1] for r in rows if r[0] >= skip]); Vb = np.stack([r[3] for r in rows if r[0] >= skip])   # [blocks, px]
+res['temporal_skip_frames'] = skip
+mc = Mb - Mb.mean(0); vc = Vb - Vb.mean(0)
+rng = Mb.max(0) - Mb.min(0)
+sl = (mc * vc).sum(0) / (mc ** 2).sum(0).clip(1e-9)
+icp = Vb.mean(0) - sl * Mb.mean(0)
+for lim in (20, 50, 100, 200):
+    s_ = rng > lim
+    if s_.sum() > 100:
+        res[f'per_pixel_temporal_range>{lim}'] = dict(n_pixels=int(s_.sum()), slope_median=float(np.median(sl[s_])),
+                                                     g_ADU_per_e=float(np.median(sl[s_]) / 2),
+                                                     offset_ADU=float(np.median(-icp[s_] / sl[s_])))
+        print(f'per-pixel temporal fits (mean range > {lim} ADU, {int(s_.sum())} px):', res[f'per_pixel_temporal_range>{lim}'])
 res['n_points'] = int(len(m)); res['blocks'] = [int(s) for s in starts]; res['block_len'] = B
 json.dump(res, open(out, 'w'), indent=1)

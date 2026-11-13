@@ -123,3 +123,48 @@ def crlb_w(spl, th, w):
         F = torch.einsum('nap,nbp->nab', J * (w.flatten(1) / mu.flatten(1))[:, None], J)
         F = F + 1e-9 * torch.eye(5, device=F.device)
         return torch.sqrt(torch.diagonal(torch.linalg.inv(F.double()), dim1=1, dim2=2).clamp_min(0)).float()
+
+
+class PageStack:
+    """Frames of a TIFF whose pages are uncompressed but not equally spaced (MicroManager OME stacks with per-frame
+    metadata): one memmap of the file plus the data offset of every page."""
+
+    def __init__(self, f):
+        import tifffile, os
+        self.os = os
+        cache = f + '.offsets.npy'
+        cache = os.path.join('/mnt/data/SMLM_challenge/_offsets', os.path.basename(cache))
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with tifffile.TiffFile(f) as t:
+            p0 = t.pages[0]
+            self.H, self.W = p0.shape
+            self.dtype = np.dtype(t.byteorder + p0.dtype.char)
+            if os.path.exists(cache):
+                self.offs = np.load(cache)
+            else:
+                t.pages.cache = False
+                offs = []
+                for i in range(len(t.pages)):
+                    p = t.pages[i]
+                    assert len(p.dataoffsets) == 1 and p.is_contiguous
+                    offs.append(p.dataoffsets[0])
+                self.offs = np.array(offs, dtype=np.int64)
+                np.save(cache, self.offs)
+        self.mm = np.memmap(f, dtype=np.uint8, mode="r")      # byte map: page offsets can be odd
+        self.shape = (len(self.offs), self.H, self.W)
+        self.n = self.H * self.W
+
+    def __getitem__(self, s):
+        if isinstance(s, int):
+            o = int(self.offs[s])
+            return np.array(self.mm[o:o + self.n * self.dtype.itemsize]).view(self.dtype).reshape(self.H, self.W)
+        idx = range(*s.indices(self.shape[0]))
+        return np.stack([self[i] for i in idx]) if len(idx) else np.zeros((0, self.H, self.W), self.dtype)
+
+
+def open_stack(f):
+    import tifffile
+    try:
+        return tifffile.memmap(f)
+    except ValueError:
+        return PageStack(f)

@@ -1,0 +1,8 @@
+prep_index_weights     0.083 us/spot
+fwd_window_read        0.059 us/spot
+fwd_convolution        0.027 us/spot
+fwd_total              0.140 us/spot
+fwdbwd_convolution     0.243 us/spot
+fwdbwd_window_read     0.119 us/spot
+fwdbwd_total           0.378 us/spot
+gpu NVIDIA GeForce RTX 3090

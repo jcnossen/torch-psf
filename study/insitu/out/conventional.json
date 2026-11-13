@@ -4,10 +4,10 @@
  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
  "knots_MB": 0.31,
  "conv": {
-  "fit_us": 84.12075996398926,
-  "fit_us_with_transfer": 84.49440240859985,
-  "eval_us": 1.1338794231414795,
-  "eval_deriv_us": 1.7164158821105957,
+  "fit_us": 38.688875999941956,
+  "fit_us_with_transfer": 38.8347034999606,
+  "eval_us": 0.513993999993545,
+  "eval_deriv_us": 0.7495804999780376,
   "x_rms": 10.313079833984375,
   "y_rms": 15.53054428100586,
   "z_rms": 22.266542434692383,
@@ -22,32 +22,35 @@
   8.406750566791743e-06,
   2.6032390451291576e-05
  ],
- "knot_grad_rel_diff": 1.8220131323687383e-06,
+ "knot_grad_rel_diff": 1.8702731949815643e-06,
  "torch_us": {
-  "conv_eval": 1.2496399879455566,
-  "coef_eval": 1.7368614673614502,
-  "conv_eval_deriv": 1.8301033973693848,
-  "coef_eval_deriv": 2.657710313796997,
-  "conv_knot_grad": 3.1239771842956543,
-  "coef_knot_grad": 3.74531626701355,
-  "coef_table_grad": 3.585219383239746
+  "conv_eval": 0.58761449996382,
+  "coef_eval": 0.75232249997498,
+  "conv_eval_deriv": 0.8439925000129733,
+  "coef_eval_deriv": 1.2187839999387506,
+  "conv_knot_grad": 1.3152424999861978,
+  "coef_knot_grad": 1.577508000045782,
+  "coef_table_grad": 1.4786420000018552,
+  "rebuilt_eval": 0.7642394999857061,
+  "rebuilt_eval_deriv": 1.2626175000332296
  },
- "conventional_model_err_L1": 0.008689248003065586,
- "conv_model_err_L1": 0.00041009136475622654,
- "conventional_iterations": [
-  5,
-  23.1235,
-  30
- ],
- "conventional": {
-  "fit_us": 18.44397783279419,
-  "eval_us": 0.8535599708557129,
-  "eval_deriv_us": 3.2777929306030273,
-  "x_rms": 10.30193042755127,
-  "y_rms": 15.558768272399902,
-  "z_rms": 27.15199089050293,
-  "z_bias": -0.6500686407089233,
-  "wrong_z": 0.0010000000000000009,
-  "I_ratio": 1.0039560794830322
+ "rebuild_ms": 0.3040000010514632,
+ "peak_MB": {
+  "conv_eval": 246.142976,
+  "rebuilt_eval": 313.197056,
+  "table_eval": 297.362944,
+  "conv_grad": 334.153728,
+  "rebuilt_grad": 367.469056
+ },
+ "Mspots_per_s": {
+  "conv_eval": 1.7017959905032483,
+  "coef_eval": 1.329217190810134,
+  "conv_eval_deriv": 1.1848446520373446,
+  "coef_eval_deriv": 0.8204899309888007,
+  "conv_knot_grad": 0.7603160633955289,
+  "coef_knot_grad": 0.6339112067710455,
+  "coef_table_grad": 0.6762962231552637,
+  "rebuilt_eval": 1.3084903358419757,
+  "rebuilt_eval_deriv": 0.7920054964973019
  }
 }

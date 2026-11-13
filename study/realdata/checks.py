@@ -14,6 +14,7 @@ ap.add_argument('--windows', type=int, default=10000)
 ap.add_argument('--npc', action='store_true')
 ap.add_argument('--zlim', type=float, default=800.0)
 ap.add_argument('--tag', default='')
+ap.add_argument('--zoom', default='')          # x0,y0 of the 20 x 20 px zoom (default: densest region of window 1)
 A = ap.parse_args()
 R = np.loadtxt(A.csv, delimiter=',', skiprows=1)
 cols = open(A.csv).readline().strip().split(',')
@@ -119,6 +120,8 @@ wsel = fs < f0 + A.windows
 dens = render(xs[wsel], ys[wsel], 0, W, 0, H, 1.0, blur=5)
 iy, ix = np.unravel_index(np.argmax(dens), dens.shape)
 x0 = float(np.clip(ix - 10, 0, W - 20)); y0 = float(np.clip(iy - 10, 0, H - 20))
+if A.zoom:
+    x0, y0 = [float(v) for v in A.zoom.split(',')]
 for tag, ws in (('win1', wsel), ('all', np.ones_like(wsel))):
     img = render(xs[ws], ys[ws], x0, x0 + 20, y0, y0 + 20, 0.1, blur=0.8)
     fig = plt.figure(figsize=(8, 8))

@@ -1,15 +1,24 @@
 """Step 1 of the bead calibration: find bead candidates in the z-stack, Gaussian widths per plane, select good beads.
-usage: python beads_find.py stack.tif zpos.json outdir [roi_x0 roi_y0 roi_w roi_h]
+usage: python beads_find.py stack.tif zpos.json outdir [--roi x0,y0,w,h] [--minamp A] [--zwin 0.6]
 zpos.json: list of the stage positions (um) of the planes (from the MicroManager labels), or 'meta' to read them."""
-import sys, json
+import sys, json, functools
+print = functools.partial(print, flush=True)
 import numpy as np, tifffile
 from scipy.ndimage import gaussian_filter, maximum_filter
 sys.path.insert(0, '.')
 from rdcommon import fit_gauss
 
-f, zsrc, outdir = sys.argv[1:4]
-roi = [int(a) for a in sys.argv[4:8]] if len(sys.argv) > 7 else None
-PB = 23
+import argparse
+ap = argparse.ArgumentParser()
+ap.add_argument('stack'); ap.add_argument('zsrc'); ap.add_argument('outdir')
+ap.add_argument('--roi', default='')                 # x0,y0,w,h of the movie on the camera chip
+ap.add_argument('--minamp', type=float, default=0)   # drop faint candidates (DoG amplitude)
+ap.add_argument('--zwin', type=float, default=0.6)   # half range of the width-curve comparison (um)
+ap.add_argument('--PB', type=int, default=23)
+a_ = ap.parse_args()
+f, zsrc, outdir = a_.stack, a_.zsrc, a_.outdir
+roi = [int(v) for v in a_.roi.split(',')] if a_.roi else None
+PB = a_.PB
 hb = PB // 2
 with tifffile.TiffFile(f) as t:
     st = t.asarray().astype(np.float64)
@@ -25,7 +34,7 @@ dog = np.stack([gaussian_filter(p, 1.5) - gaussian_filter(p, 6) for p in st])
 proj = dog.max(0)
 noise = 1.4826 * np.median(np.abs(proj - np.median(proj)))
 mx = maximum_filter(proj, 9)
-pk = (proj == mx) & (proj > 15 * noise)
+pk = (proj == mx) & (proj > max(15 * noise, a_.minamp))
 ys, xs = np.nonzero(pk)
 amp = proj[ys, xs]
 print(f'background per plane median {np.median(bgp):.1f} ADU (range {bgp.min():.1f}-{bgp.max():.1f}); DoG noise {noise:.2f}; candidates {len(xs)}')
@@ -54,7 +63,8 @@ for c in keep:
     # crossing sx = sy nearest the plane of minimal sx + sy
     k0 = int(np.argmin(sx + sy))
     zc = np.nan
-    for k in range(max(k0 - 8, 0), min(k0 + 8, nz - 1)):
+    nw = int(round(0.4 / abs(zs[1] - zs[0])))
+    for k in range(max(k0 - nw, 0), min(k0 + nw, nz - 1)):
         if dif[k] * dif[k + 1] <= 0 and dif[k] != dif[k + 1]:
             zc = zs[k] + (zs[k + 1] - zs[k]) * dif[k] / (dif[k] - dif[k + 1])
             break
@@ -65,7 +75,7 @@ for c in keep:
 zc = np.array([c['zc'] for c in rows])
 ok = np.isfinite(zc)
 # shape consistency: width curves aligned on zc, compared with the median curve over |z - zc| < 0.6 um
-zg = np.arange(-0.6, 0.6001, 0.05)
+zg = np.arange(-a_.zwin, a_.zwin + 1e-4, 0.05)
 curves = np.full((len(rows), len(zg), 2), np.nan)
 for i, c in enumerate(rows):
     if not ok[i]:

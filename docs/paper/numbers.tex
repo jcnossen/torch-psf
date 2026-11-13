@@ -1,24 +1,25 @@
 % numbers and result paragraphs; sources: study/insitu/out/server/*.json, docs/CRITIC_INSITU_1.md
 \newcommand{\nknotimg}{124}
 \newcommand{\splineerr}{0.19}
-\newcommand{\gradspeedA}{10}
-\newcommand{\iterspeedA}{5}
-\newcommand{\breakevenA}{300}
+\newcommand{\gradspeedA}{40}
+\newcommand{\iterspeedA}{6}
+\newcommand{\breakevenA}{270}
 \newcommand{\nseeds}{3}
 \newcommand{\gpu}{RTX 3090}
 \newcommand{\nbench}{16{,}000}
 
 \newcommand{\speedtext}{%
-At that setting the pupil-model gradient runs at 43{,}000 emitters per second and the spline gradient at
-430{,}000; the fixed cost of the
-knot route (one build of the knots that keeps the computation graph, and one backward pass) is 7\,ms. The
-gradient is cheaper from about 320 emitters on, 7.6 times at $10^4$ and 10 times at $10^5$ emitters and above.
-Re-localizing the emitters runs at 400{,}000 emitters per second in both routes, so a whole iteration is 5.0 to
-5.3 times cheaper. With the coarser 64/3 setting, whose error (0.39\,\%) is twice that of the spline, the
-numbers are 4 (gradient) and 2.5 (iteration); a complete fit of 16{,}000 emitters, 40 iterations, took 5.3\,s
-through the knots and 8.9\,s per emitter, and both ended at the same Zernike error (Fig.~\ref{fig:speed},
-right). The 256/6 setting gives a factor 46 for the gradient at $10^5$ emitters, but that pupil model is ten
-times more accurate than the spline it is compared with, so this row is not a like-for-like comparison.}
+At that setting the pupil-model gradient runs at 42{,}000 emitters per second and the spline gradient at
+1.9 million; the fixed cost of the knot route (one build of the knots that keeps the computation graph, and
+one backward pass) is 6\,ms. The gradient is cheaper from about 270 emitters on, 21 times at $10^4$ and 40
+times at $10^5$ emitters. Re-localizing the emitters (three Newton steps) runs at 230{,}000 to 370{,}000
+emitters per second in both routes and is now the slowest step of an iteration, so a whole iteration is 5.6 to
+5.9 times cheaper; a faster localizer would raise this towards the gradient factor. With the coarser 64/3
+setting, whose error (0.39\,\%) is twice that of the spline, the numbers are 15 (gradient) and 3.3 (iteration);
+a complete fit of 16{,}000 emitters, 40 iterations, took 5.0\,s through the knots and 10.2\,s per emitter, and
+both ended at the same Zernike error (Fig.~\ref{fig:speed}, right). The 256/6 setting gives a factor 160 for
+the gradient at $10^5$ emitters, but that pupil model is ten times more accurate than the spline it is
+compared with, so this row is not a like-for-like comparison.}
 
 \newcommand{\gradtext}{%
 At the starting point of a fit (Zernikes from the bead stack, or the truth plus 0.01 waves) the two gradients

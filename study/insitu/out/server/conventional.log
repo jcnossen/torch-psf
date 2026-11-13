@@ -1,0 +1,88 @@
+conv spline   {'x_rms': 10.322, 'y_rms': 15.533, 'z_rms': 22.286, 'z_bias': -0.447, 'wrong_z': 0.001, 'I_ratio': 1.002}
+conv spline: fit 11.175166990142316 us/spot ( 11.479613119736314 with host transfer ), eval 0.12868307065218687 eval+deriv 0.21824341965839267
+coefficient form vs convolution form, max relative difference (value, dx, dy, dz): [0.0006171417189761996, 0.006355686578899622, 0.00544680655002594, 0.009195925667881966]
+PyTorch, eval       : convolution 0.141 us/spot, coefficient table 0.244 us/spot, ratio 1.7
+PyTorch, eval_deriv : convolution 0.244 us/spot, coefficient table 0.291 us/spot, ratio 1.2
+PyTorch, knot_grad  : convolution 0.385 us/spot, coefficient table 0.557 us/spot, ratio 1.4
+gradient on the coefficient table itself: 0.5248623294755816 us/spot; knot gradients agree to 1.8062122535411618e-06 ; memory: knots 0.31 MB, coefficients 15.834112 MB
+rebuild of the coefficient table from the knots: 0.2 ms;  peak memory per batch of 5000 spots (MB): {'conv_eval': 246.1, 'rebuilt_eval': 313.2, 'table_eval': 297.4, 'conv_grad': 334.2, 'rebuilt_grad': 367.5}
+million spots per second: {'conv_eval': 7.1, 'coef_eval': 4.1, 'conv_eval_deriv': 4.1, 'coef_eval_deriv': 3.43, 'conv_knot_grad': 2.6, 'coef_knot_grad': 1.79, 'coef_table_grad': 1.91, 'rebuilt_eval': 3.83, 'rebuilt_eval_deriv': 3.25}
+centre 7.5 rel L1 difference of expected value from the vectorial truth 0.0087
+centre 7.0 rel L1 difference of expected value from the vectorial truth 0.072
+conventional LM iterations used: min/mean/max [4, 23.21455, 30]
+conventional  {'x_rms': 10.472, 'y_rms': 16.064, 'z_rms': 27.142, 'z_bias': -0.645, 'wrong_z': 0.001, 'I_ratio': 1.004}
+conventional: fit (queue) 12.272511865012348 us/spot, eval 0.40176443522796035 eval+deriv 4.94547130423598 (all include host <-> GPU transfer)
+{
+ "iters": 30,
+ "N": 200000,
+ "gpu": "NVIDIA GeForce RTX 3090",
+ "knots_MB": 0.31,
+ "conv": {
+  "fit_us": 11.175166990142316,
+  "fit_us_with_transfer": 11.479613119736314,
+  "eval_us": 0.12868307065218687,
+  "eval_deriv_us": 0.21824341965839267,
+  "x_rms": 10.32163143157959,
+  "y_rms": 15.532663345336914,
+  "z_rms": 22.286361694335938,
+  "z_bias": -0.44657590985298157,
+  "wrong_z": 0.0006500000000000394,
+  "I_ratio": 1.0024646520614624
+ },
+ "coef_MB": 15.834112,
+ "coef_vs_conv_maxdiff": [
+  0.0006171417189761996,
+  0.006355686578899622,
+  0.00544680655002594,
+  0.009195925667881966
+ ],
+ "knot_grad_rel_diff": 1.8062122535411618e-06,
+ "torch_us": {
+  "conv_eval": 0.1408122049178928,
+  "coef_eval": 0.2438718150369823,
+  "conv_eval_deriv": 0.2441170846577734,
+  "coef_eval_deriv": 0.29113464057445526,
+  "conv_knot_grad": 0.3848926443606615,
+  "coef_knot_grad": 0.5573195149190724,
+  "coef_table_grad": 0.5248623294755816,
+  "rebuilt_eval": 0.26081210002303123,
+  "rebuilt_eval_deriv": 0.3077004652004689
+ },
+ "rebuild_ms": 0.19885413348674774,
+ "peak_MB": {
+  "conv_eval": 246.142976,
+  "rebuilt_eval": 313.197056,
+  "table_eval": 297.362944,
+  "conv_grad": 334.153728,
+  "rebuilt_grad": 367.469056
+ },
+ "Mspots_per_s": {
+  "conv_eval": 7.101657136773741,
+  "coef_eval": 4.10051485387253,
+  "conv_eval_deriv": 4.096394979490663,
+  "coef_eval_deriv": 3.4348368783145826,
+  "conv_knot_grad": 2.598127074267898,
+  "coef_knot_grad": 1.7943028608018663,
+  "coef_table_grad": 1.905261520671819,
+  "rebuilt_eval": 3.834177938491712,
+  "rebuilt_eval_deriv": 3.24991383860435
+ },
+ "conventional_model_err_L1": 0.008689248003065586,
+ "conv_model_err_L1": 0.000410091714002192,
+ "conventional_iterations": [
+  4,
+  23.21455,
+  30
+ ],
+ "conventional": {
+  "fit_us": 12.272511865012348,
+  "eval_us": 0.40176443522796035,
+  "eval_deriv_us": 4.94547130423598,
+  "x_rms": 10.471535682678223,
+  "y_rms": 16.06378936767578,
+  "z_rms": 27.142467498779297,
+  "z_bias": -0.6447330117225647,
+  "wrong_z": 0.0010000000000000009,
+  "I_ratio": 1.0039668083190918
+ }
+}

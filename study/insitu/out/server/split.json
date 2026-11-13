@@ -1,0 +1,10 @@
+{
+ "prep_index_weights": 0.08262688061222434,
+ "fwd_window_read": 0.058882959419861436,
+ "fwd_convolution": 0.026941669639199972,
+ "fwd_total": 0.13982064556330442,
+ "fwdbwd_convolution": 0.24315666989423332,
+ "fwdbwd_window_read": 0.11939384043216705,
+ "fwdbwd_total": 0.3783972002565861,
+ "gpu": "NVIDIA GeForce RTX 3090"
+}

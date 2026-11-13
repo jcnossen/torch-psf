@@ -29,7 +29,8 @@ ap.add_argument('--P', type=int, default=17)
 ap.add_argument('--xmax', type=float, default=3.0)
 ap.add_argument('--zlim', type=float, default=0.8)         # um, fit range (calibrated range of the spline)
 ap.add_argument('--thresh', type=float, default=6.0)
-ap.add_argument('--chunk', type=int, default=1000)
+ap.add_argument('--chunk', type=int, default=500)
+ap.add_argument('--spots', type=int, default=20000)    # spots per GPU batch
 ap.add_argument('--starts', default='-0.45,0,0.45')
 ap.add_argument('--iters', type=int, default=12)
 ap.add_argument('--iters2', type=int, default=20)
@@ -109,13 +110,17 @@ def gk(s):
 
 
 def blur(x, s):
+    # reflect padding: zero padding makes the frame border look like a bright edge in the DoG (false detections)
     k = gk(s)
-    x = torch.nn.functional.conv2d(x[:, None], k[None, None, :, None], padding=(len(k) // 2, 0))
-    return torch.nn.functional.conv2d(x, k[None, None, None, :], padding=(0, len(k) // 2))[:, 0]
+    r = len(k) // 2
+    x = torch.nn.functional.pad(x[:, None], (r, r, r, r), mode='reflect')
+    x = torch.nn.functional.conv2d(x, k[None, None, :, None])
+    return torch.nn.functional.conv2d(x, k[None, None, None, :])[:, 0]
 
 
 # ------------------------------------------------------------------------------------------------ movie
-mm = [tifffile.memmap(f) for f in A.movies]
+from rdcommon import open_stack
+mm = [open_stack(f) for f in A.movies]
 T = [m.shape[0] for m in mm]
 cum = np.cumsum([0] + T)
 TT, H, W = int(cum[-1]), mm[0].shape[1], mm[0].shape[2]
@@ -147,27 +152,8 @@ cols = ['frame', 'x', 'y', 'z', 'photons', 'bg', 'crlb_x', 'crlb_y', 'crlb_z', '
         'flags', 'n_neighbors', 'peak_x', 'peak_y']
 res = []
 ii = torch.arange(P, device=DEV)
-t_start = time.time()
-stats = dict(detected=0)
-for a in range(f0, f1, A.chunk):
-    b = min(a + A.chunk, f1)
-    fr = torch.from_numpy(frames(a, b)).to(DEV)
-    ph = (fr - A.offset) / A.gain                           # photoelectrons
-    dog = blur(ph, 1.5) - blur(ph, 5.0)
-    med = dog.flatten(1).median(1).values[:, None, None]
-    sig = 1.4826 * (dog - med).abs().flatten(1).median(1).values[:, None, None]
-    mx = torch.nn.functional.max_pool2d(dog[:, None], 7, 1, 3)[:, 0]
-    pk = (dog == mx) & (dog - med > A.thresh * sig)
-    pk[:, :2] = False; pk[:, -2:] = False; pk[:, :, :2] = False; pk[:, :, -2:] = False
-    t, y, x = torch.nonzero(pk, as_tuple=True)
-    n = len(t)
-    if n == 0:
-        continue
-    # neighbours: other peaks inside the patch of this one
-    cnt = torch.nn.functional.conv2d(pk[:, None].float(), torch.ones(1, 1, P, P, device=DEV), padding=h)[:, 0]
-    nnb = (cnt[t, y, x] - 1).round().int()
-    pad = torch.nn.functional.pad(ph, (h, h, h, h))
-    mpad = torch.nn.functional.pad(torch.ones_like(ph[:1]), (h, h, h, h))[0]
+
+def fit_spots(t, y, x, nnb, pad, mpad, a):
     yy = (y[:, None, None] + ii[None, :, None]).expand(-1, P, P)
     xx = (x[:, None, None] + ii[None, None, :]).expand(-1, P, P)
     d = pad[t[:, None, None], yy, xx]
@@ -205,17 +191,51 @@ for a in range(f0, f1, A.chunk):
              + ((th[:, 3] <= 1.001) | (th[:, 4] <= 1.001e-3)).int() * 16)
     X = x.float() + th[:, 0] + cx0
     Y = y.float() + th[:, 1] + cy0
-    blk = torch.stack([(t + a).float(), X, Y, th[:, 2] * 1000, th[:, 3], th[:, 4], cr[:, 0], cr[:, 1], cr[:, 2] * 1000,
-                       cr[:, 3], c2, llr, flags.float(), nnb.float(), (x + cx0).float(), (y + cy0).float()], 1)
-    res.append(blk.cpu().numpy().astype(np.float64))
+    return torch.stack([(t + a).float(), X, Y, th[:, 2] * 1000, th[:, 3], th[:, 4], cr[:, 0], cr[:, 1], cr[:, 2] * 1000,
+                        cr[:, 3], c2, llr, flags.float(), nnb.float(), (x + cx0).float(), (y + cy0).float()], 1)
+
+
+t_start = time.time()
+stats = dict(detected=0)
+fmt = ['%d', '%.4f', '%.4f', '%.2f', '%.1f', '%.3f', '%.5f', '%.5f', '%.2f', '%.1f', '%.4f', '%.4f', '%d', '%d', '%d', '%d']
+fout = open(A.out, 'w')
+fout.write(','.join(cols) + chr(10))
+nrow = 0
+for a in range(f0, f1, A.chunk):
+    b = min(a + A.chunk, f1)
+    fr = torch.from_numpy(frames(a, b)).to(DEV)
+    ph = (fr - A.offset) / A.gain                           # photoelectrons
+    dog = blur(ph, 1.5) - blur(ph, 5.0)
+    med = dog.flatten(1).median(1).values[:, None, None]
+    sig = 1.4826 * (dog - med).abs().flatten(1).median(1).values[:, None, None]
+    mx = torch.nn.functional.max_pool2d(dog[:, None], 7, 1, 3)[:, 0]
+    pk = (dog == mx) & (dog - med > A.thresh * sig)
+    pk[:, :2] = False; pk[:, -2:] = False; pk[:, :, :2] = False; pk[:, :, -2:] = False
+    t, y, x = torch.nonzero(pk, as_tuple=True)
+    n = len(t)
+    if n == 0:
+        continue
+    # neighbours: other peaks inside the patch of this one
+    cnt = torch.nn.functional.conv2d(pk[:, None].float(), torch.ones(1, 1, P, P, device=DEV), padding=h)[:, 0]
+    nnb = (cnt[t, y, x] - 1).round().int()
+    pad = torch.nn.functional.pad(ph, (h, h, h, h))
+    mpad = torch.nn.functional.pad(torch.ones_like(ph[:1]), (h, h, h, h))[0]
+    blks = []
+    for s0 in range(0, n, A.spots):                          # spots in batches (GPU memory)
+        sl = slice(s0, min(s0 + A.spots, n))
+        blks.append(fit_spots(t[sl], y[sl], x[sl], nnb[sl], pad, mpad, a))
+    blk = torch.cat(blks)
+    del pad, mpad, dog, mx, pk, ph, fr, cnt
+    Rb = blk.cpu().numpy().astype(np.float64)
+    np.savetxt(fout, Rb, delimiter=',', fmt=fmt)
+    fout.flush()
+    nrow += len(Rb)
     stats['detected'] += n
     el = time.time() - t_start
     print(f'frames {a}-{b}: {n} spots ({n / (b - a):.1f}/frame), total {stats["detected"]}, {el:.0f}s, '
           f'{(b - f0) / el:.0f} frames/s', flush=True)
-R = np.concatenate(res)
-fmt = ['%d', '%.4f', '%.4f', '%.2f', '%.1f', '%.3f', '%.5f', '%.5f', '%.2f', '%.1f', '%.4f', '%.4f', '%d', '%d', '%d', '%d']
-np.savetxt(A.out, R, delimiter=',', header=','.join(cols), comments='', fmt=fmt)
-json.dump(dict(args=vars(A), frac_in_patch_z0=frac, crop_offset=[int(cx0), int(cy0)], n=int(len(R)),
+fout.close()
+json.dump(dict(args=vars(A), frac_in_patch_z0=frac, crop_offset=[int(cx0), int(cy0)], n=int(nrow),
                frames=[f0, f1], seconds=time.time() - t_start, H=H, W=W),
           open(A.out.replace('.csv', '_run.json'), 'w'), indent=1)
-print(f'done: {len(R)} localizations in {time.time() - t_start:.0f}s -> {A.out}', flush=True)
+print(f'done: {nrow} localizations in {time.time() - t_start:.0f}s -> {A.out}', flush=True)

@@ -33,6 +33,7 @@ ap.add_argument('--hz', type=float, default=0.05)
 ap.add_argument('--S', type=int, default=2)
 ap.add_argument('--tag', default='')
 ap.add_argument('--chi2max', type=float, default=1.5)
+ap.add_argument('--noise', default='linear')        # linear (NPC) or quad (Tubulin: very bright beads)
 A = ap.parse_args()
 torch.manual_seed(0)
 fd = json.load(open(A.found))
@@ -200,8 +201,16 @@ def lobo_one(beads, d, z, bid, h, lam, outer):
     remap[torch.tensor(keep, device=DEV)] = torch.arange(len(keep), device=DEV)
     splh, _, _, _, _ = fit([beads[i] for i in keep], d[sel], z[sel], remap[bid[sel]], lam, outer, log=False)
     hs = bid == int(h)
-    c2h, _, _ = heldout(splh, [beads[h]], d[hs], z[hs], torch.zeros(int(hs.sum()), dtype=torch.long, device=DEV))
-    return float(c2h.mean())
+    c2h, thh, dzh = heldout(splh, [beads[h]], d[hs], z[hs], torch.zeros(int(hs.sum()), dtype=torch.long, device=DEV))
+    # localization of the held-out frames with all five parameters free, started at the truth: the systematic error
+    # of the spline for a bead it has not seen (z truth = stage position - fitted focus offset of the bead)
+    ztrue = z[hs] - dzh[0]
+    thf, _ = localize(splh, d[hs], thh, iters=30)
+    m = ztrue.abs() < 0.6
+    ez = (thf[:, 2] - ztrue)[m] * 1000
+    ex = (thf[:, 0] - thf[m, 0].mean())[m]; ey = (thf[:, 1] - thf[m, 1].mean())[m]
+    return dict(chi2=float(c2h.mean()), z_rmse_nm=float(ez.pow(2).mean().sqrt()), z_bias_max_nm=float(ez.abs().max()),
+                x_rms_px=float(ex.pow(2).mean().sqrt()), y_rms_px=float(ey.pow(2).mean().sqrt()))
 
 
 # ------------------------------------------------------------------------------------------------ pass 1: noise model
@@ -217,9 +226,33 @@ for lo_, hi_ in zip(q[:-1], q[1:]):
     if s.sum() > 100:
         bc.append(m[s].mean()); bv.append(r2[s].mean())
 bc, bv = np.array(bc), np.array(bv)
-lowm = bc < np.quantile(m, 0.9)        # the brightest decile carries PSF model error; fit the line below it
-co = np.polyfit(bc[lowm], bv[lowm], 1)
-nb_b, na = co[0], co[1]
+# var = a + b mu + c mu^2: the quadratic term takes the PSF model error of pass 1 (it grows with the signal), a + b mu
+# is used as the noise model
+if A.noise == 'ptc':
+    # photon transfer from the stack itself: with fine z steps adjacent planes differ mainly by noise, so the second
+    # difference along z, (x[k+1] - 2 x[k] + x[k-1])^2 / 6, estimates the pixel variance at mean x[k]
+    raw = np.stack([st[:, b['y'] - hb:b['y'] + hb + 1, b['x'] - hb:b['x'] + hb + 1] for b in near]).astype(np.float64)
+    s2 = ((raw[:, 2:] - 2 * raw[:, 1:-1] + raw[:, :-2]) ** 2 / 6).ravel()
+    mm_ = raw[:, 1:-1].ravel()
+    qq = np.quantile(mm_, np.linspace(0, 0.995, 41))
+    pc, pv = [], []
+    for lo_, hi_ in zip(qq[:-1], qq[1:]):
+        s_ = (mm_ >= lo_) & (mm_ < hi_)
+        if s_.sum() > 200:
+            v_ = s2[s_]
+            v_ = v_[v_ < 10 * np.median(v_)]
+            pc.append(mm_[s_].mean()); pv.append(v_.mean())
+    pc, pv = np.array(pc), np.array(pv)
+    (nb_b, na), nc_ = np.polyfit(pc, pv, 1, w=1.0 / pv), 0.0
+    print('photon transfer from second differences along z (mean:var): '
+          + ', '.join(f'{a:.0f}:{b:.1f}' for a, b in zip(pc[::4], pv[::4])), flush=True)
+    bc, bv = pc, pv
+elif A.noise == 'quad':
+    nc_, nb_b, na = np.polyfit(bc, bv, 2, w=1.0 / bv)
+else:   # linear fit below the 90 % quantile of mu (the brightest decile carries the PSF model error)
+    lowm = bc < np.quantile(m, 0.9)
+    (nb_b, na), nc_ = np.polyfit(bc[lowm], bv[lowm], 1), 0.0
+print(f'quadratic fit of the residual variance: c = {nc_:.3e} (model error), b = {nb_b:.4f}, a = {na:.2f}', flush=True)
 print(f'noise model of the bead stack (ADU): var = {na:.1f} + {nb_b:.3f} mu   (bins mu:var '
       + ', '.join(f'{a:.0f}:{b:.0f}' for a, b in zip(bc[::4], bv[::4])) + ')', flush=True)
 
@@ -231,7 +264,7 @@ def conv(x):
 # ------------------------------------------------------------------------------------------------ pass 2
 d, z, bid, kk = crop(near)
 d = conv(d)
-res = dict(noise=dict(a=float(na), b=float(nb_b), bins=[[float(a), float(b)] for a, b in zip(bc, bv)]))
+res = dict(noise=dict(a=float(na), b=float(nb_b), c_model_error=float(nc_), bins=[[float(a), float(b)] for a, b in zip(bc, bv)]))
 nbd = len(near)
 # outlier beads (neighbours, debris): a first fit, then beads with chi2/pixel above chi2max are dropped
 spl, K, dz, th, nll = fit(near, d, z, bid, A.lam, A.outer, log=False)
@@ -253,7 +286,9 @@ if A.lams:
     hold = np.random.default_rng(0).choice(nbd, size=min(8, nbd), replace=False)
     scan = {}
     for lam in lams:
-        c2s = [lobo_one(near, d, z, bid, int(h), lam, A.outer) for h in hold]
+        rr = [lobo_one(near, d, z, bid, int(h), lam, A.outer) for h in hold]
+        c2s = [r_['chi2'] for r_ in rr]
+        print(f'   LOBO lam {lam:g}: z rmse (nm) {[round(r_["z_rmse_nm"], 1) for r_ in rr]}  x rms (px) {[round(r_["x_rms_px"], 3) for r_ in rr]}', flush=True)
         scan[lam] = c2s
         print(f'LOBO lam {lam:g}: held-out chi2/pixel per bead {np.round(c2s, 3).tolist()}  mean {np.mean(c2s):.4f}', flush=True)
     res['lam_scan'] = {str(k): v for k, v in scan.items()}
@@ -295,9 +330,10 @@ if A.lobo:
     idx = range(nbd) if A.lobo < 0 else np.random.default_rng(1).choice(nbd, size=min(A.lobo, nbd), replace=False)
     lo = []
     for h in idx:
-        c = lobo_one(near, d, z, bid, int(h), A.lam, A.outer)
-        lo.append(dict(bead=int(h), chi2_heldout=c, chi2_insample=float(per_bead[h])))
-        print(f'  LOBO bead {int(h):2d}: held-out chi2/pixel {c:.3f}  in-sample {float(per_bead[h]):.3f}', flush=True)
+        r_ = lobo_one(near, d, z, bid, int(h), A.lam, A.outer)
+        lo.append(dict(bead=int(h), chi2_heldout=r_['chi2'], chi2_insample=float(per_bead[h]), **{k: v for k, v in r_.items() if k != 'chi2'}))
+        print(f'  LOBO bead {int(h):2d}: held-out chi2/pixel {r_["chi2"]:.3f}  in-sample {float(per_bead[h]):.3f}  z rmse {r_["z_rmse_nm"]:.1f} nm  '
+              f'max |z err| {r_["z_bias_max_nm"]:.1f} nm  x,y rms {r_["x_rms_px"]:.3f},{r_["y_rms_px"]:.3f} px', flush=True)
     out['lobo'] = lo
 torch.save(dict(knots=K.cpu(), PB=PB, S=A.S, hz=A.hz, zlo=-A.zr, zhi=A.zr, zpad=4, xmax=1.0, c=spl.c, z0=float(spl.z0),
                 nz=spl.nz, normalization=f'each knot plane sums to 1 over the {PB}x{PB} patch at x=y=0',
