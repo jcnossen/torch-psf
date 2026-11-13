@@ -92,6 +92,41 @@ $S=1$ is what makes cubic interpolation accurate enough: the interpolation error
 about 2\,\% at $S=1$. We are not aware of an earlier spline PSF evaluated as a grouped, strided convolution, but
 we did not search the literature for this specifically.
 
+\paragraph{Comparison with the conventional coefficient table.}
+In the conventional form~\cite{babcock,cspline} every voxel of the PSF holds the 64 coefficients of its own
+cubic polynomial. Neighbouring voxels are built from overlapping sets of knots, so the same information is
+stored many times over, and the 64 numbers of a voxel are not free parameters: changing them independently
+breaks the continuity of the spline between voxels. A gradient on the coefficient table is therefore not a
+gradient on a valid PSF. It has to be mapped back to the knots, which the convolution form uses directly.
+For a like-for-like test we implemented the coefficient form in PyTorch as well, for the same spline (a gather
+of 64 coefficients per pixel and a product with the 64 monomials; values agree with the convolution form), and
+also compared with a native CUDA implementation of the coefficient form with its own Levenberg--Marquardt
+fitter (the \texttt{fastpsf} library), which uses a spline through the pixel-sampled PSF as obtained from a
+bead stack. Table~\ref{tab:conv}. The convolution form is faster than the coefficient form in the same
+framework, but by a modest factor (1.2 to 1.8), and it needs 51 times less memory. Against the native library it
+evaluates faster and fits at the same rate per iteration. Its practical advantages are therefore not raw speed
+over a coefficient table: they are that the knots are the parameters, that no custom kernel is needed, and that
+half-pixel knots (0.3\,MB here) give a more accurate PSF than a pixel-sampled table (model error 0.04\,\% against
+0.9\,\%, z precision 22 against 27\,nm on the same simulated spots). The large gain of this paper is against
+evaluating the \emph{pupil model} per emitter (section~\ref{sec:speed}), not against other spline codes.
+
+\begin{table}[t]\centering\small
+\begin{tabular}{lrrr}\toprule
+cost per spot ($\mu$s), $15\times15$ pixels & convolution & coefficient table & coefficient table\
+ & (PyTorch) & (PyTorch) & (native CUDA)\ \midrule
+value & 0.17 & 0.31 & 0.41$^{a}$\
+value and $x,y,z$ derivatives & 0.30--0.32 & 0.35--0.37 & 1.8--2.1$^{a}$\
+value and gradient on the knots & 0.49--0.71 & 0.73--1.0 & n/a\
+Levenberg--Marquardt fit, per iteration & 0.49 & n/a & 0.53\
+memory of the PSF (MB) & 0.31 & 15.8 & \ \bottomrule
+\end{tabular}
+\caption{Convolution form against the conventional coefficient form, RTX 3090, 200{,}000 spots. Ranges: runs
+at different times on a GPU shared with other jobs; the ratio between the two PyTorch columns was 1.7--1.8
+(value), 1.2 (derivatives) and 1.4 (knot gradient) within single runs. $^{a}$\,includes copying the result to
+host memory, which the library interface requires. Fit: convolution form 14.8\,$\mu$s for 30 fixed
+iterations; native library 12.2\,$\mu$s with on average 23 iterations (it stops early).}\label{tab:conv}
+\end{table}
+
 \subsection{Likelihood and its gradient on the knots}
 
 Patch $n$ has photon counts $d_{np}$ and emitter parameters $\theta_n=(x,y,z,I,b)_n$. With Poisson noise,
@@ -187,6 +222,7 @@ refractive indices and wavelength known to the fit.
 \section{Results}
 
 \subsection{Speed}
+\label{sec:speed}
 
 \begin{table}[t]\centering\small\resizebox{\linewidth}{!}{\input{tab_speed.tex}}
 \caption{Cost of one gradient with respect to the Zernike coefficients (\gpu, \nbench{} emitters measured,
@@ -273,6 +309,8 @@ their complex aberrations, Nat. Methods 21 (2024), doi:10.1038/s41592-024-02282-
 bioRxiv 2024.12.11.627909.
 \bibitem{cspline} Y. Li et al., Real-time 3D single-molecule localization using experimental point spread
 functions, Nat. Methods 15, 367 (2018).
+\bibitem{babcock} H. P. Babcock and X. Zhuang, Analyzing single molecule localization microscopy data using
+cubic splines, Sci. Rep. 7, 552 (2017), doi:10.1038/s41598-017-00622-w.
 \bibitem{hauser} F. Hauser and J. Jacak, lookup-table based 3D localization (2021), PMC8407837.
 \bibitem{vectorial} S. Stallinga and B. Rieger, Accuracy of the Gaussian point spread function model in 2D
 localization microscopy, Opt. Express 18, 24461 (2010).

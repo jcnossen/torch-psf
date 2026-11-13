@@ -10,8 +10,11 @@ import sys, time, json, numpy as np, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
 from torch_convspline.knotpsf import localize
-from fastpsf import Context, CSplineMethods
-from fastpsf.estim_queue import EstimQueue
+try:
+    from fastpsf import Context, CSplineMethods
+    from fastpsf.estim_queue import EstimQueue
+except ImportError:
+    Context = None                      # native reference library not installed: PyTorch comparison only
 ITERS = int(sys.argv[1]) if len(sys.argv) > 1 else 30
 N = 200000
 test = C.sim_test('A', 20000, seed=77)
@@ -148,6 +151,8 @@ print('gradient on the coefficient table itself:', res['torch_us']['coef_table_g
 json.dump(res, open('study/insitu/out/conventional.json', 'w'), indent=1)
 
 # ---------------------------------------------------------------- conventional spline, native CUDA (fastpsf)
+if Context is None:
+    print(json.dumps(res, indent=1)); sys.exit()
 with Context(debugMode=False) as ctx:
     api = CSplineMethods(ctx)
     psf = api.CreatePSFFromZStack(C.P, zstack, [float(zs[0]), float(zs[-1])], cuda=True)
