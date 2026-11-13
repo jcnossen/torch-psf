@@ -39,6 +39,7 @@ def rec(name, d):
         cz = [float(e[good & (ib == i), 2].mean()) * 1000 for i in range(7)]
         print(f"{scn} {name:44s} n {len(d):6d} {nm:8s} dnll {r['dnll']:6.2f}  x {min(cx):6.1f}..{max(cx):5.1f}  "
               f"y {min(cy):6.1f}..{max(cy):5.1f}  z {min(cz):6.1f}..{max(cz):5.1f} nm", flush=True)
+    return K
 
 
 if 'a' in which or 'b' in which:
@@ -69,6 +70,23 @@ if 'a' in which or 'b' in which:
         del mv
     if 'b' in which:
         rec('b movie single, crop at DoG peak', rois[single])
+    if 'e' in which:
+        # fix: re-centre every detected patch (all of them, no ground truth) on the position fitted with the current
+        # PSF model, so that the offset inside the patch no longer depends on the PSF shape; two rounds.
+        mv = movie.to(C.DEV).float()
+        d, x0, y0, t = rois, cor[:, 0].clone(), cor[:, 1].clone(), fr
+        zc, th = F.fit_vec_insitu(spl, d, zc_s, iters=60)
+        K = F.knots_from(spl, zc)
+        for rnd in range(2):
+            spl.knots = K
+            th, _ = localize(spl, d)
+            x0, y0 = x0 + torch.round(th[:, 0]).long(), y0 + torch.round(th[:, 1]).long()
+            inb = (x0 >= 0) & (y0 >= 0) & (x0 + P <= mv.shape[2]) & (y0 + P <= mv.shape[1])
+            x0, y0, t = x0[inb], y0[inb], t[inb]
+            d = crop(mv, t, x0, y0)
+            print(f're-centre round {rnd}: moved {float((torch.round(th[:, :2]).abs().sum(1) > 0).float().mean()):.3f} of patches', flush=True)
+            K = rec(f'e movie all, re-centred on fit, round {rnd}', d)
+        del mv
     del movie
 
 if 'c' in which or 'd' in which:

@@ -22,6 +22,9 @@ F0 = 0.45                   # um, focus during the SMLM acquisition
 ZR = (0.0, 0.8)             # um, emitter heights
 ALPHA = 1.33 / 1.518        # paraxial focal-shift factor used to label the bead stack with a nominal emitter z
 OPT = dict(pixelsize=0.108, NA=1.49, n_imm=1.518, n_med=1.33, wavelength=0.68, npupil=64, oversample=3)
+# The data are simulated with a finer pupil sampling than the fitted model uses, so that the simulation is not the
+# fitted model itself, and the pupil structure of scenario B does not lie on the pixel grid of the fitted pupil map.
+SIM_OPT = dict(OPT, npupil=128, oversample=4)
 NOLL = tuple(range(5, 22))
 HO_RMS = 0.06
 
@@ -45,7 +48,7 @@ def zc_insitu():
 
 def make_vec(roisize, scn='A', cond='insitu', ho_rms=HO_RMS, device=DEV):
     """Ground-truth vectorial PSF for scenario scn and condition cond ('bead' or 'insitu')."""
-    psf = VectorialPSF(roisize, zernike_indices=NOLL, device=device, **OPT)
+    psf = VectorialPSF(roisize, zernike_indices=NOLL, device=device, **SIM_OPT)
     with torch.no_grad():
         psf.zcoef.copy_((zc_bead() if cond == 'bead' else zc_insitu()).to(device))
         if scn == 'B':

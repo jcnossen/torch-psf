@@ -12,8 +12,15 @@ import common as C
 from torch_convspline.knotpsf import KnotPSF, localize, poisson_nll, crlb
 
 
-def new_spline(S=2, hz=0.04):
-    return KnotPSF(C.P, *C.ZR, S=S, hz=hz, zpad=5, device=C.DEV)       # zpad 5: knots cover the bead stack range
+def new_spline(S=2, hz=0.04, xmax=3.0):
+    # zpad 5: knots cover the bead stack range. xmax 3 px: the detection peak of a defocused, aberrated spot lies up
+    # to 3 px from the emitter; with the old default (1.5 px) the offset clamp biased flexible PSF fits (CRITIC C-01).
+    return KnotPSF(C.P, *C.ZR, S=S, hz=hz, zpad=5, xmax=xmax, device=C.DEV)
+
+
+def clamp_fraction(spl, th):
+    """Fraction of emitters whose fitted x or y sits at the offset clamp of the spline."""
+    return float((th[:, :2].abs().max(1).values > spl.xmax - 0.06).float().mean())
 
 
 def knots_from(spl, zc, cond='insitu'):
@@ -135,7 +142,7 @@ def knot_grad(spl, d, th, nb=4000):
     return K.grad, nll
 
 
-def vec_grad_direct(big_or_small, d, th, nb=250):
+def vec_grad_direct(big_or_small, d, th, nb=1000):
     """d NLL / d zcoef with the vectorial model evaluated for every emitter (route V)."""
     psf = big_or_small
     zc = psf.zcoef.detach().clone().requires_grad_(True)
@@ -233,7 +240,7 @@ def evaluate(spl, knots, test, nll_true=None):
     th, nll = localize(spl, test['d'])
     e = th - test['th']
     z = test['th'][:, 2]
-    ok = (e[:, 2].abs() < 0.15) & (e[:, :2].abs().max(1).values < 0.5)       # gross outliers (wrong z branch)
+    ok = e[:, 2].abs() < 0.15       # wrong z branch only; lateral bias must stay in the statistics (CRITIC C-02)
     # z error after the best straight line (offset and scale of the z axis are reported separately)
     A = torch.stack([torch.ones_like(z), z], 1)[ok]
     co = torch.linalg.lstsq(A.double(), th[ok, 2:3].double()).solution[:, 0]
