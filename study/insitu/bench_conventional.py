@@ -47,7 +47,7 @@ def stats(est, name):
 def best(fn, n=3):
     ts = []
     for _ in range(n):
-        torch.cuda.synchronize(); t = time.time(); r = fn(); torch.cuda.synchronize(); ts.append(time.time() - t)
+        torch.cuda.synchronize(); t = time.perf_counter(); r = fn(); torch.cuda.synchronize(); ts.append(time.perf_counter() - t)
     return min(ts), r
 
 
@@ -148,9 +148,46 @@ for k in ('eval', 'eval_deriv', 'knot_grad'):
           f"ratio {tt['coef_' + k] / tt['conv_' + k]:.1f}", flush=True)
 print('gradient on the coefficient table itself:', res['torch_us']['coef_table_grad'], 'us/spot; knot gradients agree to', res['knot_grad_rel_diff'],
       '; memory: knots', res['knots_MB'], 'MB, coefficients', res['coef_MB'], 'MB', flush=True)
+# three cases: (1) convolution on the knots, (2) coefficient table rebuilt from the knots at every use,
+# (3) coefficient table computed once. Rebuild time, and peak GPU memory of one batch of NB spots.
+t_rebuild, _ = best(lambda: cp.coefs(spl.knots), n=10)
+res['rebuild_ms'] = t_rebuild * 1e3
+
+
+def peak(fn):
+    torch.cuda.synchronize(); torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    fn(); torch.cuda.synchronize()
+    return (torch.cuda.max_memory_allocated() - base) / 1e6
+
+
+o, rs = P3[:NB], resid[:NB]
+
+
+def g_conv():
+    K = spl.knots.clone().requires_grad_(True); (spl.evaluate(o, knots=K) * rs).sum().backward()
+
+
+def g_coef():
+    K = spl.knots.clone().requires_grad_(True); (cp.evaluate(o, cp.coefs(K)) * rs).sum().backward()
+
+
+with torch.no_grad():
+    res['peak_MB'] = dict(conv_eval=peak(lambda: spl.evaluate(o)), rebuilt_eval=peak(lambda: cp.evaluate(o, cp.coefs(spl.knots))),
+                          table_eval=peak(lambda: cp.evaluate(o, coef)))
+    tt['rebuilt_eval'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], cp.coefs(spl.knots)) for s in range(0, N, NB)][-1])
+    tt['rebuilt_eval_deriv'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], cp.coefs(spl.knots), grad=True) for s in range(0, N, NB)][-1])
+res['peak_MB'].update(conv_grad=peak(g_conv), rebuilt_grad=peak(g_coef))
+res['torch_us'] = {k: v / N * 1e6 for k, v in tt.items()}
+res['Mspots_per_s'] = {k: N / v / 1e6 for k, v in tt.items()}
+print('rebuild of the coefficient table from the knots:', round(res['rebuild_ms'], 2), 'ms;  peak memory per batch of', NB, 'spots (MB):',
+      {k: round(v, 1) for k, v in res['peak_MB'].items()}, flush=True)
+print('million spots per second:', {k: round(v, 2) for k, v in res['Mspots_per_s'].items()}, flush=True)
 json.dump(res, open('study/insitu/out/conventional.json', 'w'), indent=1)
 
 # ---------------------------------------------------------------- conventional spline, native CUDA (fastpsf)
+if '--torch-only' in sys.argv:
+    sys.exit()
 if Context is None:
     print(json.dumps(res, indent=1)); sys.exit()
 with Context(debugMode=False) as ctx:
