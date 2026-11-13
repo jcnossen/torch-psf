@@ -107,8 +107,9 @@ For a like-for-like test we implemented the coefficient form in PyTorch as well,
 of 64 coefficients per pixel and a product with the 64 monomials; values agree with the convolution form), and
 also compared with a native CUDA implementation of the coefficient form with its own Levenberg--Marquardt
 fitter (the \texttt{fastpsf} library), which uses a spline through the pixel-sampled PSF as obtained from a
-bead stack. Table~\ref{tab:conv}. The convolution form is faster than the coefficient form in the same
-framework, but by a modest factor (1.2 to 1.8), and it needs 51 times less memory. Against the native library it
+bead stack. Table~\ref{tab:conv}. For evaluation the convolution form is faster than the coefficient form in the
+same framework, but by a modest factor (1.2 to 1.8), and it needs 51 times less memory. A gradient on the PSF
+values exists only in the knot form. Against the native library it
 evaluates faster and fits at the same rate per iteration. Its practical advantages are therefore not raw speed
 over a coefficient table: they are that the knots are the parameters, that no custom kernel is needed, and that
 half-pixel knots (0.3\,MB here) give a more accurate PSF than a pixel-sampled table (model error 0.04\,\% against
@@ -121,15 +122,15 @@ cost per spot ($\mu$s), $15\times15$ pixels & convolution & coefficient table & 
  & (PyTorch) & (PyTorch) & (native CUDA)\\ \midrule
 value & 0.17 & 0.31 & 0.41$^{a}$\\
 value and $x,y,z$ derivatives & 0.30--0.32 & 0.35--0.37 & 1.8--2.1$^{a}$\\
-value and gradient on the knots & 0.49--0.71 & 0.73--1.0 & n/a\\
+value and gradient on the PSF values & 0.49--0.71 & not valid$^{b}$ & not valid$^{b}$\\
 Levenberg--Marquardt fit, per iteration & 0.49 & n/a & 0.53\\
 memory of the PSF (MB) & 0.31 & 15.8 & \\ \bottomrule
 \end{tabular}
 \caption{Convolution form against the conventional coefficient form, RTX 3090, 200{,}000 spots. Ranges: runs
 at different times on a GPU shared with other jobs; the ratio between the two PyTorch columns was 1.7--1.8
-(value), 1.2 (derivatives) and 1.4 (knot gradient) within single runs. $^{a}$\,includes copying the result to
+(value) and 1.2 (derivatives) within single runs. $^{a}$\,includes copying the result to
 host memory, which the library interface requires. Fit: convolution form 14.8\,$\mu$s for 30 fixed
-iterations; native library 12.2\,$\mu$s with on average 23 iterations (it stops early).}\label{tab:conv}
+iterations; native library 12.2\,$\mu$s with on average 23 iterations (it stops early). $^{b}$\,A gradient on the 64 coefficients per voxel does not give a continuous spline, so the coefficient table cannot be optimized directly. It can only be done by keeping knots as the parameters and rebuilding the table from them inside the computation (0.73--1.0\,$\mu$s in PyTorch), which is the knot parameterization of this paper with a slower evaluator and 51 times the memory.}\label{tab:conv}
 \end{table}
 
 \subsection{Likelihood and its gradient on the knots}
