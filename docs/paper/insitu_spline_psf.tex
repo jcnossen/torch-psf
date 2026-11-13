@@ -62,6 +62,36 @@ $4\times4\times4$ kernel applied to the knot array with stride $S$, and a batch 
 convolution. The derivatives with respect to $x,y,z$ use $w'(t)$ in one of the three factors. With $S=2$ and
 $h_z=40$\,nm the spline differs from the pupil model it was built from by \splineerr\,\% (relative L2 norm).
 
+\subsection{Implementation with a standard 2D convolution}
+\label{sec:impl}
+
+Spline PSFs for localization are usually stored as 64 polynomial coefficients per voxel and evaluated pixel by
+pixel in a custom GPU kernel~\cite{cspline}. Here only the knot values are stored (one number per knot), and a
+batch of patches is evaluated with operations that every deep-learning library already provides and has
+optimized:
+\begin{enumerate}\setlength\itemsep{0pt}
+\item \emph{Weights.} For each emitter the fractional knot coordinates $t_u,t_v,t_z$ give three sets of four
+cubic weights. Their outer product is one $4\times4\times4$ kernel per emitter.
+\item \emph{Gather.} For each emitter a window of the knot array is read with one indexed gather: 4 planes in z
+and $(P-1)S+4$ knots in each lateral direction ($32\times32$ for a $15\times15$ patch with $S=2$).
+\item \emph{Convolution.} The windows of all $N$ emitters are stacked into one image with $4N$ channels and
+passed through a single call of the 2D convolution of PyTorch (\texttt{conv2d}) with $N$ groups and stride $S$.
+Each group holds one emitter: its four z planes are the input channels, its kernel is the $4\times4$ lateral
+weights for each of them. The stride $S$ steps from one camera pixel to the next. The output is the
+$N\times P\times P$ batch of patches.
+\item \emph{Derivatives.} The derivatives with respect to $x$, $y$ and $z$ are three more output channels per
+group, with $w'(t)$ in place of $w(t)$ in one factor. Value and derivatives come out of the same call.
+\item \emph{Gradient on the knots.} Eq.~\eqref{eq:knotgrad} is the reverse pass of steps 2 and 3 (a transposed
+convolution and a scatter-add), which automatic differentiation provides. No gradient code was written.
+\end{enumerate}
+The whole evaluation is about twenty lines of Python and has no custom kernel. It runs on any device PyTorch
+supports, uses the vendor-optimized convolution, and can sit inside any other differentiable model, which is
+what section~\ref{sec:passthrough} uses. On an RTX 3090, value plus knot gradient cost 2.3\,$\mu$s per emitter
+for $15\times15$ patches, and three Newton steps of localization 2.5\,$\mu$s. Storing knots at $S=2$ instead of
+$S=1$ is what makes cubic interpolation accurate enough: the interpolation error is \splineerr\,\% at $S=2$ and
+about 2\,\% at $S=1$. We are not aware of an earlier spline PSF evaluated as a grouped, strided convolution, but
+we did not search the literature for this specifically.
+
 \subsection{Likelihood and its gradient on the knots}
 
 Patch $n$ has photon counts $d_{np}$ and emitter parameters $\theta_n=(x,y,z,I,b)_n$. With Poisson noise,
@@ -77,6 +107,7 @@ The expected image is linear in the knots, $\mu_{np}=I_n\sum_k A_{np,k}(\theta_n
 the transpose of the patch evaluation applied to the residual images: one scatter-add per emitter.
 
 \subsection{Passing the gradient through the pupil model}
+\label{sec:passthrough}
 
 Let the knots be the pupil model sampled on the knot grid, $c=B(\phi)$, where $\phi$ are the parameters of the
 pupil model: Zernike coefficients, a pixel map of pupil phase and amplitude, or optical constants. By the chain
