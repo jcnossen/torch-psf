@@ -5,7 +5,7 @@
 \input{numbers.tex}
 \title{Differentiable spline for efficient in-situ estimation of point spread functions}
 \author{Jelmer Cnossen}
-\date{Draft, \today. Simulation study; no real data yet.}
+\date{Draft, \today. Simulation study and a first test on real data.}
 \begin{document}
 \maketitle
 
@@ -23,7 +23,10 @@ numerical error matches that of the spline, and a whole iteration (gradient plus
 pixel map of pupil phase and amplitude. We also show which properties of a PSF blinking data cannot determine,
 why a free-form spline PSF fitted in situ therefore keeps position errors that a pupil model does not, and
 report an implementation pitfall (a limit on the fitted offset inside the patch) that biased flexible PSF models
-in an earlier version of this study.
+in an earlier version of this study. On real astigmatic data of nuclear pores, refining a vectorial model in
+situ through the knots improves the held-out likelihood over a bead-calibrated spline, but changes the
+localization precision by 3\,\% at most and does not resolve the two rings of the pore; it does change the z
+scale by about 10\,\%, and this data set cannot tell which z scale is right.
 \end{abstract}
 
 \section{Introduction}
@@ -286,6 +289,74 @@ exactly), and from the same frames without pattern. Ranges: smallest and largest
 
 \patterntext
 
+\subsection{Real data: nuclear pores}
+\label{sec:real}
+
+Data: 3D astigmatic dSTORM of Nup107-SNAP-AF647 in U2OS cells with its bead stack, from the 2016 SMLM
+challenge~\cite{challenge} (Ries lab; microscope with a 160$\times$/1.43\,NA objective~\cite{cspline}),
+150{,}000 frames of $135\times148$ pixels. The camera pixel size in the sample is not stated in any source we
+found; the lateral results below are in pixels or as ratios.
+
+\emph{Bead PSF and first localization.} A free-knot spline was fitted to 30 beads (41 planes, 50\,nm steps,
+$\pm800$\,nm; knots every half pixel and 50\,nm; leave-one-bead-out $\chi^2$ per pixel 1.07 against 1.03 in
+sample). Localizing the movie with it gives 1.05 million localizations in 240\,s, a median $\chi^2$ per pixel
+of 1.00, and a spread between detections of the same emitter in consecutive frames that equals the
+Cram\'er--Rao bound (ratio 1.00--1.02; 0.08 pixel laterally, 32\,nm in z). The bead spline therefore already
+describes these data well at typical brightness; above 8000 photons the lateral spread is 1.5 times the bound.
+
+\emph{Models compared} (trained on 150{,}000 spots from the even 1000-frame blocks, scored on the 452{,}000
+spots of the odd blocks): (a) the bead spline; (b) a vectorial model fitted to the beads (NA 1.43, Zernikes
+Noll 5--36, radial apodization, pixel size fitted); (c) as b with the Zernikes refined on the movie through the
+knots; (d) as c plus free pupil phase and amplitude maps; (e) free knots refined on the movie, starting from
+the bead spline.
+
+\begin{table}[t]\centering\small
+\begin{tabular}{lrrrrr}\toprule
+ & a & b & c & d & e\\
+ & bead & bead & Zernike & c + pupil & free knots\\
+ & spline & vectorial & in situ & maps & in situ\\ \midrule
+deviance per spot relative to a & 0 & $-0.50$ & $-1.21$ & $-1.74$ & $-2.55$\\
+repeat z spread (nm, in the z units of a) & 32.1 & 31.7 & 31.5 & 31.2 & 36.0\\
+same, above 8000 photons & 12.4 & 13.7 & 13.9 & 12.6 & 8.6\\
+repeat x spread (pixel) & 0.0848 & 0.0845 & 0.0841 & 0.0840 & 0.0848\\
+z spread within a pore (nm, in the z units of a) & 32.9 & 32.6 & 32.6 & 32.2 & 35.5\\
+two Nup107 rings resolved & no & no & no & no & no\\
+ring radius relative to a & 1 & 1.0005 & 1.0019 & 1.0022 & 1.0040\\
+z scale relative to a & 1 & 1.03 & 1.11 & 1.10 & 0.98\\
+largest z-dependent lateral shift relative to a (nm) & -- & 14 & 37 & 33 & 2\\ \bottomrule
+\end{tabular}
+\caption{Nuclear-pore data, held-out frames. Deviance: twice the negative log-likelihood difference per
+$17\times17$ pixel spot, lower is better (standard errors 0.005 to 0.011). Repeat spread: robust spread between
+detections of the same emitter in consecutive frames, divided by $\sqrt2$ (338{,}636 pairs, the same pairs for
+all methods). The z values of each method were converted to the z axis of the bead spline with the local slope
+before comparing. Within-pore spread: 5063 pore clusters, each centred per 3000-frame window to remove drift.
+Lateral shift in nm with the fitted pixel size of model b.}\label{tab:real}
+\end{table}
+
+Table~\ref{tab:real}.
+\begin{itemize}\setlength\itemsep{0pt}
+\item \emph{Likelihood.} Refining the vectorial model in situ gives a real held-out gain over the bead spline
+($-1.2$ per spot for the Zernikes, $-1.7$ with pupil maps), and over the bead vectorial model it started from.
+\item \emph{Precision.} The gain in z precision is 3\,\% at most (d), and nothing changes laterally. No method
+resolves the two rings of Nup107, which are about 50\,nm apart in z.
+\item \emph{Geometry.} The in-situ vectorial models (c, d) stretch the z axis by about 10\,\% relative to the
+bead spline and add z-dependent lateral shifts of up to 35\,nm. Which geometry is right cannot be decided from
+these data: there is no independent ruler for z, and the ring radius changes by only 0.2\,\%.
+\item \emph{Free knots} (e) reach the best likelihood but a worse z precision (36 against 32\,nm), their
+Cram\'er--Rao bound for z (19.5\,nm) is far below the observed spread, and their geometry stays that of the
+bead spline (z scale 0.98, lateral shift 2\,nm). This is the behaviour predicted in section~\ref{sec:gauge}
+and seen in the simulation. Only for the brightest emitters do they give the smallest spread.
+\item \emph{The vectorial model does not fit the beads as well as a spline} ($\chi^2$ per pixel 1.20 against
+1.06), with the misfit in the core of the PSF in defocused planes. The bead data exclude an NA of 1.46 or
+higher but do not separate NA, wavelength and pixel size from each other.
+\item \emph{Speed.} One iteration of fit c with 150{,}000 emitters took 1.9\,s, of which 89\,\% was
+re-localization and 0.2\,s the gradient through the knots (GPU shared with other jobs). The fit had converged
+after about 50 iterations.
+\end{itemize}
+So on this data set the in-situ vectorial refinement is fast and improves the fit of the images, but a bead
+spline was already at the Cram\'er--Rao bound, and the practical gain is small. The open question it raises is
+the z scale, which needs a sample with known axial structure.
+
 \section{Relation to other methods}
 
 \begin{itemize}\setlength\itemsep{1pt}
@@ -323,6 +394,8 @@ bioRxiv 2024.12.11.627909.
 functions, Nat. Methods 15, 367 (2018).
 \bibitem{babcock} H. P. Babcock and X. Zhuang, Analyzing single molecule localization microscopy data using
 cubic splines, Sci. Rep. 7, 552 (2017), doi:10.1038/s41598-017-00622-w.
+\bibitem{challenge} D. Sage et al., Super-resolution fight club: assessment of 2D and 3D single-molecule
+localization microscopy software, Nat. Methods 16, 387 (2019).
 \bibitem{hauser} F. Hauser and J. Jacak, lookup-table based 3D localization (2021), PMC8407837.
 \bibitem{vectorial} S. Stallinga and B. Rieger, Accuracy of the Gaussian point spread function model in 2D
 localization microscopy, Opt. Express 18, 24461 (2010).
