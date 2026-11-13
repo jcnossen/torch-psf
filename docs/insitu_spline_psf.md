@@ -21,10 +21,13 @@ Reproduce: `python study/insitu/run_study.py`, `bench_speed.py`, `bench_speed2.p
    to 30 nm across the z range. Free spline knots on top of the Zernike model remove the likelihood deficit
    (0.25 nats) but **not** the position error: a lateral shift of the PSF that depends on z cannot be seen in
    blinking data. This is a property of the data, not of the optimizer (section 2.4).
-4. **A free pupil map (phase and amplitude pixels) through the same route** fits the images best (0.12 nats)
-   but has the same problem in a milder form: a y shift proportional to z (up to 30-40 nm over 700 nm) that the
-   data do not pin down. It appears even when the Zernike start was already correct.
-5. **A spline shared between beads and SMLM data does not work** when the two PSFs differ. It fits the SMLM
+4. **A free pupil map (phase and amplitude pixels) through the same route** represents scenario B: on clean
+   patches the likelihood deficit is 0.01 and the y error drops from 42 to 10 nm. Free knots cannot do that.
+   On patches cut from the movie by spot detection the free pupil picks up a y shift proportional to z
+   (30-40 nm over 700 nm), also when the Zernike start was correct; the detection step causes it (3.4).
+5. **With a structured-illumination pattern** (6 frames per emitter) the free pupil fit is exact within noise
+   in scenario B (errors below 1.3 nm over the z range). Free knots then lose the y tilt but keep a z error.
+6. **A spline shared between beads and SMLM data does not work** when the two PSFs differ. It fits the SMLM
    images well but keeps the z axis and lateral shifts of the bead stack (100 nm z offset here).
 
 ## 1. Simulation
@@ -206,15 +209,65 @@ defocus are projected out of the phase map.
 * For the pupil fits the "failures" of the criterion in 3.2 (5-16 %) are almost all y errors above half a pixel
   at the top of the z range, i.e. this tilt, not wrong z branches (wrong z: 0.1 %).
 
-So a lateral shift proportional to z ("tilt of the z axis") is weakly determined by blinking data even with a
-pupil model, once the pupil is free: odd phase terms in the pupil trade against a z-dependent emitter shift. The
-17-term Zernike series is rigid enough to exclude it when it contains the truth. Only y is affected here,
-probably because of the astigmatism orientation; not investigated.
+**Correction (same day, after the controls below).** The tilt of the free pupil fit is not a property of the
+model. It comes from the movie patches.
+
+### 3.4 Controls: clean patches, and patches with a single emitter
+
+`run_clean.py`: the same fits on 11,000 patches simulated directly (isolated emitters, uniform sub-pixel
+offsets, no detection step), same photons. `run_movie_clean.py`: the movie patches of scenario A, all 11,593 or
+only the 10,380 that the ground truth shows to contain a single emitter.
+
+| data | PSF model | likelihood deficit | mean y error over the z range (nm) | mean z error (nm) |
+|---|---|---|---|---|
+| A, clean patches | Zernike | 0.00 | -1 .. 0 | -5 .. +1 |
+| A, clean patches | free pupil | 0.00 | -1 .. 0 | -4 .. +1 |
+| A, clean patches | free knots | 0.08 | -1 .. +3 | -14 .. +2 |
+| B, clean patches | Zernike | 2.71 | -1 .. +42 | -9 .. +4 |
+| B, clean patches | free pupil | 0.01 | -3 .. +10 | -4 .. -2 |
+| B, clean patches | free knots | 0.11 | -1 .. +43 | -12 .. +3 |
+| A, movie, all patches | free pupil | 0.06 | -1 .. +36 | -3 .. +2 |
+| A, movie, single-emitter patches | free pupil | 0.01 | -2 .. +28 | -4 .. +1 |
+
+* On clean patches the free pupil has no tilt in A and reduces the tilt of the Zernike model in B from 42 to
+  10 nm, with a likelihood deficit of 0.01. The pupil physics does pin the tilt.
+* Free knots keep the tilt of their starting point (43 nm in B), as section 2.4 predicts.
+* On the movie patches the free pupil tilts by 28-36 nm. Removing the 10 % of patches with a second emitter
+  nearby changes little. What remains is the detection step: patches are cropped around the peak of the
+  smoothed image, and a spot is kept only if it shows a single isolated peak. Which of the two (centring or
+  selection) biases the fit is not established. The 17-term Zernike model is not affected (tilt 1-2 nm).
+
+### 3.5 An illumination pattern as a second ruler
+
+Suggested by the simcode2 session. `run_pattern.py`. Each emitter is seen in 6 frames: 2 pattern orientations
+x 3 phases, pitch 220 nm, modulation depth 0.9, 12,000 photons in total (2,000 per frame on average), 3,000
+emitters, clean patches. Frame intensity $I_t = N\,(1 + m \cos(\mathbf{k}_t \cdot \mathbf{r} - \varphi_t))/6$.
+The emitter position is shared by the PSF term and the pattern term, so the pattern measures x and y without
+the PSF (2.3 nm rms with the true PSF). The pattern is taken as known. Control: the same frames with $m = 0$.
+The PSF is scored on the single-frame test set as before.
+
+| | PSF model | deficit, pattern | y error over z, pattern (nm) | z error over z, pattern (nm) | deficit, no pattern | y error, no pattern | z error, no pattern |
+|---|---|---|---|---|---|---|---|
+| A | Zernike | 0.00 | 0 .. 0 | -3 .. +1 | 0.00 | 0 .. 0 | -6 .. +1 |
+| A | free pupil | 0.01 | 0 .. 0 | 0 .. +1 | 0.02 | -1 .. +2 | -2 .. +1 |
+| A | free knots | 0.12 | -1 .. +1 | -5 .. +1 | 0.17 | -1 .. +1 | -10 .. +2 |
+| B | Zernike | 2.88 | -3 .. +22 | -4 .. +23 | 2.75 | -1 .. +45 | -7 .. +6 |
+| B | free pupil | 0.01 | -1 .. +1 | -1 .. +1 | 0.02 | -3 .. +15 | -2 .. +2 |
+| B | free knots | 0.21 | -1 .. +2 | -14 .. +24 | 0.29 | -1 .. +46 | -10 .. +4 |
+
+* With the pattern, the free pupil in scenario B is exact within noise: y and z errors below 1.3 nm over the
+  whole z range, likelihood deficit 0.01.
+* Free knots lose the y tilt (46 -> 2 nm) but keep a z error (-14 .. +24 nm): a lateral pattern says nothing
+  about the labelling of the z axis. An axial pattern component would be needed for that; not tested.
+* The pattern fit must start from a PSF that is already roughly right. Started from the bead PSF, emitters lock
+  onto the wrong fringe and the PSF learns the shift (y error up to 125 nm in B). The fit here first refines
+  the Zernikes on the summed frames without the pattern.
+* Not tested: the pattern on movie patches with a detection step (3.4), and a pattern that is itself estimated.
 
 ## 4. When would a Zernike vectorial model not suffice?
 
 From the simulation: a free-form in-situ PSF pays off in the image fit, but the position accuracy stays limited
-by the three freedoms of section 2.4, and the free pupil of section 3.3 by the first of them. A free-form model needs something extra to fix them: a second detection
+by the three freedoms of section 2.4. A free-knot model needs something extra to fix them: a second detection
 plane (biplane), a physical model for the low-order part plus a penalty that keeps the free part from carrying a
 lateral shift, or a known structure in the sample.
 
@@ -224,8 +277,9 @@ helix (uiPSF reports its Zernike model as blurry there), light that misses the m
 higher-order aberrations (named by Droste et al. as their residual mismatch), residual blur (uiPSF adds a
 Gaussian blur term), fixed dipoles, bead size, 4Pi and light-sheet geometries.
 
-Route 2.3 is not limited to Zernikes: $\phi$ can be a free pixel map of the pupil. Section 3.3 tests this. It
-fits the images best of all, but it does not fix the positions either.
+Route 2.3 is not limited to Zernikes: $\phi$ can be a free pixel map of the pupil (sections 3.3-3.5). On clean
+patches it represents scenario B and keeps the positions nearly right; with an illumination pattern it is exact.
+Its weak point is bias from the spot-detection step.
 
 ## 5. Relation to other in-situ methods
 
@@ -250,7 +304,8 @@ aberrations, a free pupil map, per-tile or time-resolved PSFs. None of these is 
 * One seed per scenario; no error bars on any number above.
 * No comparison against uiPSF or Vectorfit on the same data.
 * Field dependence, biplane, or a tie between the tilt of the z axis and the bead stack: not tested.
-* Why the free pupil tilts only in y, and whether more emitters or a wider z range remove it: not investigated.
+* Which part of the detection step (centring or selection) tilts the free pupil fit, and how to remove it
+  (fit all spots in the frame instead of selected patches; model the selection): not investigated.
 * The regularization weights of the free-knot fits were chosen by looking at the test-set likelihood of scenario
   A, with a handful of settings; they are not tuned and not validated on held-out data.
 * Real data: none.

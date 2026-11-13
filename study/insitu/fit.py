@@ -80,7 +80,7 @@ def knot_loss(spl, K, d, th, nb=4000, backward=True, weight=1.0):
 
 
 def fit_knots(spl, K0, insitu=None, stack=None, ref=None, lam_ref=0.0, lam_s=0.0, w_stack=1.0, outer=12, inner=8,
-              th_ins=None, log=None):
+              th_ins=None, log=None, loc=None):
     """Free-knot PSF. Alternates (1) emitter parameters at fixed knots (Newton per patch) and (2) the knots at fixed
     emitter parameters (L-BFGS; the model is linear in the knots, so this subproblem is convex).
     loss = NLL(SMLM patches) + w_stack NLL(bead stack) + lam_ref sum (K - ref)^2 / (ref + eps) + lam_s roughness."""
@@ -93,7 +93,8 @@ def fit_knots(spl, K0, insitu=None, stack=None, ref=None, lam_ref=0.0, lam_s=0.0
     for o in range(outer):
         spl.knots = K.detach()
         if insitu is not None:
-            th_ins, nll_i = localize(spl, insitu, th_ins, iters=30 if th_ins is None else 5)
+            th_ins, nll_i = (localize(spl, insitu, th_ins, iters=30 if th_ins is None else 5) if loc is None
+                             else loc(spl, insitu, th_ins))
         if stack is not None:
             th_b, nll_b = bead_params(spl, stack, th_b)
         opt = torch.optim.LBFGS([K], max_iter=inner, history_size=10, line_search_fn='strong_wolfe')
@@ -150,7 +151,7 @@ def vec_grad_direct(big_or_small, d, th, nb=250):
     return g, tot
 
 
-def fit_vec_insitu(spl, d, zc0, iters=80, lr=2e-3, route='K', loc_iters=3, log=None, th=None, n_loc_v=None):
+def fit_vec_insitu(spl, d, zc0, iters=80, lr=2e-3, route='K', loc_iters=3, log=None, th=None, loc=None):
     """Vectorial Zernike model from SMLM patches. Per iteration: (1) emitter parameters (Newton on the spline built
     from the current Zernikes), (2) Zernike gradient: route K = knot gradient + one VJP through the knot build;
     route V = the vectorial model evaluated for every emitter. Adam step on the Zernikes."""
@@ -163,7 +164,7 @@ def fit_vec_insitu(spl, d, zc0, iters=80, lr=2e-3, route='K', loc_iters=3, log=N
         with torch.no_grad():
             big.zcoef.copy_(zc); small.zcoef.copy_(zc)
         spl.knots = spl.stack_from_vectorial(big, C.insitu_pos)
-        th, nll = localize(spl, d, th, iters=30 if th is None else loc_iters)
+        th, nll = localize(spl, d, th, iters=30 if th is None else loc_iters) if loc is None else loc(spl, d, th)
         if route == 'K':
             gK, tot = knot_grad(spl, d, th)
             g = spl.vjp_vectorial(big, C.insitu_pos, gK)['zcoef']
@@ -178,7 +179,7 @@ def fit_vec_insitu(spl, d, zc0, iters=80, lr=2e-3, route='K', loc_iters=3, log=N
     return zc, th
 
 
-def fit_pupil_insitu(spl, d, zc0, iters=200, lr_z=1e-3, lr_p=2e-3, lr_a=1e-2, lam=0.0, th=None, log=None):
+def fit_pupil_insitu(spl, d, zc0, iters=200, lr_z=1e-3, lr_p=2e-3, lr_a=1e-2, lam=0.0, th=None, log=None, loc=None):
     """Free pupil from SMLM patches through the knot route: the Zernikes (Noll 5-21) plus a pixel map of pupil phase
     (waves) and of log pupil amplitude. The physics of the pupil model still ties lateral shift, z scale and brightness
     to the PSF shape. Piston, tilt and defocus are projected out of the phase map (global shifts of all emitters) and
@@ -203,7 +204,7 @@ def fit_pupil_insitu(spl, d, zc0, iters=200, lr_z=1e-3, lr_p=2e-3, lr_a=1e-2, la
     for it in range(iters):
         set_model()
         spl.knots = spl.stack_from_vectorial(big, C.insitu_pos)
-        th, nll = localize(spl, d, th, iters=30 if th is None else 3)
+        th, nll = localize(spl, d, th, iters=30 if th is None else 3) if loc is None else loc(spl, d, th)
         gK, tot = knot_grad(spl, d, th)
         g = spl.vjp_vectorial(big, C.insitu_pos, gK, names=('zcoef', 'pupil_phase', 'pupil_amp'))
         gr = dict(zcoef=g['zcoef'], phase=g['pupil_phase'] * mask, la=g['pupil_amp'] * big.pupil_amp * mask)
