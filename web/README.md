@@ -8,9 +8,10 @@ browser tests compare the web results with torch_psf outputs (see "Validation").
 ![landing view](docs/landing.png)
 
 On opening, the page shows a default PSF computed on the GPU in a slowly rotating 3D view (it stops on the first mouse
-interaction). Presets: tetrapod-like, astigmatic, in-focus 2D, and the loaded file's fit result. The three slice
-planes (log scale, bilinear, interpolated between z planes) move with the sliders or by dragging a plane (hover
-highlights it) along its normal.
+interaction): ten nested white isosurfaces (60 % to 2 % of the peak, additive, so the inner ones add up to a soft
+glow) and three faint slice planes. Presets: tetrapod-like, astigmatic, in-focus 2D, and the loaded file's fit result.
+The slice planes (log scale, bilinear, interpolated between z planes) move with the sliders or by dragging a plane
+(hover highlights it) along its normal.
 The tetrapod-like preset is a Zernike approximation (primary astigmatism Noll 6 = +0.20 and secondary astigmatism Noll 12 =
 -0.20 waves rms), not the published optimized tetrapod pupil.
 

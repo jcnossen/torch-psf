@@ -8,7 +8,6 @@ import { WEBGPU_HELP } from '../gpu/device';
 import type { FitForm, FitSummary, VolumeSpec, Req, MovieForm } from './protocol';
 import { Recon } from './recon';
 import { locsToCsv, MovieSummary, NCOL } from '../smlm/movie';
-import type { ViewLook } from './view3d';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -115,10 +114,6 @@ export function startApp(root: HTMLElement) {
     $<HTMLInputElement>(id).oninput = (e) => { view.setSlice(i as 0 | 1 | 2, +(e.target as HTMLInputElement).value / 100); drawSections(); };
   }
   $<HTMLInputElement>('zexag').oninput = (e) => { view.setZExag(+(e.target as HTMLInputElement).value); $('zexag-v').textContent = view.opts.zExag.toFixed(1); };
-  const lookSel = $<HTMLSelectElement>('look');
-  try { const v = localStorage.getItem('tpsf.look'); if (v === 'slices' || v === 'volume') lookSel.value = v; } catch { /* no storage */ }
-  view.opts.look = lookSel.value as ViewLook;
-  lookSel.onchange = () => { view.setLook(lookSel.value as ViewLook); try { localStorage.setItem('tpsf.look', lookSel.value); } catch { /* no storage */ } };
   $<HTMLInputElement>('decades').onchange = (e) => { view.opts.decades = +(e.target as HTMLInputElement).value; view.updateSlices(); drawSections(); };
 
   // --- files
@@ -419,7 +414,6 @@ const TEMPLATE = `
   <details class="panel" data-key="view" open><summary><h2>3D PSF</h2></summary>
     <div class="bar">
       <label>PSF <select id="preset"></select></label>
-      <label>view <select id="look"><option value="slices">slices</option><option value="volume">volume</option></select></label>
       <label>z exaggeration <input id="zexag" type="range" min="0.25" max="4" step="0.25" value="1"><span id="zexag-v">1.0</span></label>
       <label>log decades <input id="decades" type="number" min="1" max="6" value="3" style="width:3em"></label>
     </div>

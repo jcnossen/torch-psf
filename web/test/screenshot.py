@@ -53,7 +53,7 @@ def drive_app(pg, base, outdir):
     ok = hov >= 0 and after[ax] != before[ax] and not during and pg.evaluate('window.__view.controls.enabled') \
         and max(abs(a - b) for a, b in zip(cam0, cam1)) < 0.05 and abs(sliders[ax] - after[ax]) < 2e-3
     t = pg.evaluate('''() => { const v = window.__view; let t0 = performance.now(); for (let i = 0; i < 10; i++) v.setZExag(1 + i / 10);
-        const tz = (performance.now() - t0) / 10; v.setZExag(1); t0 = performance.now(); v.isoKey = ''; v.rebuild(); return [tz, performance.now() - t0]; }''')
+        const tz = (performance.now() - t0) / 10; v.setZExag(1); t0 = performance.now(); v.isoBuilt = false; v.rebuild(); return [tz, performance.now() - t0]; }''')
     print(f'drag: hovered plane {hov} (axis {ax}), slice {before[ax]:.3f} -> {after[ax]:.3f}, orbit disabled while dragging, '
           f'slider in sync: {"ok" if ok else "FAILED"}; z exaggeration update {t[0]:.1f} ms vs full rebuild {t[1]:.0f} ms')
     if not ok:
