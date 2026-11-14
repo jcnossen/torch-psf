@@ -66,8 +66,6 @@ estimate, or a PSF json). On the demo it recovers the truth to about 0.002 waves
 Known limitation (as torch_psf): on dense filament structures the estimate is biased (Noll 6 low, a spurious Noll 12);
 the demo therefore uses uniform sites. "Localize only" (Advanced) localizes with the start PSF without estimating it.
 
-![landing view](docs/landing.png)
-
 ### Bead z-stack
 
 1. Drop one or more bead z-stack TIFFs (or choose files). Several stacks: one file each. A stack split over several files
