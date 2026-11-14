@@ -215,6 +215,9 @@ export class VecEngine {
     return new Float32Array(await this.readback('psfAll', B * this.R * this.R * 4));
   }
 
+  /** Images per call of psfAndJacobian. */
+  get jacobianChunk(): number { return this.chunkJ; }
+
   /** Test / export helper: PSF and all derivative images for B <= one chunk: [D, B, R, R]. */
   async psfAndJacobian(params: ImageParams[]): Promise<Float32Array> {
     const B = params.length;

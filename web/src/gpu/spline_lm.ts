@@ -1,6 +1,7 @@
 // Spline PSF localization on the GPU: torch_psf.fit.localize (Levenberg-Marquardt, zstarts starting heights, best
 // likelihood wins), crlb and the chi2 of torch_psf.pipeline.localize_spots, for a ConvSplinePSF given by its knots.
 import src from './kernels/spline_lm.wgsl?raw';
+import gradSrc from './kernels/knot_grad.wgsl?raw';
 
 const SU = GPUBufferUsage.STORAGE, CD = GPUBufferUsage.COPY_DST, CS = GPUBufferUsage.COPY_SRC;
 
@@ -36,6 +37,7 @@ export class SplineLocalizer {
   private pipe: GPUComputePipeline;
   readonly g: SplineGrid;
   private knots: GPUBuffer;
+  private gradPipe: GPUComputePipeline | null = null;
 
   constructor(dev: GPUDevice, grid: SplineGrid, knots: Float32Array) {
     this.dev = dev; this.g = grid;
@@ -106,6 +108,49 @@ export class SplineLocalizer {
       }
       return r;
     } finally { for (const b of [bR, bT, bO, bU, rb]) b.destroy(); }
+  }
+
+  /** torch_psf.insitu.knot_gradient: d NLL / d knots [nz, nv, nu] at fixed theta [N, 5] summed over the ROIs, and the
+   *  total NLL (poisson_nll without var, constant dropped). */
+  async knotGradient(rois: Float32Array, N: number, theta: Float32Array): Promise<{ gK: Float32Array; nll: number }> {
+    const g = this.g, P2 = g.roisize ** 2, nK = g.nz * g.nv * g.nu;
+    if (!this.gradPipe) this.gradPipe = this.dev.createComputePipeline({ layout: 'auto', compute: { module: this.dev.createShaderModule({ code: gradSrc }), entryPoint: 'knot_grad' } });
+    const mk = (size: number, usage = SU | CD) => this.dev.createBuffer({ size: Math.max(16, size), usage });
+    const bR = mk(N * P2 * 4), bT = mk(N * 20), bG = mk(nK * 4, SU | CD | CS), bN = mk(N * 4, SU | CS), bU = mk(48, GPUBufferUsage.UNIFORM | CD);
+    const rG = this.dev.createBuffer({ size: nK * 4, usage: GPUBufferUsage.MAP_READ | CD });
+    const rN = this.dev.createBuffer({ size: Math.max(16, N * 4), usage: GPUBufferUsage.MAP_READ | CD });
+    try {
+      this.dev.queue.writeBuffer(bR, 0, rois.buffer, rois.byteOffset, N * P2 * 4);
+      this.dev.queue.writeBuffer(bT, 0, theta.buffer, theta.byteOffset, N * 20);
+      const dv = new DataView(new ArrayBuffer(48));
+      [N, g.roisize, g.S, g.nz, g.nv, g.nu, 0, 0].forEach((v, i) => dv.setUint32(4 * i, v, true));
+      [g.z0, g.hz, this.oS0(), g.xmax].forEach((v, i) => dv.setFloat32(32 + 4 * i, v, true));
+      this.dev.queue.writeBuffer(bU, 0, dv.buffer);
+      const bg = this.dev.createBindGroup({ layout: this.gradPipe.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: bU } }, { binding: 1, resource: { buffer: this.knots } }, { binding: 2, resource: { buffer: bR } },
+        { binding: 3, resource: { buffer: bT } }, { binding: 4, resource: { buffer: bG } }, { binding: 5, resource: { buffer: bN } }] });
+      const enc = this.dev.createCommandEncoder();
+      enc.clearBuffer(bG);
+      const pass = enc.beginComputePass();
+      pass.setPipeline(this.gradPipe); pass.setBindGroup(0, bg);
+      const gx = Math.min(N, 65535);
+      pass.dispatchWorkgroups(gx, Math.ceil(N / gx));
+      pass.end();
+      enc.copyBufferToBuffer(bG, 0, rG, 0, nK * 4);
+      enc.copyBufferToBuffer(bN, 0, rN, 0, N * 4);
+      this.dev.queue.submit([enc.finish()]);
+      await Promise.all([rG.mapAsync(GPUMapMode.READ), rN.mapAsync(GPUMapMode.READ)]);
+      const gK = new Float32Array(rG.getMappedRange().slice(0));
+      const nl = new Float32Array(rN.getMappedRange());
+      let nll = 0; for (let i = 0; i < N; i++) nll += nl[i];
+      rG.unmap(); rN.unmap();
+      return { gK, nll };
+    } finally { for (const b of [bR, bT, bG, bN, bU, rG, rN]) b.destroy(); }
+  }
+
+  private oS0(): number {
+    const g = this.g, h = (g.roisize - 1) >> 1, c = Math.ceil(h + g.xmax) + 2;
+    return (-h + (c * g.S + g.S - 1) / g.S) * g.S;
   }
 
   /** torch_psf.fit.localize without theta0: zstarts heights evenly inside z_range (linspace(lo, hi, zstarts + 2)[1:-1]),

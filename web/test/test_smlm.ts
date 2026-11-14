@@ -8,6 +8,7 @@ import { parseNpz } from '../src/io/npy';
 import { buildKnots } from '../src/psf/spline';
 import { localizeMovie, NCOL } from '../src/smlm/movie';
 import { StopToken } from '../src/core/task';
+import { knotsAndJacobian, fitZernikeKnots } from '../src/smlm/insitu';
 
 test('smlm: spot detection = torch_psf extract_spots / detect_spots', async () => {
   const meta = await fetchJson('smlm/movie.json');
@@ -118,5 +119,54 @@ test('smlm: whole movie pipeline (ADU -> detect -> knots -> localize) = torch_ps
   const msg = `${s.n_locs} localizations in ${s.seconds.toFixed(2)} s; first ${n} rows vs torch_psf: frames differ ${frameBad}, ` +
     `|dxy| median ${dx[n >> 1].toExponential(1)} px, 99% ${dx[Math.floor(0.99 * (n - 1))].toExponential(1)}, max ${dxy.toExponential(1)}; max |dz| ${dzz.toExponential(1)} um`;
   check(s.n_locs === 718 && frameBad === 0 && dx[Math.floor(0.99 * (n - 1))] < 0.01, msg);
+  return msg;
+});
+
+test('insitu: knot gradient and Zernike VJP = torch_psf knot_gradient / vjp_vectorial', async () => {
+  const meta = await fetchJson('smlm/insitu.json');
+  const z = await parseNpz(await fetchBuf('smlm/insitu_grad.npz'));
+  const { device } = await getDevice();
+  const g = splineGrid(15, 0, 0.8, 2, 0.04, 5, 3.0);
+  const Kref = z.knots.data as Float32Array, N = z.rois.shape[0];
+  // knots and their Zernike derivatives from the web vectorial engine (start PSF: Noll 6 = 0.07)
+  const cfg = { ...meta.optics, roisize: 0, npupil: 64, oversample: 3, zernike_noll: meta.noll };
+  const zc0 = meta.noll.map((j: number) => meta.start_zernike[String(j)] ?? 0);
+  const { knots, dK } = await knotsAndJacobian(device, cfg, zc0, g, meta.focus_um);
+  let km = 0, kd = 0; for (let i = 0; i < Kref.length; i++) { km = Math.max(km, Math.abs(Kref[i])); kd = Math.max(kd, Math.abs(knots[i] - Kref[i])); }
+  // knot gradient at torch_psf's theta on torch_psf's knots
+  const loc = new SplineLocalizer(device, g, new Float32Array(Kref));
+  const { gK, nll } = await loc.knotGradient(new Float32Array(z.rois.data as Float32Array), N, new Float32Array(z.theta.data as Float32Array));
+  loc.destroy();
+  const gr = z.gK.data as Float32Array;
+  let gm = 0, gd = 0, dot = 0, n1 = 0, n2 = 0;
+  for (let i = 0; i < gr.length; i++) { gm = Math.max(gm, Math.abs(gr[i])); gd = Math.max(gd, Math.abs(gK[i] - gr[i])); dot += gK[i] * gr[i]; n1 += gK[i] ** 2; n2 += gr[i] ** 2; }
+  // VJP with torch_psf's gK and the web knot derivatives
+  const nK = gr.length, gzr = z.gz.data as Float32Array;
+  const gz = meta.noll.map((_: number, q: number) => { let s = 0; for (let k = 0; k < nK; k++) s += gr[k] * dK[q * nK + k]; return s; });
+  let zm = 0, zd = 0; gzr.forEach((v, q) => { zm = Math.max(zm, Math.abs(v)); zd = Math.max(zd, Math.abs(gz[q] - v)); });
+  const nllRef = Number((z.nll.data as Float64Array)[0]);
+  const msg = `${N} ROIs; knots rel. ${(kd / km).toExponential(1)}; knot gradient max rel. ${(gd / gm).toExponential(1)}, cosine ${(dot / Math.sqrt(n1 * n2)).toFixed(7)}; ` +
+    `NLL ${nll.toFixed(0)} vs ${nllRef.toFixed(0)} (rel. ${(Math.abs(nll - nllRef) / Math.abs(nllRef)).toExponential(1)}); Zernike gradient max rel. ${(zd / zm).toExponential(1)}`;
+  check(kd / km < 1e-4 && gd / gm < 1e-3 && zd / zm < 1e-3, msg);
+  return msg;
+});
+
+test('insitu: fit_zernike_knots on the torch_psf training ROIs (40 iterations) recovers the same Zernikes', async () => {
+  const meta = await fetchJson('smlm/insitu.json');
+  const z = await parseNpz(await fetchBuf('smlm/insitu_grad.npz'));
+  const { device } = await getDevice();
+  const g = splineGrid(15, 0, 0.8, 2, 0.04, 5, 3.0);
+  const cfg = { ...meta.optics, roisize: 0, npupil: 64, oversample: 3, zernike_noll: meta.noll };
+  const zc0 = meta.noll.map((j: number) => meta.start_zernike[String(j)] ?? 0);
+  const N = z.rois.shape[0];
+  const r = await fitZernikeKnots(device, new Float32Array(z.rois.data as Float32Array), N, cfg, zc0, g, meta.focus_um, { iters: meta.iters });
+  const fin: number[] = meta.final_zernike, tru = meta.noll.map((j: number) => meta.truth_zernike[String(j)] ?? 0);
+  const rms = (a: number[], b: number[]) => Math.sqrt(a.reduce((s, v, i) => s + (v - b[i]) ** 2, 0) / a.length);
+  // the first Adam steps are sign(gradient) x lr, so the history must agree closely at the start
+  const h1 = r.history[3].zcoef, p1: number[] = meta.history[3].zcoef;
+  const msg = `${N} ROIs, ${r.history.length} iterations in ${r.seconds.toFixed(1)} s; zcoef rms vs torch_psf after 3 steps ${rms(h1, p1).toExponential(1)}, ` +
+    `final ${rms(r.zcoef, fin).toExponential(1)} w; vs truth: web ${rms(r.zcoef, tru).toFixed(4)}, torch_psf ${rms(fin, tru).toFixed(4)} w; ` +
+    `web Noll 5/6/11: ${[5, 6, 11].map((j) => r.zcoef[meta.noll.indexOf(j)].toFixed(4)).join(' / ')}`;
+  check(rms(r.zcoef, fin) < 2e-3 && rms(h1, p1) < 1e-4, msg);
   return msg;
 });
