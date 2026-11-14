@@ -15,8 +15,8 @@ spline = tp.ConvCubicSplinePSF.from_zstack(stack, z0_um=-1.0, dz_um=0.05, roisiz
 print(spline)
 th = torch.tensor([[0.3, -0.2, 0.25, 2000.0, 10.0]], device=gauss.dev).repeat(2000, 1)
 mu = th[:, 3, None, None] * spline.render(th[:, :3]) + th[:, 4, None, None]
-L = spline.fit(torch.poisson(mu))
-fit = torch.tensor(np.stack([L[k] for k in ('x', 'y', 'z', 'photons', 'bg')], 1))
+L = spline.fit(torch.poisson(mu))                   # a Dataset; this spline has no pixel size, so z stays in um
+fit = torch.cat([L.pos.float(), L.photons[:, None], L.bg[:, None]], 1)
 sd = (fit - th.cpu()).std(0)
 cr = spline.crlb(th[:1])[0].cpu()
 for k, n in enumerate(['x (px)', 'y (px)', 'z (um)', 'photons', 'bg']):

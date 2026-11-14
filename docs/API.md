@@ -35,6 +35,28 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 | `fit_tracks(...)` | adds `fix_zernike`, `fix_focus`; `report['nll_per_px']` is the NLL after the last step (`nll_per_px_before_last_step` the value the last step started from) |
 | `fit_beads(...)` | adds `fit_dz_scale` (z-step scale), `fit_height` (bead height), `intensity='bead_x_plane'` (per-plane factors, e.g. bleaching); held-out beads (weight 0) are refitted (position / photons / bg, PSF fixed) before they are scored (`report['heldout_nll_per_px']`); `bead_diameter_um` as before. ZStackEstimator exposes the same options |
 
+### 2026-11-14: Dataset (breaking)
+
+| old | new |
+|---|---|
+| localization table (numpy structured array `table.LOC_DTYPE`: frame, x, y, z, photons, bg, crlb_x / y / z / photons / bg, loglik, chi2, at_limit) | `torch_psf.Dataset` (dict of tensors): `pos` [n, D] px (x, y, z; **z in px** of the lateral pixel size when the model knows it, else um with `meta['z_unit'] = 'um'`), `crlb` [n, D] (same units), `frame`, `n_frames` (1), `id`, `photons`, `bg`, `crlb_photons`, `crlb_bg`, `loglik`, `chi2`, `at_limit`; meta `pixel_nm`, `image_size`, `n_frames`, `method` |
+| `PSF.fit` / `PSF.localize` return the table | they return a Dataset (`fit(..., pixel_um=None)`, `localize(..., pixel_um=None)` override the pixel size used for z) |
+| `table.to_csv` | `Dataset.save('x.csv')` (ThunderSTORM) or `.hdf5` (docs/DATASET_FORMAT.md); `save_picasso` |
+| `ConvCubicSplinePSF` | has `pixel_um` (set by `VectorialPSF.to_spline`, stored in the spline file) |
+
+## Dataset (`torch_psf.dataset.Dataset`; format: docs/DATASET_FORMAT.md)
+
+`Dataset(fields, meta=None, drift=None, drift_applied=False)`, `Dataset.from_arrays(pos, frame, crlb, photons, bg,
+n_frames, meta, **fields)`; `ds['pos']` / `ds.pos`, `len(ds)`, `ds[mask | slice | indices | int]` (all fields),
+`ds['name'] = tensor`, `add_fields(**)`, `keys()`, `copy()`, `to(device)`, `numpy()`; `n_dims`, `end_frame`,
+`center_frame`, `pixel_nm`, `pos_nm`, `num_frames`, `indices_per_frame()`; filters returning a new object and in-place
+`_` variants: `filter(mask)`, `filter_finite()`, `filter_photons(min, max)`, `filter_crlb(max_px, max_nm)`,
+`filter_frames(start, stop)`, `crop(x0, y0, x1, y1, shift)`, `crop_from_edge(dist)`; `Dataset.concatenate(items,
+set_group)`, `+`; drift: `set_drift`, `drift_at`, `apply_drift`, `undo_drift`, `estimate_drift` (DME v2, optional
+dependency); `render(pixel_nm, region, sigma_nm, weights)` (2D histogram), `frc(block=300, pixel_nm=5)` (even / odd
+blocks of frames, 5-ring smoothing, 1/7 threshold); files: `save` / `load` (.hdf5 / .h5 this format, .csv
+ThunderSTORM), `save_picasso` / `load_picasso`, `save_csv` / `load_csv`.
+
 ## Classes
 
 ```
@@ -42,8 +64,8 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
   roisize, z_range (None = 2D), n_dims,       expected(theta) -> mu [N, P, P]
   xy_limit, z_limits, dev, to(device),        fisher(theta, var=None), crlb(theta, var=None) -> [N, 5]
   resized(roisize)                            fit(rois | Spots, camera=None, theta0=None, corners=None, frames=None)
-                                                  -> localization table (LOC_DTYPE)
-                                              localize(movie, camera=None, frames=None, ...) -> table
+                                                  -> Dataset
+                                              localize(movie, camera=None, frames=None, ...) -> Dataset
                                               save(path) / PSF.load(path) (type dispatch; plain calibration json too)
                                               to_spline(roisize, z_range, oversample, dz_um, zpad, xy_limit)
 ├── GaussianPSF(roisize, sigma_px)                                   2D
@@ -148,10 +170,7 @@ loss = NLL(rois) + w_stack NLL(stack) + lam_ref sum((K - ref)^2 / (|ref| + 1e-4)
 `linspace(z_range)` rendered with psf_new, localized with psf_ref; least-squares line through the inner 80 % (indices
 `int(0.1 n) .. n - int(0.1 n)`): returns (slope d z_ref / d z_new, offset at the centre of that range, um).
 
-## Tables and simulation
-
-`table.LOC_DTYPE`: `frame i4, x f4, y f4, z f4, photons f4, bg f4, crlb_x f4, crlb_y f4, crlb_z f4, crlb_photons f4,
-crlb_bg f4, loglik f4 (= -NLL), chi2 f4 (mean of (d - mu)^2 / (mu + v) per pixel), at_limit ?` (image px, um, photons).
+## Simulation
 
 `simulate.simulate_emitters`, `simulate_bead_stack`, `simulate_movie`: seeded by a `torch.Generator`; the order of the
 random draws is part of the API (reference data depend on it). `simulate_movie(..., sites=(x, y, z))` takes given

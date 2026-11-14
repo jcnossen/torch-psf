@@ -16,13 +16,15 @@ def test_localize_movie():
     L = psf.localize(movie.numpy(), isolation=6)
     assert len(L) > 0.5 * len(truth)
     tr = truth.cpu().numpy()
+    F = L.numpy()
+    assert L.n_dims == 2 and L.meta['image_size'] == [64, 64] and L.meta['n_frames'] == 100
     err = []
-    for r in L:
-        t = tr[tr[:, 0] == r['frame']]
-        dd = np.hypot(t[:, 1] - r['x'], t[:, 2] - r['y'])
+    for f, (x, y) in zip(F['frame'], F['pos']):
+        t = tr[tr[:, 0] == f]
+        dd = np.hypot(t[:, 1] - x, t[:, 2] - y)
         if len(dd) and dd.min() < 1:
             err.append(dd.min())
-    assert len(err) > 0.9 * len(L) and np.median(err) < 3 * np.median(L['crlb_x'])
+    assert len(err) > 0.9 * len(L) and np.median(err) < 3 * np.median(F['crlb'][:, 0])
 
 
 def bead_tif(tmp_path, vec, nk=31, H=64, dz=0.03):
@@ -58,9 +60,10 @@ def test_cli_localize(tmp_path):
                                   photons=3000.0, z_range=(0.0, 0.0), margin=8, generator=g, device=DEV)
     tifffile.imwrite(tmp_path / 'm.tif', (movie.numpy() / 0.5 + 100).astype(np.uint16), photometric='minisblack')
     assert main(['localize', str(tmp_path / 'm.tif'), '--psf', str(tmp_path / 'g.json'), '--gain', '0.5', '--offset',
-                 '100', '-o', str(tmp_path / 'locs.csv'), '--device', DEV]) == 0
-    L = np.genfromtxt(tmp_path / 'locs.csv', delimiter=',', names=True)
-    assert len(L) > 0.5 * len(truth) and abs(np.median(L['photons']) / 3000 - 1) < 0.15
+                 '100', '-o', str(tmp_path / 'locs.hdf5'), '--device', DEV]) == 0
+    from torch_psf import Dataset
+    L = Dataset.load(tmp_path / 'locs.hdf5')
+    assert len(L) > 0.5 * len(truth) and abs(float(L.photons.median()) / 3000 - 1) < 0.15
 
 
 @needs_gpu

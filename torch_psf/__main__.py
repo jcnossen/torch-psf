@@ -113,7 +113,7 @@ def main(argv=None):
     p.add_argument('-o', '--out', required=True)
     _optics_args(p); _camera_args(p); _common(p)
 
-    p = sub.add_parser('localize', help='movie -> localizations (csv or npy)')
+    p = sub.add_parser('localize', help='movie -> localizations (.hdf5 Dataset or ThunderSTORM .csv)')
     p.add_argument('movie')
     p.add_argument('--psf', required=True, help='PSF file (vectorial models are converted to a spline for speed)')
     p.add_argument('--roisize', type=int, default=None)
@@ -121,7 +121,7 @@ def main(argv=None):
     p.add_argument('--frames', default='', help='a:b')
     p.add_argument('--threshold', type=float, default=6.0)
     p.add_argument('--isolation', type=float, default=None)
-    p.add_argument('-o', '--out', required=True, help='.csv or .npy')
+    p.add_argument('-o', '--out', required=True, help='.hdf5 (Dataset) or .csv (ThunderSTORM)')
     _camera_args(p); _common(p)
 
     p = sub.add_parser('view', help='interactive PSF viewer in the browser')
@@ -151,17 +151,15 @@ def main(argv=None):
     elif a.cmd == 'localize':
         from torch_psf.psf import PSF
         from torch_psf.vectorial import VectorialPSF
-        from torch_psf.table import to_csv
         psf = PSF.load(a.psf, roisize=a.roisize, device=a.device)
         if isinstance(psf, VectorialPSF):
             psf = psf.to_spline(psf.roisize, tuple(a.z_range) if a.z_range else None)
         L = psf.localize(a.movie, _camera(a), frames=_frames(a.frames), threshold=a.threshold,
                          isolation=a.isolation,
                          progress=lambda d, t, n: print(f'  {d}/{t} frames, {n} localizations', flush=True))
-        if a.out.endswith('.npy'):
-            np.save(a.out, L)
-        else:
-            to_csv(L, a.out)
+        if L.pixel_nm is None and not a.out.endswith(('.hdf5', '.h5')):
+            raise SystemExit('the PSF has no pixel size: write .hdf5 (ThunderSTORM csv needs nm)')
+        L.save(a.out)
         print(f'{len(L)} localizations -> {a.out}')
     elif a.cmd == 'view':
         from torch_psf.viewer import serve
