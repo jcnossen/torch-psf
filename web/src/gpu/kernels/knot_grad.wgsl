@@ -3,11 +3,12 @@
 // scatter-add). One workgroup per spot: (1) the per-pixel factor r = photons x (1 - d / mu) (0 where mu is clamped at
 // 1e-6, as torch's clamp_min gradient), (2) every knot of the spot's 4 x Lw x Lw window gathers the pixels it
 // touches (at most 2 x 2 for S = 2) and adds its sum to the global gradient with a float atomic (compare-exchange).
-// Also the NLL of each spot (poisson_nll, constant dropped).
+// Also the NLL of each spot (poisson_nll, constant dropped). With a read-noise variance var (photons^2, scalar) the
+// shifted-Poisson approximation of poisson_nll: mv = (mu + var) clamped at 1e-6, l = mv - (d + var)+ log mv.
 
 struct U {
   N: u32, P: u32, S: u32, nz: u32,
-  nv: u32, nu: u32, _a: u32, _b: u32,
+  nv: u32, nu: u32, rvar: f32, _b: u32,
   z0: f32, hz: f32, oS0: f32, xmax: f32,
 };
 
@@ -62,11 +63,11 @@ fn knot_grad(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li:
       }
       v += wz[c] * pv;
     }
-    let mu0 = I * v + bg;
-    let d = rois[spot * P * P + p];
-    let mu = max(mu0, 1e-6);
-    nl += mu - d * log(mu);
-    rpix[p] = select(0.0, I * (1.0 - d / mu), mu0 >= 1e-6);
+    let mv0 = I * v + bg + u.rvar;
+    let dv = max(rois[spot * P * P + p] + u.rvar, 0.0);
+    let mv = max(mv0, 1e-6);
+    nl += mv - dv * log(mv);
+    rpix[p] = select(0.0, I * (1.0 - dv / mv), mv0 >= 1e-6);
   }
   part[lid] = nl;
   workgroupBarrier();

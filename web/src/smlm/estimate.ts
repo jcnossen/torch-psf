@@ -48,6 +48,8 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   let n = 0, done = 0, nChunks = 0;
   const eta = new Eta();
   const F2 = form.excessNoise ?? 1;
+  // read-noise variance of the spots (photons^2): readnoise^2 / excess_noise^2, used in every likelihood (torch_psf 4e2bcac)
+  const rvar = form.readnoise_e > 0 ? Math.fround(form.readnoise_e * form.readnoise_e / (F2 * F2)) : 0;
   try {
     for (const f0 of starts) {
       if (n >= maxSpots) break;
@@ -91,7 +93,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   const logFit = (offset: number, nRoi: number, stage: string) => (hh: InsituIter) => progress({ stage, done: offset + hh.it + 1, total,
     info: { nll_per_px: hh.nll / (nRoi * P2), zcoef: hh.zcoef.map((v) => v.toFixed(4)).join(' ') }, elapsed_s: hh.seconds });
   const tFit0 = performance.now();
-  let fit = await fitZernikeKnots(dev, dTr, tr.length, cfg, form.zcoef, g, form.focus_um, { iters: form.iters, tok, log: logFit(0, tr.length, 'fit') });
+  let fit = await fitZernikeKnots(dev, dTr, tr.length, cfg, form.zcoef, g, form.focus_um, { iters: form.iters, tok, log: logFit(0, tr.length, 'fit'), var: rvar });
   let partial = fit.history.length < form.iters;
   const K0 = fit.K0;
   let nRej = 0, thr: number | null = null, nFit = tr.length, history = fit.history, dFit = dTr;
@@ -101,7 +103,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     const K1a = (await knotsAndJacobian(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um)).knots;
     const loc = new SplineLocalizer(dev, g, K1a);
     let dv: Float32Array;
-    try { dv = (await loc.localize(dTr, tr.length)).deviance; } finally { loc.destroy(); }
+    try { dv = (await loc.localize(dTr, tr.length, { var: rvar })).deviance; } finally { loc.destroy(); }
     // deviance_rule 'median' (default): median + k max(1.4826 MAD, median sqrt(2 / P^2)); 'poisson': 1 + k sqrt(2 / P^2)
     const med = median(dv);
     let scale: number;
@@ -117,7 +119,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     const dKeep = new Float32Array(keep.length * P2);
     keep.forEach((i, q) => dKeep.set(dTr.subarray(i * P2, (i + 1) * P2), q * P2));
     dFit = dKeep;
-    const fit2 = await fitZernikeKnots(dev, dKeep, keep.length, cfg, fit.zcoef, g, form.focus_um, { iters: it2, tok, log: logFit(form.iters, keep.length, 'fit (overlaps rejected)') });
+    const fit2 = await fitZernikeKnots(dev, dKeep, keep.length, cfg, fit.zcoef, g, form.focus_um, { iters: it2, tok, log: logFit(form.iters, keep.length, 'fit (overlaps rejected)'), var: rvar });
     partial = partial || fit2.history.length < it2;
     history = [...fit.history, ...fit2.history];
     fit = { ...fit2, K0 };
@@ -133,7 +135,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   if (form.refine && !tok.stopEarly) {
     const outer = form.refineOuter ?? 12;
     progress({ stage: 'refine', done: 0, total: outer });
-    const rr = await fitFreeKnots(dev, g, K1, K1, dFit, nFit, { outer, tok,
+    const rr = await fitFreeKnots(dev, g, K1, K1, dFit, nFit, { outer, tok, var: rvar,
       log: (h) => progress({ stage: 'refine', done: h.it + 1, total: outer, info: { loss: h.loss }, elapsed_s: h.seconds }) });
     const zr = await zScale(dev, rr.knots, K1, g);
     refine = { kept: false, heldout_refined: null, z_scale_vs_vectorial: zr.scale, z_offset_um_vs_vectorial: zr.offset, outer: rr.history.length, seconds: rr.seconds, knots: rr.knots };
@@ -143,7 +145,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     const chi2s: Float32Array[] = [];
     const nllPx = async (K: Float32Array) => {
       const loc = new SplineLocalizer(dev, g, K);
-      try { const r = await loc.localize(dTe, te.length); chi2s.push(r.chi2); let s = 0; for (const v of r.nll) s += v; return s / te.length / P2; }
+      try { const r = await loc.localize(dTe, te.length, { var: rvar }); chi2s.push(r.chi2); let s = 0; for (const v of r.nll) s += v; return s / te.length / P2; }
       finally { loc.destroy(); }
     };
     const a = await nllPx(fit.K0), b = await nllPx(K1);

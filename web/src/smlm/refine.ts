@@ -117,7 +117,7 @@ export interface RefineResult { knots: Float32Array; theta: Float32Array; histor
 
 /** torch_psf.insitu.fit_free_knots(spline, knots0, rois=rois, ref=ref, lam_ref, lam_s, outer, inner) without a bead stack. */
 export async function fitFreeKnots(dev: GPUDevice, g: KnotGridFull, K0: Float32Array, ref: Float32Array, rois: Float32Array, N: number,
-  o: { lamRef?: number; lamS?: number; outer?: number; inner?: number; tok?: StopToken; log?: (h: { it: number; loss: number; seconds: number }) => void } = {}): Promise<RefineResult> {
+  o: { lamRef?: number; lamS?: number; outer?: number; inner?: number; tok?: StopToken; log?: (h: { it: number; loss: number; seconds: number }) => void; var?: number } = {}): Promise<RefineResult> {
   const lamRef = o.lamRef ?? 3000, lamS = o.lamS ?? 1000, outer = o.outer ?? 12, inner = o.inner ?? 8, eps = 1e-4;
   const nz = g.nz, nv = g.nv, nu = g.nu, nK = nz * nv * nu;
   const wref = new Float64Array(nK), wsm = new Float64Array(nK);
@@ -153,11 +153,11 @@ export async function fitFreeKnots(dev: GPUDevice, g: KnotGridFull, K0: Float32A
     for (let it = 0; it < outer; it++) {
       o.tok?.check();
       loc.setKnots(Float32Array.from(K));
-      th = th ? (await loc.run(rois, N, th, { iters: 5 })).theta : (await loc.localize(rois, N)).theta;
+      th = th ? (await loc.run(rois, N, th, { iters: 5, var: o.var })).theta : (await loc.localize(rois, N, { var: o.var })).theta;
       const thFix = th;
       const closure = async (x: Vec) => {
         loc.setKnots(Float32Array.from(x));
-        const { gK, nll } = await loc.knotGradient(rois, N, thFix);
+        const { gK, nll } = await loc.knotGradient(rois, N, thFix, o.var ?? 0);
         const gr = Float64Array.from(gK);
         const f = nll + (lamRef > 0 || lamS > 0 ? reg(x, gr) : 0);
         return { f, g: gr };

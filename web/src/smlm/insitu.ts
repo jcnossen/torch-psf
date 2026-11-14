@@ -45,7 +45,7 @@ export interface InsituIter { it: number; nll: number; seconds: number; zcoef: n
 
 /** torch_psf.insitu.fit_zernike_knots (route 'K') on ROIs [N, P, P] (photons). */
 export async function fitZernikeKnots(dev: GPUDevice, rois: Float32Array, N: number, cfg: VectorialConfig, zc0: number[], g: KnotGridFull,
-  focus_um: number, o: { iters?: number; lr?: number; locIters?: number; tok?: StopToken; log?: (h: InsituIter) => void } = {}) {
+  focus_um: number, o: { iters?: number; lr?: number; locIters?: number; tok?: StopToken; log?: (h: InsituIter) => void; var?: number } = {}) {
   const iters = o.iters ?? 80, lr = o.lr ?? 2e-3, nZ = zc0.length, nK = g.nz * g.nv * g.nu;
   let zc = Float64Array.from(zc0);
   const m = new Float64Array(nZ), v = new Float64Array(nZ);
@@ -60,10 +60,10 @@ export async function fitZernikeKnots(dev: GPUDevice, rois: Float32Array, N: num
       if (!K0) K0 = knots;
       lastKnots = knots;
       if (!loc) loc = new SplineLocalizer(dev, g, knots); else loc.setKnots(knots);
-      const r: LocResult = th ? await loc.run(rois, N, th, { iters: o.locIters ?? 3 }) : await loc.localize(rois, N);
+      const r: LocResult = th ? await loc.run(rois, N, th, { iters: o.locIters ?? 3, var: o.var }) : await loc.localize(rois, N, { var: o.var });
       const thNow: Float32Array = r.theta;
       th = thNow;
-      const { gK, nll } = await loc.knotGradient(rois, N, thNow);
+      const { gK, nll } = await loc.knotGradient(rois, N, thNow, o.var ?? 0);
       const gz = new Float64Array(nZ);
       for (let z = 0; z < nZ; z++) { let s = 0; const off = z * nK; for (let k = 0; k < nK; k++) s += gK[k] * dK[off + k]; gz[z] = s; }
       const h: InsituIter = { it, nll, seconds: (performance.now() - t0) / 1000, zcoef: Array.from(zc) };

@@ -113,7 +113,7 @@ export class SplineLocalizer {
 
   /** torch_psf.insitu.knot_gradient: d NLL / d knots [nz, nv, nu] at fixed theta [N, 5] summed over the ROIs, and the
    *  total NLL (poisson_nll without var, constant dropped). */
-  async knotGradient(rois: Float32Array, N: number, theta: Float32Array): Promise<{ gK: Float32Array; nll: number }> {
+  async knotGradient(rois: Float32Array, N: number, theta: Float32Array, rvar = 0): Promise<{ gK: Float32Array; nll: number }> {
     const g = this.g, P2 = g.roisize ** 2, nK = g.nz * g.nv * g.nu;
     if (!this.gradPipe) this.gradPipe = this.dev.createComputePipeline({ layout: 'auto', compute: { module: this.dev.createShaderModule({ code: gradSrc }), entryPoint: 'knot_grad' } });
     const mk = (size: number, usage = SU | CD) => this.dev.createBuffer({ size: Math.max(16, size), usage });
@@ -125,6 +125,7 @@ export class SplineLocalizer {
       this.dev.queue.writeBuffer(bT, 0, theta.buffer, theta.byteOffset, N * 20);
       const dv = new DataView(new ArrayBuffer(48));
       [N, g.roisize, g.S, g.nz, g.nv, g.nu, 0, 0].forEach((v, i) => dv.setUint32(4 * i, v, true));
+      dv.setFloat32(24, rvar, true);
       [g.z0, g.hz, this.oS0(), g.xmax].forEach((v, i) => dv.setFloat32(32 + 4 * i, v, true));
       this.dev.queue.writeBuffer(bU, 0, dv.buffer);
       const bg = this.dev.createBindGroup({ layout: this.gradPipe.getBindGroupLayout(0), entries: [

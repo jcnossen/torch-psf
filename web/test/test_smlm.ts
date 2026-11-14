@@ -180,7 +180,7 @@ test('insitu: whole estimate (movie -> spots -> split -> fit -> overlap rejectio
   const { device } = await getDevice();
   const files = [new File([await fetchBuf('smlm/insitu_movie.tif')], 'insitu_movie.tif')];
   const r = await estimateInsitu(device, files, {
-    optics: meta.optics, gain: meta.params.gain_e_per_adu, offset: meta.params.offset_adu, readnoise_e: 0, focus_um: meta.focus_um,
+    optics: meta.optics, gain: meta.params.gain_e_per_adu, offset: meta.params.offset_adu, readnoise_e: meta.params.readnoise_e, focus_um: meta.focus_um,
     zlo: meta.z_range[0], zhi: meta.z_range[1], roisize: meta.roisize, threshold: 6, isolation: 0, chunk: 500, maxFrames: 0,
     npupil: 64, oversample: 3, noll: meta.noll, zcoef: meta.noll.map((j: number) => meta.start_zernike[String(j)] ?? 0),
     nspots: meta.nspots, nheldout: meta.nheldout, iters: meta.iters, tile: 16,
@@ -238,7 +238,7 @@ test('insitu: whole estimate with refine=True = torch_psf InSituEstimator(refine
   const { device } = await getDevice();
   const files = [new File([await fetchBuf('smlm/insitu_movie.tif')], 'insitu_movie.tif')];
   const r = await estimateInsitu(device, files, {
-    optics: meta.optics, gain: meta.params.gain_e_per_adu, offset: meta.params.offset_adu, readnoise_e: 0, focus_um: meta.focus_um,
+    optics: meta.optics, gain: meta.params.gain_e_per_adu, offset: meta.params.offset_adu, readnoise_e: meta.params.readnoise_e, focus_um: meta.focus_um,
     zlo: meta.z_range[0], zhi: meta.z_range[1], roisize: meta.roisize, threshold: 6, isolation: 0, chunk: 500, maxFrames: 0,
     npupil: 64, oversample: 3, noll: meta.noll, zcoef: meta.noll.map((j: number) => meta.start_zernike[String(j)] ?? 0),
     nspots: meta.nspots, nheldout: meta.nheldout, iters: meta.iters, tile: 16, refine: true, refineOuter: ref.refine_outer,
