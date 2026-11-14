@@ -17,7 +17,7 @@ usage: python insitu_vecbeads.py --tag T [--nmax 21] [--s 1] [--z6 0.1] [--fix N
 import sys, json, time, argparse, math
 sys.path.insert(0, '.'); sys.path.insert(0, 'study/realdata')
 import numpy as np, torch
-from insitu_common import AVecPSF, DEV, D, OUT, jdump
+from insitu_common import AVecPSF, DEV, D, OUT, jdump, PX0, PY0
 from torch_convspline.knotpsf import poisson_nll
 
 ap = argparse.ArgumentParser()
@@ -32,8 +32,8 @@ ap.add_argument('--npupil', type=int, default=64)
 ap.add_argument('--os', type=int, default=3)
 ap.add_argument('--init', default='')                      # json state to start from
 ap.add_argument('--NA0', type=float, default=1.45)
-ap.add_argument('--px0', type=float, default=0.135)
-ap.add_argument('--py0', type=float, default=0.142)
+ap.add_argument('--px0', type=float, default=PX0)
+ap.add_argument('--py0', type=float, default=PY0)
 ap.add_argument('--zmax', type=float, default=0.9)
 ap.add_argument('--adam', type=int, default=3000)
 ap.add_argument('--lr', type=float, default=1e-2)

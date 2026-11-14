@@ -26,7 +26,10 @@ report an implementation pitfall (a limit on the fitted offset inside the patch)
 in an earlier version of this study. On real astigmatic data of nuclear pores, refining a vectorial model in
 situ through the knots improves the held-out likelihood over a bead-calibrated spline, but changes the
 localization precision by 3\,\% at most and does not resolve the two rings of the pore; it does change the z
-scale by about 10\,\%, and this data set cannot tell which z scale is right.
+scale by about 10\,\%, and this data set cannot tell which z scale is right. On microtubule data the same
+refinement again improves the likelihood without improving the precision, and the microtubule cross-section is
+not a sharp enough ruler to settle the z scale. It does show that freely refined knots, which have by far the
+best likelihood and the best frame-to-frame repeatability there, give wrong z positions.
 \end{abstract}
 
 \section{Introduction}
@@ -356,6 +359,93 @@ after about 50 iterations.
 So on this data set the in-situ vectorial refinement is fast and improves the fit of the images, but a bead
 spline was already at the Cram\'er--Rao bound, and the practical gain is small. The open question it raises is
 the z scale, which needs a sample with known axial structure.
+
+\subsection{Real data: microtubules}
+\label{sec:tub}
+
+Data: 3D astigmatic dSTORM of microtubules (AF647) from the same challenge and microscope, 4 movies with
+10.1 million bead-spline localizations of which 6.7 million pass the quality flags, and a bead stack of 401
+planes with only 7 usable beads, all in the lower half of the field. The stage step is not documented; we
+assume 10\,nm. A microtubule is a cylinder, so its cross-section should be round. This gives a check on the z
+scale that the nuclear pores did not: the ratio of lateral to axial width of the cross-section, $\kappa$, is
+the factor by which the z axis of a method must be multiplied to make it round. Li et al.~\cite{cspline} use
+0.75 for the refractive index mismatch.
+
+The models a to e and the split in frame blocks are as in section~\ref{sec:real} (150{,}000 training spots,
+3.35 million test spots, 1.74 million consecutive-frame pairs). The settings of d and e (roughness penalty,
+number of iterations) were chosen on a separate validation set of 30{,}000 spots.
+
+\emph{Ruler.} 33 straight, isolated 1\,$\mu$m microtubule segments (108{,}823 spots) were selected on the image
+of method a; segments with a second filament nearby were dropped. Drift, which is not corrected in these data,
+was fitted as one shift per 2000 frames shared by all segments. The width of the cross-section is the observed
+spread minus the localization precision (Cram\'er--Rao bound times the repeat ratio of that brightness class)
+in quadrature. Uncertainties are from a bootstrap over segments.
+
+\begin{table}[t]\centering\small
+\begin{tabular}{lrrrrr}\toprule
+ & a & b & c & d & e\\
+ & bead & bead & Zernike & c + pupil & free knots\\
+ & spline & vectorial & in situ & maps & in situ\\ \midrule
+deviance per spot relative to a & 0 & $+0.86$ & $-0.35$ & $-1.73$ & $-10.2$\\
+repeat x spread (pixel) & 0.0922 & 0.0935 & 0.0939 & 0.0941 & 0.0924\\
+repeat z spread (nm, in the z units of a) & 27.2 & 27.4 & 27.7 & 27.7 & 21.3\\
+same, above 8000 photons & 19.7 & 19.9 & 20.4 & 20.5 & 11.0\\
+z scale relative to a & 1 & 1.03 & 1.11 & 1.17 & 1.02$^*$\\
+largest z-dependent lateral shift relative to a (nm) & -- & 20 & 42 & 33 & 28\\
+$\kappa$ from the microtubule cross-section & 0.74 & 0.71 & 0.68 & 0.65 & 0.34\\
+\quad 95\,\% interval & 0.62--0.92 & 0.60--0.86 & 0.58--0.80 & 0.55--0.79 & 0.28--0.43\\ \bottomrule
+\end{tabular}
+\caption{Microtubule data, held-out frames; rows as in Table~\ref{tab:real} (standard errors of the deviance
+0.002 to 0.02). $\kappa$: lateral width of the microtubule cross-section divided by its axial width in the z
+units of that method; a correct z axis has $\kappa=1$, and an axis that still needs the index-mismatch factor
+has $\kappa\approx0.75$. Lateral values use a pixel size of 117.6\,nm. $^*$The z axis of e is strongly warped
+(local slope between 0.1 and 1.4), so one scale factor does not describe it.}\label{tab:tub}
+\end{table}
+
+\begin{figure}[t]\centering
+\includegraphics[width=\textwidth]{fig_tub_profiles.png}
+\caption{Microtubule cross-sections pooled over 33 segments, for the bead spline (a), bead vectorial model (b),
+Zernikes refined in situ (c), with pupil maps (d), free knots (e), and b and c with an added Gaussian blur.
+Top: density across the filament (u) and along z; middle and bottom: lateral and axial profiles. The free knots
+(e) spread the filament over several peaks in z.}\label{fig:tub}
+\end{figure}
+
+Table~\ref{tab:tub} and Fig.~\ref{fig:tub}.
+\begin{itemize}\setlength\itemsep{0pt}
+\item \emph{The vectorial model fits these beads poorly} ($\chi^2$ per pixel 9.4 against 3.0 for the spline;
+on the nuclear-pore beads 1.20 against 1.06). The misfit is in the core of the PSF at all z. Adding a Gaussian
+blur of 50\,nm brings it to 7.4, free pupil maps to 5.8, both to 3.9. The single-molecule fit asks for the
+same blur (54\,nm), so it is not the bead size (100\,nm beads would give about 22\,nm); its cause is unknown.
+As a result the bead vectorial model (b) is worse than the bead spline on the movie ($+0.86$).
+\item \emph{Likelihood.} Refining in situ recovers this and ends below the bead spline: $-0.35$ for the
+Zernikes, $-1.73$ with pupil maps. The gain grows with brightness ($-15$ per spot above 8000 photons for d).
+\item \emph{Precision.} None of the vectorial models improves the repeat spread; it becomes 1 to 2\,\% worse in
+both x and z. The lateral spread of bright spots stays far above the Cram\'er--Rao bound for all methods
+(ratio 3.0 above 8000 photons for a).
+\item \emph{Geometry.} As on the nuclear pores, the in-situ vectorial models stretch z relative to the bead
+spline, by 11\,\% (c) and 17\,\% (d), with lateral shifts of up to 42\,nm.
+\item \emph{The ruler does not decide the z scale.} For the bead spline $\kappa=0.74$ (0.62--0.92), which
+agrees with 0.75. The values for b, c and d differ from it only by their z scale and lie inside each other's
+intervals. The ruler is also not clean: $\kappa$ depends on brightness (0.87 for spots below 1500 photons, 0.62
+at 1500--3000, about 0.37 at 3000--6000, because the axial width rises with brightness while the lateral width
+does not) and is not monotonic in depth. Bright spots therefore carry z errors that persist over consecutive
+frames; overlapping emitters along the filament are a possible cause, not shown. The hollow core of the
+microtubule is not resolved by any method.
+\item \emph{Free knots look best and are wrong.} Model e has by far the best likelihood ($-10.2$) and repeat
+z spread (21 against 27\,nm; 11 against 20\,nm for bright spots). On the ruler its cross-section is 78\,nm wide
+in z against 36\,nm for the bead spline, with several peaks ($\kappa=0.34$). Its z axis is warped; between
+$-600$ and $-400$\,nm it has almost no z sensitivity left. A stiffer version (ten times less deviance gain,
+nearly linear z) is still wider than the bead spline (43\,nm). So free knots on blinking data give z values
+that repeat from frame to frame but are wrong per emitter, and neither the held-out likelihood nor the repeat
+precision detects this. This is the gauge freedom of section~\ref{sec:gauge} on real data.
+\item \emph{Speed.} As on the nuclear pores: 1.9\,s per iteration of fit c for 150{,}000 emitters, 89\,\%
+re-localization, 0.19\,s for the gradient through the knots (shared GPU).
+\end{itemize}
+Taken together, the two data sets show an in-situ vectorial refinement that is fast and improves the fit of the
+images, but no measurable gain in localization quality over a bead spline, and a 10 to 17\,\% difference in
+z scale that neither data set can assign to one of the two. What the microtubules add is a warning: held-out
+likelihood and repeat precision can both improve while the positions get worse, so a PSF refined in situ needs
+a check against known structure.
 
 \section{Relation to other methods}
 

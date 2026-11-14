@@ -102,8 +102,12 @@ of the 1.33 assumed by the fit gave a deficit of 0.10 nats and a z bias of $-22$
 model: the optical constants have to be fitted or known.
 \item Three seeds; the aberration change between beads and sample and the content of scenario B are single
 arbitrary choices.
-\item Real data: one data set, one field of view, no independent axial ruler; the pixel size is not known
-from a citable source. A second data set (tubulin) is localized with its bead spline but not yet refined in situ.
+\item Real data: two data sets from one microscope, one field of view each. The pixel size is not known from a
+citable source, and the stage step of the microtubule bead stack (10\,nm) is assumed. The microtubule ruler
+has a 95\,\% interval of about $\pm$20\,\% and depends on brightness, so it cannot tell a 10\,\% change of z
+scale. Segments and test spots were selected with the bead-spline localizations, which may favour that model
+slightly. One run per setting. The vectorial model does not describe the microtubule beads, for a reason we
+have not found.
 \item The speed comparison is between two routes in one code base on one GPU. No comparison with uiPSF or the
 code of Droste et al.\ on the same data.
 \item Field-constant PSF, uniform background, $15\times15$ patches, isolated spots only.

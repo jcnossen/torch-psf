@@ -12,10 +12,10 @@ import sys, time
 sys.path.insert(0, '.'); sys.path.insert(0, 'study/realdata')
 import numpy as np, pandas as pd
 from rdcommon import open_stack
-from insitu_common import D, OUT, GAIN, OFFSET, P
+from insitu_common import D, OUT, GAIN, OFFSET, P, LOCS_CSV, MOVIES
 
 h = P // 2
-df = pd.read_csv(f'{D}/locs/NPC-A647-3D_locs.csv')
+df = pd.read_csv(LOCS_CSV)
 print('localizations', len(df), flush=True)
 df = df[df['flags'] == 0].reset_index().rename(columns={'index': 'row'})
 blk = (df.frame // 1000).values
@@ -25,7 +25,7 @@ rng = np.random.default_rng(0)
 perm = rng.permutation(even)
 sets = dict(train=np.sort(perm[:150000]), val=np.sort(perm[150000:180000]), test=odd)
 print({k: len(v) for k, v in sets.items()}, 'even pool', len(even), flush=True)
-mm = [open_stack(f'{D}/NPC-A647-3D-stack_{i}.tif') for i in (1, 2)]
+mm = [open_stack(f) for f in MOVIES]
 T = [m.shape[0] for m in mm]
 cum = np.cumsum([0] + T)
 Hh, Ww = mm[0].shape[1:]
@@ -50,8 +50,14 @@ for a in range(0, int(cum[-1]), CH):
     if lo == hi:
         continue
     sel = order[lo:hi]
-    k = int(np.searchsorted(cum, a, side='right') - 1)
-    frames = np.asarray(mm[k][a - cum[k]:min(a + CH, cum[k + 1]) - cum[k]]).astype(np.float32)
+    # frames a ... a + CH - 1, possibly spread over two movie files (tubulin: files of 22,987 frames)
+    parts, f_ = [], a
+    while f_ < min(a + CH, cum[-1]):
+        k = int(np.searchsorted(cum, f_, side='right') - 1)
+        e_ = min(a + CH, cum[k + 1])
+        parts.append(np.asarray(mm[k][f_ - cum[k]:e_ - cum[k]]).astype(np.float32))
+        f_ = e_
+    frames = np.concatenate(parts)
     ph = (frames - OFFSET) / GAIN
     t = fr[sel] - a
     pat = ph[t[:, None, None], (py[sel] - h)[:, None, None] + ii[None, :, None], (px[sel] - h)[:, None, None] + ii[None, None, :]]

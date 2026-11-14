@@ -8,7 +8,9 @@ import numpy as np, torch
 from insitu_common import *
 
 spl, _ = movie_spline()
-dte = torch.from_numpy(np.load(f'{OUT}/patches_test.npy')).to(DEV)
+dte = torch.from_numpy(np.load(f'{OUT}/patches_test.npy'))
+if len(dte) <= 1_000_000:          # large test sets (tubulin) stay in host memory, moved to the GPU per batch
+    dte = dte.to(DEV)
 for tag in sys.argv[1:]:
     t0 = time.time()
     st = torch.load(f'{OUT}/psf_{tag}.pt', weights_only=False)

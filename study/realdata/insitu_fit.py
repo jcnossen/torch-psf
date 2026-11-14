@@ -235,6 +235,8 @@ if A.method == 'e':
         return K * (s0 / K[:, inner].sum(1))[:, None, None]
 
     K = Kb.clone()
+    if A.init:                     # continue from the knots of an earlier e run (roughness weights still from the beads)
+        K = torch.load(A.init, weights_only=False)['knots'].to(DEV)
     wsm = 1.0 / (Kb.abs() + 1e-4)
     th = None
     best_e = None

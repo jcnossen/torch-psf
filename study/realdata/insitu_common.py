@@ -1,16 +1,30 @@
 """Shared code of the real-data in-situ PSF test (NPC-A647-3D): a vectorial pupil model with anisotropic pixels and a
 fitted wavelength, the movie spline geometry, a Levenberg-Marquardt localizer with the movie z limits, and the knot-route
 gradient for any vectorial parameters (data-agnostic versions of study/insitu/fit.py)."""
-import math, json, time
+import math, json, time, os
 import numpy as np, torch
 from torch_convspline.vectorial import VectorialPSF, zernike
 from torch_convspline.knotpsf import KnotPSF, poisson_nll
 from rdcommon import transfer_knots
 
 DEV = 'cuda'
-D = '/mnt/data/SMLM_challenge/NPC-A647-3D'
+# data set switch: environment variable INSITU_DS = npc (default, the original NPC test) or tubulin
+DS = os.environ.get('INSITU_DS', 'npc').lower()
+if DS == 'npc':
+    D = '/mnt/data/SMLM_challenge/NPC-A647-3D'
+    GAIN, OFFSET = 10.9, 295.0
+    LOCS_CSV = f'{D}/locs/NPC-A647-3D_locs.csv'
+    MOVIES = [f'{D}/NPC-A647-3D-stack_{i}.tif' for i in (1, 2)]
+    PX0, PY0 = 0.135, 0.142          # um, Cspline-submission scale (start values of the bead vectorial fit)
+elif DS == 'tubulin':
+    D = '/mnt/data/SMLM_challenge/Tubulin-A647-3D'
+    GAIN, OFFSET = 17.0, 400.0       # README_Tubulin.md
+    LOCS_CSV = f'{D}/locs/Tubulin-A647-3D_locs.csv'
+    MOVIES = [f'{D}/Tubulin-A647-3D-stacks_{i}.tif' for i in (1, 2, 3, 4)]
+    PX0, PY0 = 0.117, 0.1182
+else:
+    raise ValueError(f'unknown INSITU_DS {DS}')
 OUT = f'{D}/insitu'
-GAIN, OFFSET = 10.9, 295.0
 P, XMAX, ZLIM = 17, 3.0, 0.8
 
 
