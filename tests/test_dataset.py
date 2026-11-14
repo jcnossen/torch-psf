@@ -132,3 +132,19 @@ def test_drift_record():
     assert ds.meta['drift'] == dict(method='given')
     p = ds.copy()
     assert p.meta['drift']['method'] == 'given'
+
+
+def test_picasso_3d_z_in_nm(tmp_path):
+    import h5py
+    n = 50
+    pos = torch.rand(n, 3, dtype=torch.float64) * 10
+    ds = Dataset.from_arrays(pos, torch.arange(n), crlb=torch.full((n, 3), 0.1), meta=dict(pixel_nm=100.0, image_size=[20, 20]))
+    ds.save_picasso(tmp_path / 'z.hdf5')
+    with h5py.File(tmp_path / 'z.hdf5') as f:   # Picasso convention: x, y, lpx, lpy in px; z, lpz in nm
+        L = f['locs'][:]
+    assert np.allclose(L['z'], pos[:, 2].numpy() * 100, atol=1e-3) and np.allclose(L['lpz'], 10.0)
+    assert np.allclose(L['x'], pos[:, 0].numpy(), atol=1e-5)
+    p = Dataset.load(tmp_path / 'z.hdf5')
+    assert torch.allclose(p.pos, pos, atol=1e-5) and torch.allclose(p.crlb[:, 2], torch.full((n,), 0.1))
+    with pytest.raises(ValueError):
+        Dataset.from_arrays(pos, torch.arange(n)).save_picasso(tmp_path / 'nopx.hdf5')

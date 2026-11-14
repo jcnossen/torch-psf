@@ -562,9 +562,12 @@ class Dataset:
 
     def save_picasso(self, path, psf_sigma_px=1.3):
         """Picasso hdf5 (dataset 'locs': frame u4, x, y, photons, sx, sy (PSF width: field psf_sx / psf_sy, else
-        psf_sigma_px), bg, lpx, lpy (precision = crlb), ellipticity, net_gradient, z / lpz in 3D (z in px)) and the .yaml
-        Picasso needs. Other 1D fields are added under their names. Returns the path."""
+        psf_sigma_px), bg, lpx, lpy (precision = crlb), ellipticity, net_gradient, z / lpz in 3D) and the .yaml Picasso needs.
+        Units as in Picasso: x, y, lpx, lpy in camera px; z and lpz in nm (Picasso's 3D convention), so a 3D Dataset
+        needs meta['pixel_nm']. Other 1D fields are added under their names. Returns the path."""
         n, F = len(self), self.numpy()
+        if self.n_dims == 3 and not self.pixel_nm:
+            raise ValueError('save_picasso of a 3D Dataset needs meta["pixel_nm"] (Picasso stores z in nm)')
         z0 = np.zeros(n, np.float32)
         psx = F.get('psf_sx', np.full(n, psf_sigma_px, np.float32))
         psy = F.get('psf_sy', psx)
@@ -574,7 +577,8 @@ class Dataset:
                 ('lpy', '<f4', F['crlb'][:, 1] if 'crlb' in F else z0), ('ellipticity', '<f4', z0),
                 ('net_gradient', '<f4', z0)]
         if self.n_dims == 3:
-            cols += [('z', '<f4', F['pos'][:, 2]), ('lpz', '<f4', F['crlb'][:, 2] if 'crlb' in F else z0)]
+            px = float(self.pixel_nm)
+            cols += [('z', '<f4', F['pos'][:, 2] * px), ('lpz', '<f4', F['crlb'][:, 2] * px if 'crlb' in F else z0)]
         used = {'frame', 'pos', 'crlb', 'photons', 'bg', 'psf_sx', 'psf_sy'}
         for k, v in F.items():
             if k not in used and v.ndim == 1:
@@ -597,27 +601,32 @@ class Dataset:
     @classmethod
     def load_picasso(cls, path, pixel_nm=None):
         """A Picasso hdf5 ('locs'): x, y (z) -> pos, lpx, lpy (lpz) -> crlb, sx, sy -> psf_sx, psf_sy, other fields by
-        name; image size, frames, pixel size from the .yaml next to it."""
+        name; image size, frames, pixel size from the .yaml next to it (or pixel_nm). Picasso stores z and lpz in nm:
+        they are converted to px of the lateral pixel size (this class's unit), so a 3D file needs the pixel size."""
         with h5py.File(path, 'r') as f:
             L = f['locs'][:]
         names = L.dtype.names
         D = 3 if 'z' in names else 2
-        pos = np.stack([L[k].astype(np.float64) for k in ('x', 'y', 'z')[:D]], 1)
+        Y = _read_yaml(os.path.splitext(str(path))[0] + '.yaml')
+        px = pixel_nm or Y.get('Pixelsize')
+        if D == 3 and not px:
+            raise ValueError('3D Picasso file without a pixel size (Pixelsize in the .yaml or pixel_nm=): '
+                             'Picasso stores z in nm')
+        zs = [1.0, 1.0, 1.0 / float(px) if D == 3 else 1.0]
+        pos = np.stack([L[k].astype(np.float64) * zs[i] for i, k in enumerate(('x', 'y', 'z')[:D])], 1)
         F = dict(pos=pos, frame=L['frame'].astype(np.int32))
-        if 'lpx' in names:
-            F['crlb'] = np.stack([L[k] for k in ('lpx', 'lpy', 'lpz')[:D] if k in names], 1).astype(np.float32)
+        if 'lpx' in names and (D == 2 or 'lpz' in names):
+            F['crlb'] = np.stack([L[k] * zs[i] for i, k in enumerate(('lpx', 'lpy', 'lpz')[:D])], 1).astype(np.float32)
         ren = dict(sx='psf_sx', sy='psf_sy')
         for k in names:
             if k in ('x', 'y', 'z', 'lpx', 'lpy', 'lpz', 'frame') or k in ('ellipticity', 'net_gradient') and not L[k].any():
                 continue
             F[ren.get(k, k)] = np.ascontiguousarray(L[k])
         meta = dict(source=os.path.abspath(str(path)), format='picasso hdf5')
-        Y = _read_yaml(os.path.splitext(str(path))[0] + '.yaml')
         if 'Height' in Y and 'Width' in Y:
             meta['image_size'] = [int(Y['Height']), int(Y['Width'])]
         if 'Frames' in Y:
             meta['n_frames'] = int(Y['Frames'])
-        px = pixel_nm or Y.get('Pixelsize')
         if px:
             meta['pixel_nm'] = float(px)
         return cls(F, meta)
