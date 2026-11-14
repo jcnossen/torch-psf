@@ -68,3 +68,9 @@ def test_calibration_json(tmp_path):
     assert cam.offset_adu.shape == (64, 64) and cam.gain_e_per_adu == 0.56
     json.dump(dict(d, psf_gauss_sigma_um=0.14), open(tmp_path / 'g.json', 'w'))
     assert isinstance(PSF.load(tmp_path / 'g.json', device=DEV), GaussianPSF)
+
+
+def test_load_from_dict(tmp_path):
+    d = calibration_json(tmp_path / 'calib.json')
+    v = PSF.load(json.load(open(tmp_path / 'calib.json')), roisize=11, device=DEV)
+    assert isinstance(v, VectorialPSF) and abs(v.focus_um - 0.11) < 1e-9

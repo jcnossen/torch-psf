@@ -99,8 +99,11 @@ class ZStackEstimator(Estimator):
     stacks, regularised towards the vectorial fit with weight `regularize`), or 'astig_gauss' (the astigmatic
     Gaussian calibration curves). start (VectorialPSF or PSF file) or optics: the starting vectorial model.
     camera: Camera / calibration json / None (stacks in photons). roisize (px), nbeads (per stack, the brightest
-    isolated ones), sign (scan direction), iters, holdout (index of a stack kept out of the fit; its NLL per pixel is
-    reported), drift (linear xy drift per stack), spline grid: oversample, spline_dz_um, xy_limit.
+    isolated ones), sign (scan direction), iters, holdout (index of a stack kept out of the fit; its beads are refitted
+    (own position / photons / bg, PSF fixed) and their NLL per pixel is reported), drift (linear xy drift per stack),
+    fit_dz_scale (fit the z-step scale), fit_height (fit the bead height above the coverslip), bead_diameter_um (finite
+    bead size), intensity ('free' or 'bead_x_plane': per-plane factors, e.g. bleaching); see insitu.fit_beads.
+    Spline grid: oversample, spline_dz_um, xy_limit.
 
     estimate(stacks, dz_um) -> PSF. Plane k of a stack is at focus sign dz_um (k - (nk - 1) / 2) um (the stack centre
     is focus 0, so centre the stacks on the beads); the beads sit on the coverslip. The vectorial model's focus_um is
@@ -108,15 +111,18 @@ class ZStackEstimator(Estimator):
     rescaling) over the scanned range."""
 
     def __init__(self, model='vectorial', start=None, optics=None, camera=None, roisize=21, nbeads=8, sign=1.0,
-                 iters=300, holdout=None, drift=True, regularize=3000.0, oversample=2, spline_dz_um=None,
-                 xy_limit=3.0, zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, device=None,
-                 progress=None, stop=None):
+                 iters=300, holdout=None, drift=True, fit_dz_scale=False, fit_height=False, bead_diameter_um=None,
+                 intensity='free', regularize=3000.0, oversample=2, spline_dz_um=None, xy_limit=3.0,
+                 zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, device=None, progress=None,
+                 stop=None):
         super().__init__(device, progress, stop)
         if model not in ('vectorial', 'spline', 'astig_gauss'):
             raise ValueError("model: 'vectorial', 'spline' or 'astig_gauss'")
         self.model, self.start, self.optics, self.camera = model, start, optics, _camera(camera)
         self.roisize, self.nbeads, self.sign, self.iters = roisize, nbeads, sign, iters
         self.holdout, self.drift, self.regularize = holdout, drift, regularize
+        self.fit_dz_scale, self.fit_height, self.bead_diameter_um, self.intensity = (fit_dz_scale, fit_height,
+                                                                                     bead_diameter_um, intensity)
         self.oversample, self.spline_dz_um, self.xy_limit = oversample, spline_dz_um, xy_limit
         self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
 
@@ -156,20 +162,15 @@ class ZStackEstimator(Estimator):
         vec = _start_vectorial(self.start, self.optics, P, self.dev, self.zernike_indices, self.npupil,
                                self.oversample_pupil)
         r = fit_beads(d, focus, vec, iters=self.iters, stack_id=sid, drift=self.drift, weights=w,
+                      fit_dz_scale=self.fit_dz_scale, fit_height=self.fit_height,
+                      bead_diameter_um=self.bead_diameter_um, intensity=self.intensity,
                       log=self._log('vectorial'), stop=self.stop)
         psf = r['psf']
         psf.focus_um = 0.0
-        self.report.update(nll_per_px=r['report']['nll_per_px'])
+        for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um'):
+            if k in r['report']:
+                self.report[k] = r['report'][k]
         self.data = dict(rois=d, stack_id=sid, focus_um=focus, xy=r['xy'], photons=r['photons'], bg=r['bg'])
-        if self.holdout is not None:
-            m = sid == self.holdout
-            with torch.no_grad():
-                n = int(m.sum())
-                pos = torch.cat([r['xy'][m][:, None].expand(-1, nk, -1), torch.zeros(n, nk, 1, device=self.dev)],
-                                -1).reshape(-1, 3)
-                mu = r['photons'][m].reshape(-1, 1, 1) * psf(pos, focus[None].expand(n, -1).reshape(-1)) \
-                    + r['bg'][m].reshape(-1, 1, 1)
-                self.report['heldout_nll_per_px'] = float(poisson_nll(d[m].reshape(-1, P, P), mu).sum()) / d[m].numel()
         if self.model == 'vectorial':
             self.report['seconds'] = time.time() - self._t0
             return psf

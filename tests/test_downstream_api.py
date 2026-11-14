@@ -105,3 +105,18 @@ def test_fit_tracks_with_group_hook():
     assert abs(float(gam.detach()) - gamma_true) < 0.1, float(gam.detach())
     assert 0.7 < est['report']['resid_var'] < 1.3
     assert est['I'].shape == (B, T)
+
+
+def test_fit_tracks_fixed_zernikes():
+    R, B, T = 11, 20, 4
+    vec = VectorialPSF(R, npupil=32, oversample=2, device=DEV).set_zernike({6: 0.05})
+    g = torch.Generator(device=DEV).manual_seed(1)
+    xy = torch.rand(B, 2, generator=g, device=DEV) - 0.5
+    with torch.no_grad():
+        img = vec(torch.cat([xy, torch.full((B, 1), 0.05, device=DEV)], 1), torch.zeros(B, device=DEV))
+    rois = torch.poisson(2000 * img[:, None].expand(-1, T, -1, -1) + 10, generator=g)
+    tr = Tracks(rois, torch.ones(B, T, dtype=torch.bool, device=DEV), torch.arange(T, device=DEV)[None].expand(B, -1),
+                torch.zeros(B, 2, dtype=torch.long, device=DEV), xy + (R - 1) / 2)
+    r = fit_tracks(tr, vec, readnoise_e=0.0, iters=30, warmup=5, fix_zernike=True, fix_focus=True)
+    assert torch.equal(r['psf'].zcoef.detach(), vec.zcoef.detach()) and r['report']['focus_um'] == 0.0
+    assert r['report']['nll_per_px'] <= r['report']['nll_per_px_before_last_step'] + 1e-6

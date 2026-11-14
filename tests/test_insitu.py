@@ -41,3 +41,18 @@ def test_insitu_zernike_fit_recovers_known_set():
     assert 'z_scale' in est['report']
     sc, off = z_scale(est['psf'].to_spline(15, dz_um=0.04), vec.to_spline(15, dz_um=0.04))
     assert abs(sc - 1) < 0.03 and abs(off) < 0.02, (sc, off)
+
+
+@needs_gpu
+def test_bead_fit_dz_scale_height_and_heldout_refit():
+    vec = true_model(15)
+    focus_true = stage_focus(26, 0.04, 1.0).to(DEV) * 0.8          # the stage moves 20 % less than nominal
+    sim = simulate_bead_stack(vec.forward_batched, focus_true, nbeads=5, photons=40000.0, bg=30.0, device=DEV,
+                              emitter_z=0.1, generator=torch.Generator(device=DEV).manual_seed(5))
+    start = VectorialPSF(15, npupil=48, oversample=2, device=DEV)
+    w = torch.tensor([1.0, 1, 1, 1, 0], device=DEV)
+    est = fit_beads(sim['d'], stage_focus(26, 0.04, 1.0).to(DEV), start, iters=400, fit_dz_scale=True,
+                    fit_height=True, emitter_z_um=0.05, weights=w)
+    rep = est['report']
+    assert abs(rep['dz_scale'] - 0.8) < 0.03 and abs(rep['height_um'] - 0.1) < 0.03, rep
+    assert 'heldout_nll_per_px' in rep and rep['heldout_nll_per_px'] < rep['nll_per_px'] + 0.5

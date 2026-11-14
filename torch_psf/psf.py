@@ -165,7 +165,8 @@ class PSF:
     @staticmethod
     def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
         """Read a PSF json (type 'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian') or a plain calibration json and
-        return the model of that type; see torch_psf.io.load."""
+        return the model of that type; path may also be the parsed dict (array files are then resolved against the
+        current directory). See torch_psf.io.load."""
         from torch_psf.io import load
         return load(path, roisize=roisize, device=device, angle=angle, npupil=npupil, oversample=oversample)
 
@@ -175,8 +176,8 @@ class PSF:
         z range): knots every 1/oversample px and dz_um um, offsets up to xy_limit px. The model is rendered on the
         larger ROI the knots need, at oversample x oversample sub-pixel shifts."""
         from torch_psf.spline import ConvCubicSplinePSF
-        if self.n_dims == 2:
-            raise ValueError('a 2D model has no z axis to tabulate')
+        if self.n_dims == 2 and z_range is None:
+            raise ValueError('a 2D model has no z range: pass z_range (the spline is then constant in z)')
         zr = self.z_range if z_range is None else z_range
         spl = ConvCubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
                                  xy_limit=xy_limit, device=self.dev)

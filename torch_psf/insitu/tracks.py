@@ -23,12 +23,13 @@ from torch_psf.varpro import solve_linear
 
 def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0, blur='none',
                groups=None, ngroups=1, group_psf_kwargs=None, extra_params=(), batch=2000, lr_xyz=0.03,
-               lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, log=None, stop=None):
+               lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False, fix_focus=False,
+               log=None, stop=None):
     """tracks: Tracks (rois [B, T, R, R] in photons, mask, xy_init). vectorial: starting VectorialPSF (copied;
     roisize = R). readnoise_e: read noise (e- rms, scalar). zmax_um: emitter heights 0..zmax_um. focus_um: starting
     focus (fitted). blur: 'none' or 'line' (image-plane line blur v v^T, px^2). groups [B, T] (long, values
     0..ngroups-1): background groups and PSF groups (default one group). group_psf_kwargs / extra_params: per-group
-    PSF hook (module docstring).
+    PSF hook (module docstring). fix_zernike / fix_focus: hold the Zernikes / the focus at their starting values.
     Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
     (variance of the normalized residuals, 1 for a perfect model), nll_per_px, focus_um; data: xy [B, 2] px rel. to
     the ROI centre, z [B] um, I [B, T] photons, bg [B, ngroups]."""
@@ -100,6 +101,10 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
         if it < warmup:
             for v in [focus, model.zcoef] + ([BL] if BL is not None else []) + extra:
                 v.grad = None
+        if fix_zernike:
+            model.zcoef.grad = None
+        if fix_focus:
+            focus.grad = None
         opt.step()
         hist.append(dict(it=it, nll_per_px=tot, focus_um=float(focus.detach())))
         if log is not None:
@@ -107,9 +112,10 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
         if stop is not None and stop():
             break
     with torch.no_grad():
-        Is, bgs, rs = [], [], []
+        Is, bgs, rs, final = [], [], [], 0.0
         for ch in chunks:
-            _, I, bg, mu, var, data = loss(ch)
+            l_, I, bg, mu, var, data = loss(ch)
+            final += float(l_) / npx
             Is.append(I); bgs.append(bg)
             rs.append(((data - mu) / var.sqrt())[mask[ch]])
         rs = torch.cat(rs)
@@ -117,7 +123,8 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     out.focus_um = float(focus.detach())
     if BL is not None:
         out.blur = blur_cov().detach()
-    rep = dict(method='tracks', n_samples=B, iterations=len(hist), resid_var=float(rs.var()), nll_per_px=tot,
+    rep = dict(method='tracks', n_samples=B, iterations=len(hist), resid_var=float(rs.var()), nll_per_px=final,
+               nll_per_px_before_last_step=tot,
                focus_um=float(focus.detach()), seconds=time.time() - t0,
                at_limit=float((xy.detach().abs().max(1).values > c - 1).float().mean()))
     return _result(out, rep, hist, dict(xy=xy.detach(), z=(zmax_um * torch.sigmoid(zr)).detach(),

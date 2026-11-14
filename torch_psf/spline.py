@@ -55,7 +55,7 @@ def stage_scan_pos_fn(focus0_um, scale, emitter_z=0.0):
 
 
 class ConvCubicSplinePSF(PSF):
-    """Spline PSF for roisize x roisize patches (roisize odd) and emitter heights z_range = (lo, hi) um.
+    """Spline PSF for roisize x roisize patches (odd or even roisize) and emitter heights z_range = (lo, hi) um.
 
     oversample: knots per px laterally; dz_um: knot spacing in z (um); zpad: extra knot planes below and above
     z_range; xy_limit: offset limit (px; >= 3 recommended for patches centred on detections); device: default cuda if
@@ -65,21 +65,34 @@ class ConvCubicSplinePSF(PSF):
     z0 = z of knot plane 0, zs = z of all planes, nz / nv / nu = knot array shape."""
 
     def __init__(self, roisize, z_range, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, device=None,
-                 dtype=torch.float32, knots=None):
-        assert roisize % 2 == 1, 'roisize must be odd'
+                 dtype=torch.float32, knots=None, knot_u0_px=None, knot_z0_um=None):
+        """roisize may be odd or even (pixel offsets from the ROI centre are j - (roisize - 1) / 2). To wrap a stored
+        knot array of another geometry, pass knots [nz, n, n] (n a multiple of oversample) and optionally its origin:
+        knot_u0_px = lateral offset (px) of knot index 0 from the PSF centre (default -(c S + S - 1) / S with
+        c = (n / S - 1) / 2, the layout this class builds), knot_z0_um = z of knot plane 0 (default
+        z_range[0] - zpad dz_um). The offset limit is reduced to what the stored knots support."""
         zlo, zhi = float(z_range[0]), float(z_range[1])
         S, hz, xmax = int(oversample), float(dz_um), float(xy_limit)
-        self.roisize, self.S, self.hz, self.xmax = roisize, S, hz, xmax
-        self.h = (roisize - 1) // 2
+        self.roisize, self.S, self.hz = roisize, S, hz
+        self.h = (roisize - 1) / 2
         self.dev, self.dtype = resolve_device(device), dtype
-        self.c = int(math.ceil(self.h + xmax)) + 2            # half width (px) of the stored PSF
+        self.zlo, self.zhi, self.zpad = zlo, zhi, zpad
+        if knots is None:
+            self.c = int(math.ceil(self.h + xmax)) + 2            # half width (px) of the stored PSF
+            self.nz = int(round((zhi - zlo) / hz)) + 1 + 2 * zpad
+        else:
+            nz_, nv_, nu_ = knots.shape
+            assert nv_ == nu_ and nu_ % S == 0 and (nu_ // S) % 2 == 1, 'knots [nz, n, n], n / oversample odd'
+            self.c = (nu_ // S - 1) // 2
+            self.nz = nz_
         self.Pl = 2 * self.c + 1
-        self.nz = int(round((zhi - zlo) / hz)) + 1 + 2 * zpad
-        self.zlo, self.zhi, self.zpad = float(zlo), float(zhi), zpad
-        self.z0 = zlo - zpad * hz
+        self.z0 = zlo - zpad * hz if knot_z0_um is None else float(knot_z0_um)
         self.nv = self.nu = self.Pl * S
-        self.u0 = -(self.c * S + S - 1) / S                   # u (px) of knot 0
-        self.oS0 = float((-self.h - self.u0) * S)             # knot coordinate of patch pixel 0 for x = 0
+        self.u0 = -(self.c * S + S - 1) / S if knot_u0_px is None else float(knot_u0_px)   # u (px) of knot 0
+        self.oS0 = float((-self.h - self.u0) * S)                # knot coordinate of patch pixel 0 for x = 0
+        # largest offset for which the 4-knot window of every ROI pixel stays inside the array
+        lim = min((self.oS0 - 1) / S, (self.nu - 2 - self.oS0 - (roisize - 1) * S) / S - 1e-4)
+        self.xmax = min(xmax, max(lim, 0.0))
         self.Lw = (roisize - 1) * S + 4
         r = lambda n: torch.arange(n, device=self.dev)
         self.pat = (r(4)[:, None, None] * self.nv * self.nu + r(self.Lw)[None, :, None] * self.nu
@@ -89,8 +102,7 @@ class ConvCubicSplinePSF(PSF):
         if knots is None:
             self.knots = torch.zeros(self.nz, self.nv, self.nu, device=self.dev, dtype=dtype)
         else:
-            assert tuple(knots.shape) == (self.nz, self.nv, self.nu), (tuple(knots.shape), (self.nz, self.nv, self.nu))
-            self.knots = knots.to(self.dev, dtype)
+            self.knots = torch.as_tensor(knots).to(self.dev, dtype)
 
     # ------------------------------------------------------------------ geometry
     @property
@@ -124,13 +136,14 @@ class ConvCubicSplinePSF(PSF):
 
     def render(self, pos, grad=False, knots=None):
         """pos [N, 3] = (x px, y px, z um) -> normalized patches [N, P, P]; with grad also d/dx, d/dy (per px) and
-        d/dz (per um; 0 outside the knot z range). Differentiable with respect to the knots (pass knots=K to use other
+        d/dz (per um). Outside the supported range x, y and z are clamped (to xy_limit and the knot z range) and the
+        derivatives are those of the spline at the clamped position (not zero): a fit that starts outside still sees a
+        slope towards the inside. Differentiable with respect to the knots (pass knots=K to use other
         knots than self.knots, e.g. a tensor that requires grad)."""
         K = self.knots if knots is None else knots
         N, P, S, Lw = pos.shape[0], self.roisize, self.S, self.Lw
         pos = pos.to(self.dtype)
         tz = ((pos[:, 2] - self.z0) / self.hz)
-        zin = ((tz >= 1) & (tz <= self.nz - 2)).to(self.dtype)[:, None, None]
         tz = tz.clamp(1, self.nz - 2 - 1e-4)
         t = torch.stack([tz, self.oS0 - pos[:, 1].clamp(-self.xmax, self.xmax) * S,
                          self.oS0 - pos[:, 0].clamp(-self.xmax, self.xmax) * S], 1)
@@ -150,7 +163,7 @@ class ConvCubicSplinePSF(PSF):
         wx = wa[:, 0, :, None, None] * wa[:, 1, None, :, None] * da[:, 2, None, None, :]
         W = torch.stack([w, wx, wy, wz], 1).view(-1, 4, 4, 4)
         r = torch.nn.functional.conv2d(sub, W, groups=N, stride=S).view(N, 4, P, P)
-        return r[:, 0], -S * r[:, 1], -S * r[:, 2], zin * r[:, 3] / self.hz
+        return r[:, 0], -S * r[:, 1], -S * r[:, 2], r[:, 3] / self.hz
 
     def render_batched(self, pos, nb=4000):
         """render() (value only) in batches of nb emitters."""
@@ -252,10 +265,8 @@ class ConvCubicSplinePSF(PSF):
         assert xmax > 0, f'the z-stack ({W} px) is too small for roisize {roisize}'
         if normalize:
             zs = zs / zs.sum((1, 2), keepdim=True)
-        spl = cls(roisize, (z0, z0 + (nz - 1) * hz), oversample=1, dz_um=hz, zpad=0, xy_limit=xmax, device=zs.device)
-        assert spl.Pl == W, (spl.Pl, W)
-        spl.knots = zs.contiguous()
-        return spl
+        return cls(roisize, (z0, z0 + (nz - 1) * hz), oversample=1, dz_um=hz, zpad=0, xy_limit=xmax, device=zs.device,
+                   knots=zs.contiguous())
 
     def to_dict(self):
         """Grid description (without the knots) for the PSF file."""

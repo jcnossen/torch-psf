@@ -28,6 +28,12 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 | psf.json type `gaussian` with gamma (3D) | type `astig_gaussian`; `gaussian` is 2D |
 | in-situ default pipeline | now rejects spots the single-emitter model does not explain (Poisson deviance per pixel > 1 + 3 sqrt(2 / P^2) after a first pass; refit on the rest; `reject_overlap=True`, `deviance_k=3`) |
 | (new) | `simulate.filament_sites`, `simulate_movie(sites=...)`, `table.to_csv`, `insitu.spot_deviance`, `PSF.expected`, `PSF.fisher`, `n_dims` |
+| `ConvSplinePSF.render(..., grad=True)`: d/dz = 0 outside the knot z range | **math change**: x, y, z are clamped and the derivatives are those at the clamped position (d/dz not zeroed), as the earlier lookup-table code did; inside the range nothing changes |
+| ConvSplinePSF: odd roisize only, fixed knot layout | even roisize allowed; `knots=` with `knot_u0_px` / `knot_z0_um` wraps a stored knot array of another layout (the offset limit is reduced to what it supports) |
+| `load_psf(path)` | `PSF.load(path_or_dict)` (a parsed dict is accepted) |
+| spline knots only from a vectorial model | `PSF.to_spline` works for every model; 2D models with an explicit `z_range` (constant in z) |
+| `fit_tracks(...)` | adds `fix_zernike`, `fix_focus`; `report['nll_per_px']` is the NLL after the last step (`nll_per_px_before_last_step` the value the last step started from) |
+| `fit_beads(...)` | adds `fit_dz_scale` (z-step scale), `fit_height` (bead height), `intensity='bead_x_plane'` (per-plane factors, e.g. bleaching); held-out beads (weight 0) are refitted (position / photons / bg, PSF fixed) before they are scored (`report['heldout_nll_per_px']`); `bead_diameter_um` as before. ZStackEstimator exposes the same options |
 
 ## Classes
 

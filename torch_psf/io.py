@@ -133,12 +133,16 @@ def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=No
     roisize: ROI size for vectorial / Gaussian models (default: the stored one, or 15 for a calibration json).
     angle: for calibs with per-pattern-angle PSF terms: 0 / 1 = that angle's PSF, None = the angle average. npupil / oversample override the stored pupil sampling of a vectorial model.
     A calib with psf_gauss_sigma_um gives a GaussianPSF (sigma = psf_gauss_sigma_um / pixel size)."""
-    path = str(path)
-    with open(path) as f:
-        d = json.load(f)
+    if isinstance(path, dict):
+        d, base = path, '.'
+    else:
+        path = str(path)
+        with open(path) as f:
+            d = json.load(f)
+        base = os.path.dirname(path)
     arrays = None
     if d.get('arrays'):
-        arrays = dict(np.load(os.path.join(os.path.dirname(path), d['arrays'])))
+        arrays = dict(np.load(os.path.join(base, d['arrays'])))
     typ = d.get('type', 'vectorial') if d.get('format') == FORMAT else 'calib'
     if typ == 'calib' and d.get('psf_gauss_sigma_um') is not None:
         return GaussianPSF(roisize or 15, sigma_px=float(d['psf_gauss_sigma_um']) / float(d['pixelsize_um']),
