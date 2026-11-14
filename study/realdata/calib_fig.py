@@ -6,14 +6,14 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 sys.path.insert(0, '.')
-from torch_psf import ConvCubicSplinePSF
+from torch_psf import CubicSplinePSF
 from rdcommon import fit_gauss, gauss_patch
 
 cd = sys.argv[1]; tag = sys.argv[2] if len(sys.argv) > 2 else ''
 fit = json.load(open(f'{cd}/bead_fit{tag}.json'))
 dat = np.load(f'{cd}/bead_fit_data{tag}.npz')
 cal = torch.load(f'{cd}/psf_spline{tag}.pt')
-spl = ConvCubicSplinePSF(cal['PB'], (cal['zlo'], cal['zhi']), oversample=cal['S'], dz_um=cal['hz'], zpad=cal['zpad'], xy_limit=cal['xmax'], device='cuda')
+spl = CubicSplinePSF(cal['PB'], (cal['zlo'], cal['zhi']), oversample=cal['S'], dz_um=cal['hz'], zpad=cal['zpad'], xy_limit=cal['xmax'], device='cuda')
 spl.knots = cal['knots'].cuda()
 # Gaussian widths of the spline and of the bead frames
 zg = np.arange(cal['zlo'], cal['zhi'] + 1e-6, 0.025)

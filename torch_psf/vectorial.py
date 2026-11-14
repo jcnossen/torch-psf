@@ -268,11 +268,11 @@ class VectorialPSF(torch.nn.Module, PSF):
 
     def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8,
                   pos_fn=None):
-        """ConvCubicSplinePSF of this model (see PSF.to_spline). pos_fn: knot z -> (emitter z, focus) (default: the
+        """CubicSplinePSF of this model (see PSF.to_spline). pos_fn: knot z -> (emitter z, focus) (default: the
         emitter height at self.focus_um; e.g. spline.stage_scan_pos_fn for a bead-stack geometry)."""
-        from torch_psf.spline import ConvCubicSplinePSF
+        from torch_psf.spline import CubicSplinePSF
         zr = self.z_range if z_range is None else z_range
-        spl = ConvCubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
+        spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
                                  xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
         big = self if self.roisize == spl.Pl else self.resized(spl.Pl)
         spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)

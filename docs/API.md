@@ -13,7 +13,7 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 
 | old | new |
 |---|---|
-| `ConvSplinePSF` | `ConvCubicSplinePSF` (same knot layout and math) |
+| `ConvSplinePSF` | `CubicSplinePSF` (same knot layout and math) |
 | `ConvSplinePSF.from_vectorial(vec, roisize, z_range, ...)` | `vec.to_spline(roisize, z_range, ...)` (any 3D model: `PSF.to_spline`) |
 | `GaussianPSF(..., gamma_um=, d_um=, z_range=)` (astigmatic) | `AstigmaticGaussianPSF(roisize, sigma_px, gamma_um, d_um, z_range)`; `GaussianPSF(roisize, sigma_px)` is 2D only |
 | `torch_psf.localize(psf, rois)` (top level) | `psf.fit(rois)` -> localization table; the low-level `torch_psf.fit.localize` (theta, nll) stays |
@@ -42,8 +42,8 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 | localization table (numpy structured array `table.LOC_DTYPE`: frame, x, y, z, photons, bg, crlb_x / y / z / photons / bg, loglik, chi2, at_limit) | `torch_psf.Dataset` (dict of tensors): `pos` [n, D] px (x, y, z; **z in px** of the lateral pixel size, always), `crlb` [n, D] (same units), `frame`, `n_frames` (1), `id`, `photons`, `bg`, `crlb_photons`, `crlb_bg`, `loglik`, `chi2`, `at_limit`; meta `pixel_nm`, `image_size`, `n_frames`, `method` |
 | `PSF.fit` / `PSF.localize` return the table | they return a Dataset (`fit(..., pixel_um=None)`, `localize(..., pixel_um=None)` override the pixel size used for z) |
 | `table.to_csv` | `Dataset.save('x.csv')` (ThunderSTORM) or `.hdf5` (docs/DATASET_FORMAT.md); `save_picasso` |
-| `ConvCubicSplinePSF` | has `pixel_um` (set by `VectorialPSF.to_spline`, stored in the spline file) |
-| (follow-up) z unit | one unit per Dataset: z in px of the lateral pixel size, always. Every model has `pixel_um` (constructor argument of ConvCubicSplinePSF, `from_zstack`, GaussianPSF, AstigmaticGaussianPSF; VectorialPSF has it anyway); fitting / localizing a 3D model without one raises ValueError (pass `pixel_um=` to fit / localize or set it on the model) |
+| `CubicSplinePSF` | has `pixel_um` (set by `VectorialPSF.to_spline`, stored in the spline file) |
+| (follow-up) z unit | one unit per Dataset: z in px of the lateral pixel size, always. Every model has `pixel_um` (constructor argument of CubicSplinePSF, `from_zstack`, GaussianPSF, AstigmaticGaussianPSF; VectorialPSF has it anyway); fitting / localizing a 3D model without one raises ValueError (pass `pixel_um=` to fit / localize or set it on the model) |
 
 ## Dataset (`torch_psf.dataset.Dataset`; format: docs/DATASET_FORMAT.md)
 
@@ -74,16 +74,16 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
 ├── VectorialPSF(roisize, pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices, npupil, oversample,
 │                focus_um, z_range)  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
 │                from_optics, optics, to_spline(..., pos_fn))
-└── ConvCubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
+└── CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
                  knots_from_model, knots_from_vectorial, vjp_vectorial, from_zstack
 
 Estimator (torch_psf.estimators)             report (dict), history (list), data (dict), progress / stop hooks
 ├── ZStackEstimator(model='vectorial' | 'spline' | 'astig_gauss', start=None, optics=None, camera=None, roisize=21,
 │                   nbeads=8, sign=1.0, iters=300, holdout=None, drift=True, regularize=3000.0, ...)
-│     .estimate(stacks, dz_um) -> VectorialPSF | ConvCubicSplinePSF | AstigmaticGaussianPSF
+│     .estimate(stacks, dz_um) -> VectorialPSF | CubicSplinePSF | AstigmaticGaussianPSF
 └── InSituEstimator(start=None, optics=None, camera=None, focus_um=None, roisize=15, z_range=(0, 0.8), nspots=8000,
                     nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0, refine=False, ...)
-      .estimate(movie, frames=None) -> VectorialPSF (or the refined ConvCubicSplinePSF if it wins on held-out spots)
+      .estimate(movie, frames=None) -> VectorialPSF (or the refined CubicSplinePSF if it wins on held-out spots)
 ```
 ZStackEstimator conventions: plane k at focus `sign dz_um (k - (nk - 1) / 2)`; the vectorial result has `focus_um = 0`;
 the spline and astigmatic-Gaussian results have z = -focus (bead defocus in stage um). InSituEstimator steps:
@@ -133,9 +133,9 @@ progress=None, **detect_kw)`
 
 `at_limit(theta, psf, margin=0.06)`: `max(|x|, |y|) > xy_limit - margin`.
 
-## The convolutional cubic spline (`torch_psf.spline.ConvCubicSplinePSF`)
+## The convolutional cubic spline (`torch_psf.spline.CubicSplinePSF`)
 
-`ConvCubicSplinePSF(roisize, z_range, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, device=None)`: knots
+`CubicSplinePSF(roisize, z_range, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, device=None)`: knots
 `[nz, nv, nu]`, nz = round((hi - lo) / dz) + 1 + 2 zpad, plane k at z0 + k dz, z0 = lo - zpad dz;
 c = ceil(h + xy_limit) + 2 (h = (roisize - 1) / 2), Pl = 2c + 1, nv = nu = Pl * oversample; knot index j of u is at
 u = u0 + j / S, u0 = -(c S + S - 1) / S.

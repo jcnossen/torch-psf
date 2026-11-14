@@ -1,7 +1,7 @@
 """The MLE fitter reaches the Cramer-Rao lower bound on simulated isolated emitters (2D and astigmatic 3D)."""
 import torch
 from conftest import DEV
-from torch_psf import GaussianPSF, VectorialPSF, ConvCubicSplinePSF
+from torch_psf import GaussianPSF, VectorialPSF, CubicSplinePSF
 from torch_psf.fit import localize, crlb
 from torch_psf.fit import lm_poisson, model_and_jacobian, fisher
 from torch_psf.simulate import simulate_emitters

@@ -197,14 +197,14 @@ class PSF:
 
     # ------------------------------------------------------------------ cubic spline
     def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8):
-        """Tabulate the model as a ConvCubicSplinePSF for roisize x roisize ROIs over z_range (um; default the model's
+        """Tabulate the model as a CubicSplinePSF for roisize x roisize ROIs over z_range (um; default the model's
         z range): knots every 1/oversample px and dz_um um, offsets up to xy_limit px. The model is rendered on the
         larger ROI the knots need, at oversample x oversample sub-pixel shifts."""
-        from torch_psf.spline import ConvCubicSplinePSF
+        from torch_psf.spline import CubicSplinePSF
         if self.n_dims == 2 and z_range is None:
             raise ValueError('a 2D model has no z range: pass z_range (the spline is then constant in z)')
         zr = self.z_range if z_range is None else z_range
-        spl = ConvCubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
+        spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
                                  xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
         spl.knots = spl.knots_from_model(self if self.roisize == spl.Pl else self.resized(spl.Pl), chunk=chunk)
         return spl

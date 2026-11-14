@@ -6,7 +6,7 @@ pass a likelihood gradient from the spline knots back to the Zernike coefficient
 """
 import time
 import torch
-from torch_psf import ConvCubicSplinePSF
+from torch_psf import CubicSplinePSF
 from torch_psf.fit import localize, crlb
 from torch_psf.fit import poisson_nll
 from torch_psf import VectorialPSF
@@ -16,7 +16,7 @@ torch.manual_seed(0)
 
 # 1. A spline PSF for 15 x 15 px patches, emitters 0 - 0.8 um above the coverslip.
 #    Knots every 1/2 px laterally (S=2) and every 40 nm in z (hz=0.04 um).
-spl = ConvCubicSplinePSF(roisize=15, z_range=(0.0, 0.8), oversample=2, dz_um=0.04, xy_limit=3.0, device=dev)
+spl = CubicSplinePSF(roisize=15, z_range=(0.0, 0.8), oversample=2, dz_um=0.04, xy_limit=3.0, device=dev)
 
 # 2. Fill the knots from a vectorial pupil model with some astigmatism (Noll 6, 0.1 waves rms).
 #    The model is evaluated once per knot image, not once per emitter.

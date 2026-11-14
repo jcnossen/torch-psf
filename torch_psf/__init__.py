@@ -1,7 +1,7 @@
 """torch-psf: a PSF library for single-molecule localization microscopy, in PyTorch.
 
 The PSF is the main object: PSF (base class) with render, expected, fisher / crlb, fit (ROIs -> localizations),
-localize (movie -> localizations), save / PSF.load and to_spline; the models VectorialPSF, ConvCubicSplinePSF,
+localize (movie -> localizations), save / PSF.load and to_spline; the models VectorialPSF, CubicSplinePSF,
 GaussianPSF and AstigmaticGaussianPSF. PSFs are estimated with ZStackEstimator (bead z-stacks) and InSituEstimator
 (from the SMLM movie itself).
 
@@ -17,7 +17,7 @@ from torch_psf.config import Optics, Camera
 from torch_psf.movie import open_movie
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import ConvCubicSplinePSF
+from torch_psf.spline import CubicSplinePSF
 from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
 from torch_psf.detect import detect_spots
 from torch_psf.spots import extract_spots

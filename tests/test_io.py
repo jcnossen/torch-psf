@@ -2,7 +2,7 @@
 import json
 import torch
 from conftest import DEV
-from torch_psf import VectorialPSF, ConvCubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF, PSF
+from torch_psf import VectorialPSF, CubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF, PSF
 from torch_psf.io import load_camera, load_spline_source
 
 POS = torch.tensor([[0.1, -0.2, 0.3], [0.4, 0.1, 0.05]])
@@ -30,7 +30,7 @@ def test_spline_round_trip(tmp_path):
     s.save(tmp_path / 's.json', source=v)
     t = PSF.load(tmp_path / 's.json', device=DEV)
     p = POS.to(DEV)
-    assert isinstance(t, ConvCubicSplinePSF) and torch.equal(s.render(p), t.render(p))
+    assert isinstance(t, CubicSplinePSF) and torch.equal(s.render(p), t.render(p))
     src = load_spline_source(tmp_path / 's.json', device=DEV)
     assert torch.allclose(src.zcoef, v.zcoef)
 

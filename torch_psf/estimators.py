@@ -95,7 +95,7 @@ class Estimator:
 class ZStackEstimator(Estimator):
     """PSF from bead z-stacks.
 
-    model: 'vectorial' (Zernike fit of a VectorialPSF), 'spline' (a ConvCubicSplinePSF whose knots are fitted to the
+    model: 'vectorial' (Zernike fit of a VectorialPSF), 'spline' (a CubicSplinePSF whose knots are fitted to the
     stacks, regularised towards the vectorial fit with weight `regularize`), or 'astig_gauss' (the astigmatic
     Gaussian calibration curves). start (VectorialPSF or PSF file) or optics: the starting vectorial model.
     camera: Camera / calibration json / None (stacks in photons). roisize (px), nbeads (per stack, the brightest
@@ -252,7 +252,7 @@ class InSituEstimator(Estimator):
     roisize (px), z_range (um): emitter heights. nspots / nheldout: training / held-out spots (tile px checkerboard).
     Spline grid: oversample, dz_um, xy_limit (>= 3 px recommended). Detection: threshold, isolation, detect_kw.
 
-    estimate(movie, frames=None) -> PSF (VectorialPSF, or the refined ConvCubicSplinePSF when refine=True and it
+    estimate(movie, frames=None) -> PSF (VectorialPSF, or the refined CubicSplinePSF when refine=True and it
     wins on the held-out spots). report: n_spots, n_train, n_test, n_rejected, at_limit, z_scale / z_offset_um (fit vs
     start), heldout (NLL per pixel of start / vectorial / refined), chosen, warnings."""
 
@@ -278,7 +278,7 @@ class InSituEstimator(Estimator):
         return fn(spline, rois, vec, iters=iters, log=self._log(stage), stop=self.stop)
 
     def estimate(self, movie, frames=None):
-        from torch_psf.spline import ConvCubicSplinePSF
+        from torch_psf.spline import CubicSplinePSF
         from torch_psf.spots import extract_spots
         from torch_psf.insitu import (split_checkerboard, compare_heldout, spot_deviance, fit_free_knots, z_scale,
                                       FREE_KNOT_WARNING, limit_fraction)
@@ -296,7 +296,7 @@ class InSituEstimator(Estimator):
         tr = np.flatnonzero(par == 0)[:self.nspots]
         te = np.flatnonzero(par == 1)[:self.nheldout]
         rois = sp.rois[torch.as_tensor(tr, device=self.dev)]
-        spline = ConvCubicSplinePSF(R, zr, device=self.dev, **self.grid)
+        spline = CubicSplinePSF(R, zr, device=self.dev, **self.grid)
         r = self._fit(spline, rois, vec0, self.iters, 'vectorial')
         vec = r['psf']
         n_rej = 0

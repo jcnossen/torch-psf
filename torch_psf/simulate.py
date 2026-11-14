@@ -1,6 +1,6 @@
 """Simulated data with known truth: isolated emitters (patches), bead z-stacks and blinking SMLM movies.
 
-render functions: render(pos [n, 3]) -> normalized PSF [n, P, P] (e.g. ConvCubicSplinePSF.render, or
+render functions: render(pos [n, 3]) -> normalized PSF [n, P, P] (e.g. CubicSplinePSF.render, or
 lambda p: vec.forward_batched(p, focus)); for bead stacks render(pos, focus [n]) -> [n, P, P].
 All random numbers come from the given torch.Generator (reproducible)."""
 import math

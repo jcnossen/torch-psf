@@ -1,6 +1,6 @@
 """Localize a movie with a given PSF: psf.localize(movie) -> a Dataset (localizations).
 
-A movie is simulated with an astigmatic vectorial PSF; the same PSF, converted to a ConvCubicSplinePSF for speed,
+A movie is simulated with an astigmatic vectorial PSF; the same PSF, converted to a CubicSplinePSF for speed,
 localizes it. The errors are compared with the Cramer-Rao lower bound.
 
     python examples/localize_movie.py           (command line: python -m torch_psf localize movie.tif --psf psf.json -o locs.csv)

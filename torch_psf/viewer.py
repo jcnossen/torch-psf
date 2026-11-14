@@ -103,7 +103,7 @@ class Engine:
     def load(self, path):
         from torch_psf.psf import PSF
         from torch_psf.vectorial import VectorialPSF
-        from torch_psf.spline import ConvCubicSplinePSF
+        from torch_psf.spline import CubicSplinePSF
         from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
         if not path or not os.path.isfile(str(path)):
             raise ApiError(404, 'not_found', f'no such file: {path}')
@@ -118,9 +118,9 @@ class Engine:
             if psf.z_range is not None:
                 p['z_range'] = list(psf.z_range)
             self.loaded = None
-        elif isinstance(psf, (ConvCubicSplinePSF, AstigmaticGaussianPSF)):
+        elif isinstance(psf, (CubicSplinePSF, AstigmaticGaussianPSF)):
             p.update(model='spline', z_range=list(psf.z_range), z_um=float(np.mean(psf.z_range)), roisize=psf.roisize)
-            self.loaded = psf if isinstance(psf, ConvCubicSplinePSF) else psf.to_spline(psf.roisize, dz_um=0.02)
+            self.loaded = psf if isinstance(psf, CubicSplinePSF) else psf.to_spline(psf.roisize, dz_um=0.02)
         elif isinstance(psf, GaussianPSF):
             p.update(model='gaussian', sigma_px=psf.sigma[0], roisize=psf.roisize)
             self.loaded = None
@@ -135,7 +135,7 @@ class Engine:
         return v.set_zernike({int(k): float(x) for k, x in p.get('zernike', {}).items() if int(k) in NOLL})
 
     def models(self, p):
-        """(model for the pixel panels, ConvCubicSplinePSF whose knots give the volume (or None))."""
+        """(model for the pixel panels, CubicSplinePSF whose knots give the volume (or None))."""
         from torch_psf.gaussian import GaussianPSF
         key = json.dumps({k: p.get(k) for k in ('model', 'optics', 'focus_um', 'z_range', 'zernike', 'roisize',
                                                  'sigma_px')}, sort_keys=True)

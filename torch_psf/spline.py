@@ -1,5 +1,5 @@
 """
-ConvCubicSplinePSF: a 3D PSF stored as Catmull-Rom spline knots on an oversampled grid, evaluated with one strided, grouped
+CubicSplinePSF: a 3D PSF stored as Catmull-Rom spline knots on an oversampled grid, evaluated with one strided, grouped
 conv2d (the convolutional 3D spline of torch-spline-3d, J. Cnossen).
 
 The pixel-integrated PSF is shift invariant: patch[i, j] = g(o_j - x, o_i - y, z), with o the pixel offset from the
@@ -54,7 +54,7 @@ def stage_scan_pos_fn(focus0_um, scale, emitter_z=0.0):
     return pos_fn
 
 
-class ConvCubicSplinePSF(PSF):
+class CubicSplinePSF(PSF):
     """Spline PSF for roisize x roisize patches (odd or even roisize) and emitter heights z_range = (lo, hi) um.
 
     oversample: knots per px laterally; dz_um: knot spacing in z (um); zpad: extra knot planes below and above
@@ -126,7 +126,7 @@ class ConvCubicSplinePSF(PSF):
         return self.xmax
 
     def __repr__(self):
-        return (f'ConvCubicSplinePSF(roisize={self.roisize}, z_range=({self.zlo}, {self.zhi}), oversample={self.S}, '
+        return (f'CubicSplinePSF(roisize={self.roisize}, z_range=({self.zlo}, {self.zhi}), oversample={self.S}, '
                 f'dz_um={self.hz}, zpad={self.zpad}, xy_limit={self.xmax}, knots {tuple(self.knots.shape)})')
 
     # ------------------------------------------------------------------ evaluation
@@ -172,7 +172,7 @@ class ConvCubicSplinePSF(PSF):
         return torch.cat([self.render(pos[s:s + nb]) for s in range(0, len(pos), nb)])
 
     def to(self, device):
-        s = ConvCubicSplinePSF(self.roisize, self.z_range, oversample=self.S, dz_um=self.hz, zpad=self.zpad,
+        s = CubicSplinePSF(self.roisize, self.z_range, oversample=self.S, dz_um=self.hz, zpad=self.zpad,
                                xy_limit=self.xmax, device=device, dtype=self.dtype, pixel_um=self.pixel_um)
         s.knots = self.knots.to(s.dev)
         return s

@@ -5,7 +5,7 @@ the main object: every model renders the PSF with its x / y / z derivatives, and
 them the Cramér-Rao bound, maximum-likelihood fitting of spots, localization of whole movies, files and conversion to
 a cubic spline.
 
-- **models**: `VectorialPSF` (vectorial pupil function with Zernike aberrations), `ConvCubicSplinePSF` (a 3D cubic
+- **models**: `VectorialPSF` (vectorial pupil function with Zernike aberrations), `CubicSplinePSF` (a 3D cubic
   spline evaluated with one strided, grouped `conv2d` per batch of spots), `GaussianPSF` (2D) and
   `AstigmaticGaussianPSF` (3D calibration curves);
 - **fitting**: Poisson maximum likelihood (Levenberg-Marquardt, optional sCMOS read noise) and the Cramer-Rao bound;
@@ -108,7 +108,7 @@ python -m torch_psf localize movie.tif --psf insitu.json --gain 0.5 --offset 100
 ```
 
 **A spline directly from a measured z-stack** ([examples/zstack_spline.py](examples/zstack_spline.py)):
-`tp.ConvCubicSplinePSF.from_zstack(stack, z0_um, dz_um, roisize)` uses the stack planes as knots.
+`tp.CubicSplinePSF.from_zstack(stack, z0_um, dz_um, roisize)` uses the stack planes as knots.
 
 **Look at a PSF**: `python -m torch_psf view [psf.json]` starts a viewer on localhost (3D isosurfaces and slice planes,
 pixel images, gradients, CRLB vs z; API in [docs/VIEWER_API.md](docs/VIEWER_API.md)). The page itself is built from
@@ -125,7 +125,7 @@ the `web/` project (`scripts/build_viewer.sh`).
 |---|---|
 | `vectorial.py` | `VectorialPSF`: dipole emission with Fresnel transmission and supercritical-angle fluorescence, refractive-index mismatch, Zernike aberrations (also per emitter), free pupil phase / amplitude maps, image-plane (line) blur, emission-dipole tensor (photoselection), diattenuation; chirp-z transform to an oversampled grid and pixel integration. |
 | `psf.py` | `PSF`: the base class (statistics, fitting, localization, files, to_spline). |
-| `spline.py` | `ConvCubicSplinePSF`: Catmull-Rom (cubic) knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_zstack`. |
+| `spline.py` | `CubicSplinePSF`: Catmull-Rom (cubic) knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_zstack`. |
 | `gaussian.py` | `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D), pixel-integrated. |
 | `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`. |
 | `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `link_tracks`, `Tracks` / `extract_tracks`. |

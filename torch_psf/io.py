@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from torch_psf.config import Optics, Camera
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import ConvCubicSplinePSF
+from torch_psf.spline import CubicSplinePSF
 from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
 
 FORMAT, VERSION = 'torch-psf', '0.1.0'
@@ -53,14 +53,14 @@ def _vectorial_dict(vec):
 
 
 def save(path, psf, source=None, camera=None, provenance=None):
-    """Write a PSF model (VectorialPSF, ConvCubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF) to path (.json) plus path minus .json + '.npz'
+    """Write a PSF model (VectorialPSF, CubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF) to path (.json) plus path minus .json + '.npz'
     when there are arrays. source: for a spline, the vectorial model it was built from (its parameters are stored
     too, so the spline can be rebuilt). camera: optional Camera. Returns the json dict."""
     arrays = {}
     if isinstance(psf, VectorialPSF):
         d, arrays = _vectorial_dict(psf)
         d = dict(format=FORMAT, version=VERSION, type='vectorial', **d)
-    elif isinstance(psf, ConvCubicSplinePSF):
+    elif isinstance(psf, CubicSplinePSF):
         d = dict(format=FORMAT, version=VERSION, type='spline', spline=psf.to_dict())
         if source is not None:
             v, a = _vectorial_dict(source)
@@ -152,7 +152,7 @@ def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=No
         return _vectorial_from(d, roisize or d.get('roisize', 15), device, angle, arrays, npupil, oversample)
     if typ == 'spline':
         g = d['spline']
-        spl = ConvCubicSplinePSF(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'],
+        spl = CubicSplinePSF(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'],
                                  zpad=g['zpad'], xy_limit=g['xy_limit'], device=device,
                                  knots=torch.as_tensor(arrays['knots']), knot_u0_px=g.get('u0_px'),
                                  knot_z0_um=g.get('z0_um'),
