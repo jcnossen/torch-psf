@@ -63,8 +63,8 @@ def sections(vec, zs):
 
 
 # ------------------------------------------------------------------------------------------------ layout
-fig = plt.figure(figsize=(7.2, 7.0))
-G = gridspec.GridSpec(3, 1, figure=fig, height_ratios=[1.0, 1.25, 1.05], hspace=0.36, left=0.08, right=0.985,
+fig = plt.figure(figsize=(7.2, 8.45))
+G = gridspec.GridSpec(4, 1, figure=fig, height_ratios=[0.82, 1.0, 1.25, 1.05], hspace=0.36, left=0.08, right=0.985,
                       top=0.955, bottom=0.065)
 
 
@@ -110,7 +110,7 @@ def arrow(ax0, ax1):
 
 
 # ---- row 1: the flow
-r1 = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=G[0], wspace=0.32)
+r1 = gridspec.GridSpecFromSubplotSpec(1, 5, subplot_spec=G[1], wspace=0.32)
 # (a) data
 ax_a = fig.add_subplot(r1[0])
 fr = int(torch.bincount(spots.frame).argmax())
@@ -120,7 +120,7 @@ for (x0, y0), f in zip(spots.corner.cpu().numpy(), spots.frame.cpu().numpy()):
         ax_a.add_patch(Rectangle((x0 - 18 - 0.5, y0 - 18 - 0.5), 15, 15, fill=False, ec='#ffb000', lw=0.9))
 clean(ax_a); scalebar(ax_a, 2 / PX, '2 µm', (60, 60))
 ax_a.set_title('movie frame\n+ detected spots')
-letter(ax_a, 'a', 0)
+letter(ax_a, 'b', 1)
 # (b) spots
 ax_b = fig.add_subplot(r1[1])
 order = torch.argsort(theta[:, 2])
@@ -132,7 +132,7 @@ for k, i in enumerate(pick):
 cmap_b = plt.get_cmap(CM).copy(); cmap_b.set_bad('white')
 ax_b.imshow(mos, cmap=cmap_b, interpolation='nearest'); ax_b.axis('off')
 ax_b.set_title(f'{len(spots)} spots\n(ROIs, 15 × 15 px)')
-letter(ax_b, 'b', 0)
+letter(ax_b, 'c', 1)
 # (c) model: pupil phase
 ax_c = fig.add_subplot(r1[2])
 Wp = (torch.einsum('j,jnm->nm', astig.zcoef.detach(), astig.Z)).cpu().numpy()
@@ -142,7 +142,7 @@ ax_c.imshow(Wp, cmap=DIV, vmin=-v, vmax=v)
 ax_c.axis('off')
 ax_c.set_title('vectorial model:\npupil phase')
 ax_c.text(0.5, -0.08, f'Zernikes, ±{v:.2f} λ', transform=ax_c.transAxes, ha='center', va='top')
-letter(ax_c, 'c', 0)
+letter(ax_c, 'd', 1)
 # (d) fit
 i = int(pick[5])
 mu = (theta[i, 3] * fitted.render(theta[i:i + 1, :3].to(dev)).cpu()[0] + theta[i, 4]).numpy()
@@ -156,7 +156,7 @@ for ax, im, t in zip(axs_d, (d, mu, (d - mu) / np.sqrt(mu)), ('data', 'model', '
         ax.imshow(im, cmap=CM, vmin=0, vmax=d.max(), interpolation='nearest')
     clean(ax); ax.set_xlabel(t, labelpad=2)
 axs_d[1].set_title('MLE fit\n(x, y, z, photons, bg)')
-letter(axs_d[0], 'd', 0)
+letter(axs_d[0], 'e', 1)
 # (e) output: super-resolution image coloured by z
 ax_e = fig.add_subplot(r1[4])
 sr_px = 0.02                                                     # um per render pixel
@@ -176,10 +176,10 @@ ax_e.set_title(f'output: {len(locs)}\nlocalizations')
 cax = ax_e.inset_axes([0.05, -0.13, 0.9, 0.06])
 plt.colorbar(plt.cm.ScalarMappable(Normalize(0, 800), ZCM), cax=cax, orientation='horizontal')
 cax.set_xticks([0, 400, 800]); cax.set_xlabel('z (nm)', labelpad=1)
-letter(ax_e, 'e', 0)
+letter(ax_e, 'f', 1)
 
 # ---- row 2: PSF sections (f) and the spline (g)
-r2 = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=G[1], width_ratios=[1.75, 1], wspace=0.18)
+r2 = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=G[2], width_ratios=[1.75, 1], wspace=0.18)
 sf = gridspec.GridSpecFromSubplotSpec(2, 6, subplot_spec=r2[0], width_ratios=[1, 1, 1, 0.62, 1.8, 0.08],
                                       wspace=0.08, hspace=0.35)
 norm = LogNorm(1e-3, 1)
@@ -199,7 +199,7 @@ for row, (vec, name, zr) in enumerate([(astig, 'astigmatic', (0.0, 0.8)), (tetra
         if k == 0:
             ax.set_ylabel(name, labelpad=3)
             if row == 0:
-                letter(ax, 'f', 1)
+                letter(ax, 'g', 2)
         if k == 2:
             scalebar(ax, 1 / PX, '1 µm', (2 * hw + 1, 2 * hw + 1))
     zz = torch.linspace(zr[0], zr[1], 61, device=dev)
@@ -226,7 +226,7 @@ for t in np.arange(-0.5, 28, 2):
 ax.add_patch(Rectangle((6.5, 6.5), 4, 4, fill=False, ec='#38c6ff', lw=1.2))
 clean(ax)
 ax.set_title('3D cubic spline: knots at z = 400 nm\n(2 per px; blue: one 4 × 4 × 4 kernel)', pad=2)
-letter(ax, 'g', 1)
+letter(ax, 'h', 2)
 ax = fig.add_subplot(sg[1]); ax.axis('off'); ax.set_xlim(0, 1); ax.set_ylim(0, 1)
 for x, t in [(0.0, 'knot block\n(gather)'), (0.35, 'conv2d\nstride 2'), (0.70, 'ROIs and\nderivatives')]:
     ax.add_patch(FancyBboxPatch((x + 0.01, 0.42), 0.28, 0.5, boxstyle='round,pad=0.01', fc='#f2f2f2', ec='0.6',
@@ -239,7 +239,7 @@ ax.text(0.5, 0.18, 'one call per batch of emitters; autograd\ngives the gradient
         ha='center', va='center', fontsize=8, color='0.25')
 
 # ---- row 3: in-situ estimate (h) and CRLB (i)
-r3 = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=G[2], width_ratios=[1.35, 1], wspace=0.3)
+r3 = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=G[3], width_ratios=[1.35, 1], wspace=0.3)
 ax = fig.add_subplot(r3[0])
 nl = list(range(5, 22))
 tv = np.array([truth.get(j, 0.0) for j in nl])
@@ -256,7 +256,7 @@ ax.legend(frameon=False, ncol=3, loc='upper right')
 err = float(np.sqrt(np.mean((ev - tv) ** 2)))
 ax.set_title(f'in-situ estimate from {len(spots)} spots: rms error {1000 * err:.1f} mλ', pad=3)
 ax.spines[['top', 'right']].set_visible(False)
-letter(ax, 'h', 2)
+letter(ax, 'i', 3)
 ax = fig.add_subplot(r3[1])
 zz = torch.linspace(0.02, 0.78, 39, device=dev)
 th = torch.stack([torch.zeros_like(zz), torch.zeros_like(zz), zz, torch.full_like(zz, 4000.0),
@@ -270,7 +270,62 @@ ax.set_xlabel('emitter height z (nm)'); ax.set_ylabel('CRLB (nm)'); ax.set_ylim(
 ax.legend(frameon=False, loc='upper left')
 ax.set_title('Cramér-Rao bound (4000 photons, 30 bg / px)', pad=3)
 ax.spines[['top', 'right']].set_visible(False)
-letter(ax, 'i', 2)
+letter(ax, 'j', 3)
+
+
+# ---- row 0: the workflow at a glance (a)
+ax0 = fig.add_subplot(G[0]); ax0.axis('off'); ax0.set_xlim(0, 5); ax0.set_ylim(-0.36, 1)
+stages = [('Movie', 'raw frames,\ncamera gain / offset'),
+          ('Vectorial PSF\nestimation', 'pupil model fitted\nto the blinking spots'),
+          ('Spline\nrefinement', 'flexible model\nwhere data allow'),
+          ('3D fitting', 'x, y, z, photons\n+ CRLB'),
+          ('SMLM\nreconstruction', 'localization table,\nrendering')]
+bw, by, bh = 0.8, 0.22, 0.78
+for k, (name, benefit) in enumerate(stages):
+    x0 = k + (1 - bw) / 2
+    ax0.add_patch(FancyBboxPatch((x0, by), bw, bh, boxstyle='round,pad=0.0,rounding_size=0.05', fc='#f4f5f7',
+                                 ec='0.55', lw=0.7, mutation_aspect=1 / 3.5))
+    ax0.text(k + 0.5, by + bh - 0.05, name, ha='center', va='top', fontsize=8, fontweight='bold')
+    ax0.text(k + 0.5, by - 0.05, benefit, ha='center', va='top', fontsize=8, color='0.3')
+    if k < 4:
+        ax0.annotate('', xy=(k + 1 + (1 - bw) / 2 - 0.01, by + bh / 2), xytext=(x0 + bw + 0.01, by + bh / 2),
+                     arrowprops=dict(arrowstyle='-|>', lw=0.8, color='0.35'))
+fig.canvas.draw()
+
+
+def thumb(k, image, cmap=None, norm=None, frac=(0.29, 0.05, 0.42, 0.44)):
+    """small image inside workflow block k (box-relative position: x, y from the box bottom, w, h)"""
+    x0 = k + (1 - bw) / 2
+    ins = ax0.inset_axes([x0 + frac[0] * bw, by + frac[1] * bh + 0.04, frac[2] * bw, frac[3] * bh],
+                         transform=ax0.transData)
+    ins.imshow(image, cmap=cmap, norm=norm, interpolation='nearest' if cmap else 'bilinear', aspect='equal')
+    ins.set_xticks([]); ins.set_yticks([])
+    for sp_ in ins.spines.values():
+        sp_.set_linewidth(0.4)
+    return ins
+
+
+# 1 movie: three frames as a small stack
+for j, off in enumerate((0.1, 0.05, 0.0)):
+    frm = movie[fr + 2 - j].float().numpy()[30:66, 30:66]
+    thumb(0, frm, cmap='gray', frac=(0.22 + off, 0.05 + off * 1.0, 0.42, 0.44))
+# 2 pupil phase
+ins = thumb(1, Wp, cmap=DIV)
+ins.images[0].set_clim(-v, v); ins.axis('off')
+# 3 spline knots with the knot grid
+ins = thumb(2, K[kz, c0 + 4:c0 + 24, c0 + 4:c0 + 24], cmap=CM)
+for t in np.arange(-0.5, 20, 2):
+    ins.axhline(t, color='w', lw=0.2, alpha=0.5); ins.axvline(t, color='w', lw=0.2, alpha=0.5)
+# 4 a spot with the fitted position
+ins = thumb(3, d, cmap=CM)
+xf, yf = float(theta[i, 0]) + 7, float(theta[i, 1]) + 7
+ins.plot([xf], [yf], marker='+', color='#38c6ff', ms=7, mew=1.0)
+# 5 the reconstruction (centre crop)
+n2 = img.shape[0]
+thumb(4, np.clip(img[n2 // 6:5 * n2 // 6, n2 // 6:5 * n2 // 6] * 1.8, 0, 1))
+ax0.text(2.5, -0.3, 'The PSF comes from the movie itself (no bead stack needed); the spline makes estimation and '
+         'fitting fast on the GPU.', ha='center', va='top', fontsize=8, style='italic', color='0.2')
+letter(ax0, 'a', 0)
 
 # arrows of the flow row (after the layout is fixed)
 fig.canvas.draw()

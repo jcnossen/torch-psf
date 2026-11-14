@@ -13,11 +13,11 @@ PyTorch, batched on the GPU:
 
 ![overview](docs/overview.png)
 
-*Overview (made by [examples/make_overview_figure.py](examples/make_overview_figure.py) from generated data). Top, the
-flow: (a) a movie frame with detected spots, (b) spot ROIs, (c) the vectorial model (pupil aberration phase), (d) a
-maximum-likelihood fit (data, model, normalized residual), (e) the localizations as a super-resolution image coloured
-by z. Below: (f) sections of an astigmatic and a tetrapod-like PSF, (g) the convolutional spline, (h) the in-situ
-Zernike estimate against the truth, (i) the Cramér-Rao bound.*
+*Overview (made by [examples/make_overview_figure.py](examples/make_overview_figure.py) from generated data).
+(a) The workflow. (b-f) The flow in detail: a movie frame with detected spots, spot ROIs, the vectorial model (pupil
+aberration phase), a maximum-likelihood fit (data, model, normalized residual), the localizations as a
+super-resolution image coloured by z. (g) Sections of an astigmatic and a tetrapod-like PSF, (h) the 3D cubic spline,
+(i) the in-situ Zernike estimate against the truth, (j) the Cramér-Rao bound.*
 
 ```python
 import torch, torch_psf as tp
