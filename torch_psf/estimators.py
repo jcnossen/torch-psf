@@ -313,11 +313,11 @@ class InSituEstimator(Estimator):
         self.zernike_indices, self.npupil, self.oversample_pupil = tuple(zernike_indices), npupil, oversample_pupil
         self.scan_focus_um, self.scan_wavelength_um, self.scan_iters = scan_focus_um, scan_wavelength_um, scan_iters
 
-    def _fit(self, spline, rois, vec, iters, stage):
+    def _fit(self, spline, rois, vec, iters, stage, var=None):
         fn = fit_zernike_knots if self.method == 'zernike' else fit_pupil_knots
         if self.method not in ('zernike', 'pupil'):
             raise ValueError(self.method)
-        return fn(spline, rois, vec, iters=iters, log=self._log(stage), stop=self.stop)
+        return fn(spline, rois, vec, iters=iters, log=self._log(stage), stop=self.stop, var=var)
 
     def _variant(self, vec0, focus_um, wavelength_um):
         """the start model at another focus / wavelength (the Zernikes of the start are kept)"""
@@ -366,6 +366,10 @@ class InSituEstimator(Estimator):
         te = np.flatnonzero(par == 1)[:self.nheldout]
         rois = sp.rois[torch.as_tensor(tr, device=self.dev)]
         rois_te = sp.rois[torch.as_tensor(te, device=self.dev)]
+        # read-noise variance of the ROIs (photons^2; Camera.variance: scalar, or per ROI with per-pixel maps)
+        v_all = sp.var if (sp.var is not None and float(sp.var.abs().max()) > 0) else None
+        sub = lambda idx: v_all if (v_all is None or v_all.dim() == 0) else v_all[torch.as_tensor(idx, device=v_all.device)]
+        var, var_te = sub(tr), sub(te)
         fr = sp.frame.cpu().numpy()
         self.report.update(method=self.method, n_spots=len(sp), n_train=len(tr), n_test=len(te),
                            frames_requested=[f0, f1], frames_read=sp.frames_read,
@@ -376,7 +380,7 @@ class InSituEstimator(Estimator):
         spline = CubicSplinePSF(R, zr, device=self.dev, **self.grid)
 
         def heldout(v):
-            return compare_heldout({'m': v.to_spline(R, zr, **self.grid)}, rois_te)['m']['nll_per_px']
+            return compare_heldout({'m': v.to_spline(R, zr, **self.grid)}, rois_te, var_te)['m']['nll_per_px']
 
         # focus / wavelength scan (held-out NLL)
         fs = list(self.scan_focus_um) if self.scan_focus_um is not None else [None]
@@ -389,7 +393,7 @@ class InSituEstimator(Estimator):
                         break
                     v = self._variant(vec0, fz, wl)
                     r = self._fit(spline, rois, v, self.scan_iters or max(self.iters // 2, 1),
-                                  f'scan focus {v.focus_um:g} wavelength {v.optics.wavelength_um:g}')
+                                  f'scan focus {v.focus_um:g} wavelength {v.optics.wavelength_um:g}', var)
                     scan.append(dict(focus_um=float(v.focus_um), wavelength_um=float(v.optics.wavelength_um),
                                      heldout_nll_per_px=heldout(r['psf'])))
             best = min(scan, key=lambda q: q['heldout_nll_per_px'])
@@ -399,12 +403,12 @@ class InSituEstimator(Estimator):
                 if len(vals) > 2 and best[k] in (min(vals), max(vals)):
                     warnings.append(f'the best {k} ({best[k]:g}) is at the edge of the scanned values')
 
-        r = self._fit(spline, rois, vec0, self.iters, 'vectorial')
+        r = self._fit(spline, rois, vec0, self.iters, 'vectorial', var)
         vec = r['psf']
         n_rej = 0
         if self.reject_overlap and not self._stopped():
             s1 = vec.to_spline(R, zr, **self.grid)
-            dv, _ = spot_deviance(s1, rois)
+            dv, _ = spot_deviance(s1, rois, var)
             thr, med, scale = self._deviance_threshold(dv)
             keep = dv < thr
             n_rej = int((~keep).sum())
@@ -420,8 +424,10 @@ class InSituEstimator(Estimator):
             if med > 1.3:
                 warnings.append(f'median deviance per px {med:.2f} (1 for Poisson statistics): check the camera gain '
                                 f'and excess_noise (EMCCD: 2)')
-            rois = rois[torch.as_tensor(keep, device=self.dev)]
-            r = self._fit(spline, rois, vec, max(self.iters * 3 // 4, 1), 'vectorial (overlaps rejected)')
+            kt = torch.as_tensor(keep, device=self.dev)
+            rois = rois[kt]
+            var = var if (var is None or var.dim() == 0) else var[kt]
+            r = self._fit(spline, rois, vec, max(self.iters * 3 // 4, 1), 'vectorial (overlaps rejected)', var)
             vec = r['psf']
         s0 = vec0.to_spline(R, zr, **self.grid)
         s_vec = vec.to_spline(R, zr, **self.grid)
@@ -433,7 +439,7 @@ class InSituEstimator(Estimator):
         if self.refine and not self._stopped():
             s_ref = vec.to_spline(R, zr, **self.grid)          # a separate grid object: the fit overwrites its knots
             K_vec = s_ref.knots.clone()
-            rr = fit_free_knots(s_ref, K_vec, rois=rois, ref=K_vec, lam_ref=self.refine_lam_ref,
+            rr = fit_free_knots(s_ref, K_vec, rois=rois, var=var, ref=K_vec, lam_ref=self.refine_lam_ref,
                                 lam_s=self.refine_lam_s, outer=self.refine_outer, log=self._log('refine'),
                                 stop=self.stop)
             cands['refined'] = rr['psf']
@@ -442,15 +448,14 @@ class InSituEstimator(Estimator):
                                          at_limit=rr['report']['at_limit'])
             warnings.append(FREE_KNOT_WARNING)
         if len(te):
-            ho = compare_heldout(cands, rois_te)
+            ho = compare_heldout(cands, rois_te, var_te)
             self.report['heldout'] = ho
             if 'refined' in cands:
                 better = ho['refined']['nll_per_px'] < ho['vectorial']['nll_per_px']
                 self.report['refine']['kept'] = bool(better)
                 if better:
                     result = result_spline = cands['refined']
-            ds = result_spline.fit(rois_te, var=None if sp.var is None or sp.var.dim() == 0 else
-                                   sp.var[torch.as_tensor(te, device=sp.var.device)],
+            ds = result_spline.fit(rois_te, var=var_te,
                                    pixel_um=vec.pixel_um)
             c2 = float(ds['chi2'].median())
             self.report['heldout_chi2_median'] = c2

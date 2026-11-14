@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import tifffile
 import torch
-from conftest import DEV
+from conftest import DEV, needs_gpu
 import torch_psf as tp
 from torch_psf.movie import TiffMovie
 from torch_psf.spots import extract_spots, spread_order
@@ -171,3 +171,16 @@ def test_load_smlm(tmp_path):
     np.testing.assert_allclose(L['crlb'][:, 1].numpy(), a['uncertainty_nm_'] / 100.0, rtol=1e-6)
     np.testing.assert_allclose(L['photons'].numpy(), a['intensity_photon_'], rtol=1e-6)
     assert 'chi2' in L.keys() and 'bg' in L.keys()
+
+
+@needs_gpu
+def test_insitu_uses_read_noise():
+    """with the camera's read noise in every likelihood, the held-out chi2 of the true PSF is ~1 (1.11 without)"""
+    from torch_psf.simulate import simulate_reference_movie
+    r = simulate_reference_movie(T=1500, readnoise_e=4.0, device=DEV)
+    psf = r['psf']
+    est = InSituEstimator(start=psf, camera=r['camera'], roisize=13, z_range=psf.z_range, nspots=1500, nheldout=800,
+                          iters=15, device=DEV)
+    est.estimate(r['movie_adu'])
+    assert 0.9 < est.report['heldout_chi2_median'] < 1.1
+    assert est.report['deviance']['median'] < 1.15

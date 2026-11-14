@@ -56,6 +56,16 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 | `ZStackEstimator(...)` | adds `emitter_z_um` (starting bead centre height; **default** bead_diameter_um / 2, else 0), `fit_na`, `fit_n_med`, `drift_order` (**default** 3, passed to fit_beads; drift is on by default as before) |
 | `Dataset.estimate_drift` stored `meta['drift_info']` = dict(method, n, version) | stores `meta['drift']` = the run record: method, entry point (`dme.dme_prior.dme_prior_estimate`), version, package path, parameters (n_frames, dims, n_rows, time, row rule), `dme_info` (the choices DME made), result per axis (ptp_px, rms_px); `return_info=True` also returns it. DME is found through `DME_PATH` (a checkout) if set, else the installed package. `set_drift(info=)` stores into `meta['drift']` |
 
+### 2026-11-14: read noise in the in-situ likelihoods (no default number changes)
+
+| old | new |
+|---|---|
+| `InSituEstimator` fitted, scored and rejected spots with the plain Poisson likelihood: the camera read noise (`Spots.var` = `Camera.variance`) was ignored in the Zernike / pupil fits, the deviance rejection, the free-knot refinement, the held-out NLL and the held-out chi2 fit | all of them use the read-noise variance (scalar readnoise^2 / excess_noise^2 in photons^2, or per-pixel sCMOS maps cropped per ROI) when a camera with read noise is given; the d + var ~ Poisson(mu + var) likelihood of `fit.poisson_nll` / `lm_poisson`. On `simulate_reference_movie` (gain 0.5, read noise 1.5 e-) the held-out chi2 of the true PSF goes from 1.11 to 1.02 and the median deviance from 1.14 to 1.05. Report numbers that change: `heldout_chi2_median`, `deviance` (median / threshold / rejected fraction), absolute held-out NLL values (the likelihood includes var; differences between models are comparable as before). No option or default value changed |
+| `fit_zernike_knots`, `fit_pupil_knots`, `fit_free_knots`, `vectorial_gradient` | take `var=None` (scalar or [N, P, P], aligned with the ROIs) |
+| `PSF.fit(camera=...)` / `PSF.localize(camera=...)` | unchanged: they already used `Camera.variance` (localize through `Spots.var`); chi2 ~1.00-1.02 on the reference movie |
+
+The bead fit (`fit_beads` / `ZStackEstimator`) still uses the plain Poisson likelihood (bright beads: read noise negligible).
+
 ### 2026-11-14: real-data follow-ups (defaults changed: marked **default**)
 
 | old | new |

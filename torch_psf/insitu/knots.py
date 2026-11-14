@@ -71,7 +71,7 @@ def knot_gradient(spline, rois, theta, batch=4000, var=None):
     return K.grad, nll
 
 
-def vectorial_gradient(vectorial, rois, theta, focus_um, batch=1000, names=('zcoef',)):
+def vectorial_gradient(vectorial, rois, theta, focus_um, batch=1000, names=('zcoef',), var=None):
     """d NLL / d parameters with the vectorial model (roisize = ROI size) evaluated for every emitter (route V).
     Returns ({name: gradient}, NLL)."""
     prm = {k: v.detach() for k, v in vectorial.named_parameters()}
@@ -82,7 +82,8 @@ def vectorial_gradient(vectorial, rois, theta, focus_um, batch=1000, names=('zco
         prm.update(leaf)
         g_ = torch.func.functional_call(vectorial, prm,
                                         (t[:, :3], torch.full((len(t),), float(focus_um), device=t.device)))
-        l = poisson_nll(rois[s:s + batch], t[:, 3, None, None] * g_ + t[:, 4, None, None]).sum()
+        v = var[s:s + batch] if (torch.is_tensor(var) and var.dim() > 0) else var
+        l = poisson_nll(rois[s:s + batch], t[:, 3, None, None] * g_ + t[:, 4, None, None], v).sum()
         for k, gk in zip(names, torch.autograd.grad(l, [leaf[k] for k in names])):
             g[k] += gk
         tot += float(l)
@@ -102,7 +103,7 @@ def _sync(dev):
 
 
 def fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, route='K', loc_iters=3, log=None,
-                      theta=None, localizer=None, stop=None):
+                      theta=None, localizer=None, stop=None, var=None):
     """Zernike coefficients of `vectorial` (a VectorialPSF of any roisize; copied to the sizes needed) from SMLM ROIs
     [N, P, P] (photons; P = spline.roisize). The spline (CubicSplinePSF) defines the knot grid; its knots are
     overwritten. Per iteration:
@@ -112,7 +113,8 @@ def fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, r
           vectorial model for every emitter,
       (3) an Adam step (lr, waves) on the Zernikes.
     pos_fn: knot z -> (emitter z, focus) (default: emitter height at vectorial.focus_um).
-    log(it, nll, seconds, zcoef): progress callback; stop(): early stop ("use what we have").
+    log(it, nll, seconds, zcoef): progress callback; stop(): early stop ("use what we have"). var: read-noise variance
+    (photons^2; scalar or [N, P, P], e.g. Camera.variance / Spots.var) used in every likelihood.
     Returns dict(psf, report, history, ...): psf = copy of vectorial with the fitted Zernikes; data = dict(zcoef, theta (of the last
     localization), knots (the spline of the last localization step))."""
     spl, d, vec = spline, rois, vectorial
@@ -133,13 +135,14 @@ def fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, r
         spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=spl.nz)
         if K0 is None:
             K0 = spl.knots
-        th, nll = (localize(spl, d, th, iters=30 if th is None else loc_iters) if localizer is None
+        th, nll = (localize(spl, d, th, var=var, iters=30 if th is None else loc_iters) if localizer is None
                    else localizer(spl, d, th))
         if route == 'K':
-            gK, tot = knot_gradient(spl, d, th)
+            gK, tot = knot_gradient(spl, d, th, var=var)
             g = spl.vjp_vectorial(big, pos_fn, gK, chunk=spl.nz)['zcoef']      # one build + one backward
         else:
-            gd, tot = vectorial_gradient(small, d, th, focus_um=float(pos_fn(torch.zeros(1, device=spl.dev))[1][0]))
+            gd, tot = vectorial_gradient(small, d, th, focus_um=float(pos_fn(torch.zeros(1, device=spl.dev))[1][0]),
+                                         var=var)
             g = gd['zcoef']
         _sync(spl.dev)
         hist.append(dict(it=it, nll=tot, seconds=time.time() - t0))
@@ -164,7 +167,7 @@ def fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, r
 
 
 def fit_pupil_knots(spline, rois, vectorial, pos_fn=None, iters=200, lr_z=1e-3, lr_p=2e-3, lr_a=1e-2, lam=0.0,
-                    theta=None, log=None, localizer=None, stop=None):
+                    theta=None, log=None, localizer=None, stop=None, var=None):
     """Free pupil from SMLM ROIs through the knot route: the Zernikes of `vectorial` plus a pixel map of pupil phase
     (waves) and of log pupil amplitude. Piston, tilt and defocus are projected out of the phase map (global shifts of
     all emitters), the mean out of the log amplitude (global brightness). lam: Laplacian roughness penalty on both
@@ -199,8 +202,9 @@ def fit_pupil_knots(spline, rois, vectorial, pos_fn=None, iters=200, lr_z=1e-3, 
         spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=spl.nz)
         if K0 is None:
             K0 = spl.knots
-        th, nll = localize(spl, d, th, iters=30 if th is None else 3) if localizer is None else localizer(spl, d, th)
-        gK, tot = knot_gradient(spl, d, th)
+        th, nll = (localize(spl, d, th, var=var, iters=30 if th is None else 3) if localizer is None
+                   else localizer(spl, d, th))
+        gK, tot = knot_gradient(spl, d, th, var=var)
         g = spl.vjp_vectorial(big, pos_fn, gK, names=('zcoef', 'pupil_phase', 'pupil_amp'), chunk=spl.nz)
         gr = dict(zcoef=g['zcoef'], phase=g['pupil_phase'] * mask, la=g['pupil_amp'] * big.pupil_amp * mask)
         if lam > 0:
@@ -255,13 +259,13 @@ def bead_theta(spline, stack, z_nom, theta=None, xy_zrange=None):
 
 
 def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0, lam_s=0.0, w_stack=1.0, outer=12,
-                   inner=8, theta=None, log=None, localizer=None, xy_zrange=None, stop=None):
+                   inner=8, theta=None, log=None, localizer=None, xy_zrange=None, stop=None, var=None):
     """Free-knot PSF. Alternates (1) the emitter parameters at fixed knots (Levenberg-Marquardt per ROI) and (2) the
     knots at fixed emitter parameters (L-BFGS, `inner` iterations; the model is linear in the knots, so this
     subproblem is convex), `outer` times.
     spline: CubicSplinePSF (knot grid; its knots are overwritten); knots0: starting knots [nz, nv, nu];
-    rois: SMLM ROIs [N, P, P] (photons); stack: dict(d=[nbeads, nk, P, P], z_nom=[nk]) bead stack with known plane
-    heights; ref: reference knots for the prior.
+    rois: SMLM ROIs [N, P, P] (photons; var: their read-noise variance, scalar or [N, P, P]); stack: dict(d=[nbeads, nk,
+    P, P], z_nom=[nk]) bead stack with known plane heights; ref: reference knots for the prior.
     loss = NLL(SMLM ROIs) + w_stack NLL(bead stack) + lam_ref sum (K - ref)^2 / (|ref| + eps)
            + lam_s sum of squared second differences / (|knots0| + eps).
     Returns dict(psf, report, history, ...): psf = a CubicSplinePSF with the fitted knots; data = dict(knots, theta (of the SMLM ROIs));
@@ -278,7 +282,8 @@ def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0,
     for o in range(outer):
         spl.knots = K.detach()
         if insitu is not None:
-            th_ins, nll_i = (localize(spl, insitu, th_ins, iters=30 if th_ins is None else 5) if localizer is None
+            th_ins, nll_i = (localize(spl, insitu, th_ins, var=var, iters=30 if th_ins is None else 5)
+                             if localizer is None
                              else localizer(spl, insitu, th_ins))
         if stack is not None:
             th_b, nll_b = bead_theta(spl, stack['d'], stack['z_nom'], th_b, xy_zrange)
@@ -288,7 +293,7 @@ def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0,
             opt.zero_grad()
             tot = 0.0
             if insitu is not None:
-                tot += knot_loss(spl, K, insitu, th_ins)
+                tot += knot_loss(spl, K, insitu, th_ins, var=var)
             if stack is not None:
                 tot += knot_loss(spl, K, stack['d'].reshape(-1, P, P), th_b, weight=w_stack)
             reg = 0.0
