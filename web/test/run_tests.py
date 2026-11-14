@@ -39,16 +39,21 @@ GEN = os.path.join(WEB, '..', 'tests', 'make_web_reference.py')
 CACHE = os.path.join(HERE, '.cache')
 
 
+GEN_SMLM = os.path.join(WEB, '..', 'tests', 'make_web_smlm_reference.py')
+
+
 def ensure_references():
-    """(Re)generate the reference data in test/.cache/ when missing or when the generator has changed."""
+    """(Re)generate the reference data in test/.cache/ when missing or when a generator has changed."""
     import hashlib
-    h = hashlib.sha256(open(GEN, 'rb').read()).hexdigest()
-    stamp = os.path.join(CACHE, 'stamp.txt')
-    if os.path.exists(stamp) and open(stamp).read().strip() == h:
-        return
-    print('generating the reference data (tests/make_web_reference.py, ~2 min on a GPU) ...', flush=True)
-    subprocess.run([sys.executable, GEN, '--out', CACHE], check=True)
-    open(stamp, 'w').write(h)
+    for gen, out, stamp_name in ((GEN, CACHE, 'stamp.txt'), (GEN_SMLM, os.path.join(CACHE, 'smlm'), 'stamp_smlm.txt')):
+        h = hashlib.sha256(open(gen, 'rb').read()).hexdigest()
+        stamp = os.path.join(CACHE, stamp_name)
+        if os.path.exists(stamp) and open(stamp).read().strip() == h:
+            continue
+        print(f'generating the reference data ({os.path.basename(gen)}, a few minutes on a GPU) ...', flush=True)
+        subprocess.run([sys.executable, gen, '--out', out], check=True)
+        os.makedirs(CACHE, exist_ok=True)
+        open(stamp, 'w').write(h)
 
 
 def main():
