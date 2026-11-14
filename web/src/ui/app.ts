@@ -97,10 +97,11 @@ export function startApp(root: HTMLElement) {
     $('sec-label').textContent = `xy at z = ${z.toFixed(3)} um; xz / yz through the slice planes (z up), log scale over ${dec} decades`;
   }
 
+  view.onSliceChange = (axis, f) => { $<HTMLInputElement>(['sx', 'sy', 'sz'][axis]).value = String(f * 100); drawSections(); };
   for (const [i, id] of ['sx', 'sy', 'sz'].entries()) {
     $<HTMLInputElement>(id).oninput = (e) => { view.setSlice(i as 0 | 1 | 2, +(e.target as HTMLInputElement).value / 100); drawSections(); };
   }
-  $<HTMLInputElement>('zexag').oninput = (e) => { view.opts.zExag = +(e.target as HTMLInputElement).value; $('zexag-v').textContent = view.opts.zExag.toFixed(1); view.rebuild(); };
+  $<HTMLInputElement>('zexag').oninput = (e) => { view.setZExag(+(e.target as HTMLInputElement).value); $('zexag-v').textContent = view.opts.zExag.toFixed(1); };
   $<HTMLInputElement>('levels').onchange = (e) => {
     const lv = (e.target as HTMLInputElement).value.split(/[ ,]+/).map(Number).filter((x) => x > 0 && x < 100).map((x) => x / 100);
     if (lv.length) { view.opts.levels = lv; view.rebuild(); }
@@ -288,9 +289,9 @@ const TEMPLATE = `
       <label><input id="show-slices" type="checkbox" checked> slices</label>
     </div>
     <div id="view3d"></div>
-    <div class="bar">slice planes: <label>x <input id="sx" type="range" min="0" max="100" value="50"></label>
-      <label>y <input id="sy" type="range" min="0" max="100" value="50"></label>
-      <label>z <input id="sz" type="range" min="0" max="100" value="50"></label></div>
+    <div class="bar">slice planes: <label>x <input id="sx" type="range" min="0" max="100" step="0.1" value="50"></label>
+      <label>y <input id="sy" type="range" min="0" max="100" step="0.1" value="50"></label>
+      <label>z <input id="sz" type="range" min="0" max="100" step="0.1" value="50"></label></div>
     <p id="preset-note" class="note"></p>
     <div class="panels">
       <figure><canvas id="sec-xy" width="200" height="200"></canvas><figcaption>xy</figcaption></figure>

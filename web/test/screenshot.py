@@ -33,6 +33,31 @@ def drive_app(pg, base, outdir):
     shot(pg, os.path.join(outdir, 'landing.png'))
     compress(os.path.join(outdir, 'landing.png'))
     print('landing screenshot:', pg.inner_text('#gpu-status'))
+    # 3D view interaction: hover highlights a slice plane, dragging moves it (orbit disabled meanwhile); z exaggeration
+    # without isosurface recomputation
+    pg.evaluate('window.__view.controls.autoRotate = false')
+    time.sleep(1.0)                             # let the orbit damping settle
+    box = pg.locator('#view3d canvas').bounding_box()
+    cx, cy = box['x'] + box['width'] * 0.56, box['y'] + box['height'] * 0.6   # off the planes' common centre
+    pg.mouse.move(cx, cy)
+    hov = pg.evaluate('window.__view.outlines.findIndex((o) => o.visible)')
+    before = pg.evaluate('[...window.__view.slicePos]')
+    cam0 = pg.evaluate('window.__view.camera.position.toArray()')
+    pg.mouse.down(); pg.mouse.move(cx, cy - 60, steps=8); pg.mouse.move(cx + 40, cy - 90, steps=8)
+    during = pg.evaluate('window.__view.controls.enabled')
+    pg.mouse.up()
+    after = pg.evaluate('[...window.__view.slicePos]')
+    cam1 = pg.evaluate('window.__view.camera.position.toArray()')
+    sliders = pg.evaluate("['sx', 'sy', 'sz'].map((i) => +document.getElementById(i).value / 100)")
+    ax = [2, 1, 0][hov] if hov >= 0 else 0      # slice meshes are [xy, xz, yz]
+    ok = hov >= 0 and after[ax] != before[ax] and not during and pg.evaluate('window.__view.controls.enabled') \
+        and max(abs(a - b) for a, b in zip(cam0, cam1)) < 0.05 and abs(sliders[ax] - after[ax]) < 2e-3
+    t = pg.evaluate('''() => { const v = window.__view; let t0 = performance.now(); for (let i = 0; i < 10; i++) v.setZExag(1 + i / 10);
+        const tz = (performance.now() - t0) / 10; v.setZExag(1); t0 = performance.now(); v.isoKey = ''; v.rebuild(); return [tz, performance.now() - t0]; }''')
+    print(f'drag: hovered plane {hov} (axis {ax}), slice {before[ax]:.3f} -> {after[ax]:.3f}, orbit disabled while dragging, '
+          f'slider in sync: {"ok" if ok else "FAILED"}; z exaggeration update {t[0]:.1f} ms vs full rebuild {t[1]:.0f} ms')
+    if not ok:
+        raise RuntimeError(f'slice-plane drag check failed: cam {cam0} -> {cam1}, sliders {sliders}, after {after}')
     for name in ['astig', 'focus']:
         pg.select_option('#preset', name)
         pg.wait_for_function(f"window.__presetShown === '{name}'", timeout=60000)
