@@ -6,12 +6,13 @@ import { View3D, Volume } from './view3d';
 import { drawArray } from './colormap';
 import { DEFAULT_NOLL, Optics } from '../psf/vectorial';
 import { makePsfJson, readPsfJson } from '../io/psfjson';
-import { WEBGPU_HELP } from '../gpu/device';
+import { WEBGPU_HELP, getDevice } from '../gpu/device';
 import { TiffMovie } from '../io/tiff';
 import type { FitForm, FitSummary, VolumeSpec, Req, MovieForm, InsituForm, MovieSourceSpec } from './protocol';
 import { InsituReport, FREE_KNOT_WARNING } from '../smlm/estimate';
 import { splineGrid } from '../gpu/spline_lm';
 import { Recon } from './recon';
+import { readLocFile, isLocFile } from '../io/locfile';
 import { PointCloudView } from './pointcloud';
 import { locsToCsv, MovieSummary, NCOL } from '../smlm/movie';
 
@@ -218,8 +219,8 @@ export function startApp(root: HTMLElement) {
   (window as any).__setMovieFiles = setMFiles;
   mdrop.ondragover = (e) => { e.preventDefault(); mdrop.classList.add('over'); };
   mdrop.ondragleave = () => mdrop.classList.remove('over');
-  mdrop.ondrop = (e) => { e.preventDefault(); mdrop.classList.remove('over'); if (e.dataTransfer) setMFiles(e.dataTransfer.files); };
-  $<HTMLInputElement>('mfile').onchange = (e) => setMFiles((e.target as HTMLInputElement).files!);
+  mdrop.ondrop = (e) => { e.preventDefault(); mdrop.classList.remove('over'); if (!e.dataTransfer) return; const fl = [...e.dataTransfer.files]; if (fl.some(isLocFile)) loadLocFiles(fl); else setMFiles(fl); };
+  $<HTMLInputElement>('mfile').onchange = (e) => { const fl = [...(e.target as HTMLInputElement).files!]; if (fl.some(isLocFile)) loadLocFiles(fl); else setMFiles(fl); };
   $('m-demo').onclick = (e) => { e.preventDefault(); loadDemo(); };
 
   // --- start PSF of the fit / the PSF for "localize only"
@@ -272,25 +273,79 @@ export function startApp(root: HTMLElement) {
   // --- reconstruction
   let lastDraw = 0, drawTimer = 0;
   // point-cloud view (pointcloud.ts): world-unit Gaussian splats at screen resolution, pan / zoom / orbit
-  const cloud = new PointCloudView($('recon') as HTMLCanvasElement, () => recon ? recon.chunkList() : [],
-    () => ({ W: recon?.W ?? 1, H: recon?.H ?? 1, pixel_nm: 1000 * (recon?.pixel_um ?? 0.1), n: recon?.n ?? 0 }),
-    () => ({ mode: $<HTMLSelectElement>('r-mode').value as 'precision' | 'fixed', blurNm: n('r-blur'), capNm: 60, maxCrlbNm: n('r-crlb'),
-      colorZ: $<HTMLInputElement>('r-colorz').checked, zlo: n('m-zlo'), zhi: n('m-zhi'), zExag: n('r-zex') }));
-  (window as any).__cloud = cloud;
-  cloud.onChange = () => {
-    $<HTMLInputElement>('r-tilt').value = String(Math.round(cloud.tilt)); $<HTMLInputElement>('r-rot').value = String(Math.round(cloud.rot));
-    const L = cloud.last;
-    $('r-label').textContent = recon ? `${recon.n} localizations; ${L.drawn < L.inView ? `drawing ${L.drawn} of ${L.inView} while moving; ` : ''}${L.nmPerPx.toFixed(1)} nm per screen pixel` +
-      ($<HTMLInputElement>('r-colorz').checked ? `; colour = z from ${n('m-zlo')} (blue) to ${n('m-zhi')} um (red)` : '') : '';
-  };
-  const drawRecon = () => { if (!recon) return; cloud.invalidate(); lastDraw = performance.now(); };
-  for (const id of ['r-mode', 'r-blur', 'r-crlb', 'r-colorz']) $(id).addEventListener('change', drawRecon);
-  $<HTMLInputElement>('r-tilt').oninput = () => { cloud.tilt = n('r-tilt'); cloud.request(); };
-  $<HTMLInputElement>('r-rot').oninput = () => { cloud.rot = n('r-rot'); cloud.request(); };
-  $<HTMLInputElement>('r-zex').oninput = () => { $('r-zex-v').textContent = n('r-zex').toFixed(1); cloud.request(); };
-  $('r-reset').onclick = () => cloud.reset();
+  let cloud: PointCloudView | null = null;
+  getDevice().then(({ device }) => {
+    const c = new PointCloudView(device, $('recon') as HTMLCanvasElement,
+      () => ({ mode: $<HTMLSelectElement>('r-mode').value as 'precision' | 'fixed', blurNm: n('r-blur'), capNm: 60, maxCrlbNm: n('r-crlb'),
+        colorZ: $<HTMLInputElement>('r-colorz').checked, zlo: n('r-zlo'), zhi: n('r-zhi'), zExag: n('r-zex') }));
+    cloud = c; (window as any).__cloud = c;
+    c.onChange = () => {
+      $<HTMLInputElement>('r-tilt').value = String(Math.round(c.tilt)); $<HTMLInputElement>('r-rot').value = String(Math.round(c.rot));
+      const L = c.last;
+      $('r-label').textContent = recon ? `${L.n} localizations` + (L.drawn < L.visible ? `; ${L.visible} in view, drawing a fixed subset of ${L.drawn}` : `; ${L.visible} in view`) +
+        `; ${L.nmPerPx.toFixed(1)} nm per screen pixel` + ($<HTMLInputElement>('r-colorz').checked ? `; colour = z from ${n('r-zlo')} (blue) to ${n('r-zhi')} um (red)` : '') : '';
+    };
+  }, () => { /* no WebGPU: the page says so */ });
+  const drawRecon = () => { cloud?.request(); lastDraw = performance.now(); };
+  for (const id of ['r-mode', 'r-blur', 'r-colorz', 'r-zlo', 'r-zhi']) $(id).addEventListener('change', () => cloud?.request());
+
+  // --- viewer: a localization file (torch_psf / Picasso HDF5, ThunderSTORM csv) dropped anywhere on the page
+  async function loadLocFiles(files: File[]) {
+    const lt = $('loc-status');
+    lt.textContent = 'reading ' + files.map((f) => f.name).join(', ') + ' ...';
+    focusRecon();
+    try {
+      const L = await readLocFile(files, 1000 * n('o-px'));
+      recon = new Recon(L.H, L.W, L.pixel_nm / 1000);
+      recon.add(L.rows);
+      if (L.has3d) {
+        const z = new Float32Array(L.n); for (let i = 0; i < L.n; i++) z[i] = L.rows[i * NCOL + 3]; z.sort();
+        setNum('r-zlo', +z[Math.floor(0.01 * (L.n - 1))].toFixed(3)); setNum('r-zhi', +z[Math.floor(0.99 * (L.n - 1))].toFixed(3));
+      }
+      $<HTMLInputElement>('r-colorz').checked = L.has3d;
+      $<HTMLSelectElement>('r-mode').value = Number.isFinite(L.rows[6]) ? 'precision' : 'fixed';
+      cloud?.start(L.W, L.H, L.pixel_nm); cloud?.setFilter(n('r-crlb')); cloud?.append(L.rows);
+      const med = (k: number, f = 1) => { const a = new Float32Array(L.n); for (let i = 0; i < L.n; i++) a[i] = L.rows[i * NCOL + k] * f; a.sort(); return a[L.n >> 1]; };
+      $('l-table').innerHTML = ([
+        ['file', `${files.map((f) => f.name).join(' + ')} (${L.format})`],
+        ['localizations', `${L.n} in ${L.nFrames} frames; field ${L.W} x ${L.H} px of ${L.pixel_nm} nm${L.has3d ? '; 3D' : '; 2D'}`],
+        ['median photons / bg', `${med(4).toFixed(0)} / ${med(5).toFixed(1)}`],
+        ['median CRLB x / y / z', Number.isFinite(L.rows[6]) ? `${med(6, L.pixel_nm).toFixed(1)} / ${med(7, L.pixel_nm).toFixed(1)} / ${L.has3d ? med(8, 1000).toFixed(1) : '-'} nm` : 'not in the file (fixed blur)'],
+        ...(L.notes.length ? [['notes', L.notes.join('; ')]] : []),
+      ] as [string, string][]).map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
+      lt.textContent = '';
+      (window as any).__locsLoaded = L;
+    } catch (e) { lt.textContent = 'could not read the file: ' + (e as Error).message; }
+  }
+  (window as any).__loadLocFiles = loadLocFiles;
+  /** The Reconstruction panel to the top of the left column, open, in view, focused. */
+  function focusRecon() {
+    const p = $('p-recon') as HTMLDetailsElement, col = root.querySelector('.col')!;
+    p.hidden = false; p.open = true;
+    if (col.firstElementChild !== p) col.insertBefore(p, col.firstElementChild);
+    p.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    ($('recon') as HTMLCanvasElement).focus({ preventScroll: true });
+  }
+  // page-wide drop: TIFF -> the movie; .h5 / .hdf5 / .csv (+ Picasso .yaml) -> the viewer
+  document.addEventListener('dragover', (e) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });
+  document.addEventListener('drop', (e) => {
+    if (!e.dataTransfer?.files.length || e.defaultPrevented) return;
+    e.preventDefault();
+    const fl = [...e.dataTransfer.files];
+    if (fl.some(isLocFile)) loadLocFiles(fl);
+    else if (fl.some((f) => /\.tiff?$/i.test(f.name))) {
+      if (!$('tab-stack').hidden) setFiles(fl);              // the bead tab is open: bead z-stacks
+      else setMFiles(fl);
+    }
+  });
+  $('r-crlb').addEventListener('change', () => cloud?.setFilter(n('r-crlb')));
+  $<HTMLInputElement>('r-tilt').oninput = () => { if (cloud) { cloud.tilt = n('r-tilt'); cloud.request(); } };
+  $<HTMLInputElement>('r-rot').oninput = () => { if (cloud) { cloud.rot = n('r-rot'); cloud.request(); } };
+  $<HTMLInputElement>('r-zex').oninput = () => { $('r-zex-v').textContent = n('r-zex').toFixed(1); cloud?.request(); };
+  $('r-reset').onclick = () => cloud?.reset();
   onLocs = (rows) => {
     recon?.add(rows);
+    cloud?.append(rows);
     for (let o = 0; o < rows.length; o += NCOL) { const f = rows[o]; const L = locsByFrame.get(f) ?? []; L.push(rows[o + 1], rows[o + 2]); locsByFrame.set(f, L); }
     if (performance.now() - lastDraw > 700) drawRecon(); else { clearTimeout(drawTimer); drawTimer = window.setTimeout(drawRecon, 700); }
   };
@@ -307,7 +362,9 @@ export function startApp(root: HTMLElement) {
     if (form.roisize % 2 !== 1 || form.roisize < 5) { $('mtext').textContent = 'The ROI size must be odd (>= 5).'; return; }
     running = 'movie'; busy(true);
     startZ = kind === 'estimate' ? [...psf.zcoef] : null;
-    recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear(); cloud.reset();
+    recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear();
+    cloud?.start(player.W, player.H, 1000 * form.optics.pixel_um); cloud?.setFilter(n('r-crlb'));
+    setNum('r-zlo', n('m-zlo')); setNum('r-zhi', n('m-zhi'));
     $('p-recon').hidden = false;
     $('mtext').textContent = 'starting...';
     try {
@@ -585,10 +642,10 @@ const TEMPLATE = `
     <div class="bar">
       <label>splat <select id="r-mode"><option value="precision">precision (CRLB)</option><option value="fixed">fixed blur</option></select></label>
       ${num('r-blur', 'blur / min. sigma (nm)', 8)}${num('r-crlb', 'max CRLB x (nm, 0 = all)', 0)}
-      <label><input id="r-colorz" type="checkbox" checked> colour by z</label>
+      <label><input id="r-colorz" type="checkbox" checked> colour by z</label>${num('r-zlo', 'from (um)', 0)}${num('r-zhi', 'to (um)', 0.8)}
       <button id="r-csv" title="ThunderSTORM csv (nm, frames from 1), as torch_psf Dataset.save_csv">localizations .csv</button>
     </div>
-    <canvas id="recon" class="cloud"></canvas>
+    <div class="cloudwrap"><canvas id="recon" class="cloud" tabindex="0"></canvas></div>
     <div class="bar">
       <label>tilt <input id="r-tilt" type="range" min="0" max="180" step="1" value="0"></label>
       <label>rotate <input id="r-rot" type="range" min="0" max="360" step="1" value="0"></label>
@@ -596,7 +653,7 @@ const TEMPLATE = `
       <button id="r-reset">Reset view</button>
     </div>
     <p class="note">Drag to pan, wheel to zoom, shift-drag (or right-drag) to orbit: rotate about z and tilt (0 = top view, 90 = side view).</p>
-    <p id="r-label" class="note"></p>
+    <p id="r-label" class="note"></p><p id="loc-status" class="note"></p>
     <table id="l-table"></table>
   </details>
   </div>
@@ -608,7 +665,7 @@ const TEMPLATE = `
       <div class="advgrid">${num('o-nimm', 'n immersion', 1.518)}${num('o-nmed', 'n medium', 1.33)}${num('o-gain', 'camera gain (e-/ADU)', 0.5)}${num('o-offset', 'camera offset (ADU)', 100)}${num('o-rn', 'read noise (e- rms, localization)', 0)}</div>
     </details>
     <div id="tab-movie">
-      <div id="mdrop" class="drop"><input id="mfile" type="file" multiple accept=".tif,.tiff"><p>Drop your SMLM movie (TIFF, streamed) to replace the demo. <a href="#" id="m-demo">Back to the demo</a></p><p id="mfiles" class="note"></p></div>
+      <div id="mdrop" class="drop"><input id="mfile" type="file" multiple accept=".tif,.tiff,.h5,.hdf5,.csv,.yaml"><p>Drop your SMLM movie (TIFF, streamed) to replace the demo, or a localization file (torch-psf / Picasso HDF5, ThunderSTORM csv) anywhere on the page to view it. <a href="#" id="m-demo">Back to the demo</a></p><p id="mfiles" class="note"></p></div>
       <div class="buttons"><button id="m-run" class="primary">Estimate PSF</button><button id="m-enough">Stop early</button><button id="m-abort">Abort</button></div>
       <div class="progress"><div id="mbar"></div></div><p id="mtext" class="note">Estimate PSF collects isolated spots, fits a vectorial PSF to them (in situ), then localizes the movie with it.</p>
       <details class="adv" data-key="adv-movie"><summary>Advanced</summary>

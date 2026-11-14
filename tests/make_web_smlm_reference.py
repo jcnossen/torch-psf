@@ -161,3 +161,19 @@ rep_r = estr.report
 json.dump(dict(chosen=rep_r['chosen'], refine=rep_r.get('refine'), heldout=rep_r.get('heldout'), refine_outer=4),
           open(os.path.join(a.out, 'insitu_refine_est.json'), 'w'), indent=1, default=float)
 print('estimator refine:', rep_r['chosen'], rep_r.get('refine'), {k: v['nll_per_px'] for k, v in rep_r['heldout'].items()})
+
+# localization files for the viewer, written by torch_psf.Dataset (HDF5, Picasso HDF5 + yaml, ThunderSTORM csv)
+from torch_psf.dataset import Dataset
+g = torch.Generator().manual_seed(7)
+nloc = 2000
+pos = torch.stack([torch.rand(nloc, generator=g) * 90 + 3, torch.rand(nloc, generator=g) * 70 + 3, torch.rand(nloc, generator=g) * 6], 1).double()
+ds = Dataset(dict(frame=torch.randint(0, 500, (nloc,), generator=g).int(), pos=pos, crlb=torch.rand(nloc, 3, generator=g) * 0.2 + 0.05,
+                  photons=torch.rand(nloc, generator=g) * 3000 + 500, bg=torch.rand(nloc, generator=g) * 20 + 5),
+             dict(pixel_nm=108.0, image_size=[80, 100]))
+ds.save(os.path.join(a.out, 'locs_dataset.hdf5'))
+ds.save_picasso(os.path.join(a.out, 'locs_picasso.hdf5'))
+ds.save_csv(os.path.join(a.out, 'locs_ts.csv'))
+F = ds.numpy()
+np.savez(os.path.join(a.out, 'locs_ref.npz'), frame=F['frame'].astype(np.int32), pos=F['pos'].astype(np.float64), crlb=F['crlb'].astype(np.float32),
+         photons=F['photons'].astype(np.float32))
+print('viewer files: dataset / picasso / csv,', nloc, 'localizations;', sorted(os.listdir(a.out))[:0])

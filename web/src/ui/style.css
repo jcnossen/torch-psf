@@ -64,3 +64,5 @@ button.primary { background: #3a2a10; border-color: var(--acc); font-weight: 600
 .drop a { color: var(--acc); }
 
 canvas.cloud { display: block; width: 100%; height: min(560px, 70vh); background: #000; border-radius: 4px; touch-action: none; cursor: grab; }
+.cloudwrap { position: relative; }
+canvas.cloud-overlay { position: absolute; left: 0; top: 0; pointer-events: none; background: transparent; }

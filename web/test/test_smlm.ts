@@ -11,6 +11,7 @@ import { StopToken } from '../src/core/task';
 import { knotsAndJacobian, fitZernikeKnots } from '../src/smlm/insitu';
 import { estimateInsitu } from '../src/smlm/estimate';
 import { fitFreeKnots } from '../src/smlm/refine';
+import { readLocFile } from '../src/io/locfile';
 
 test('smlm: spot detection = torch_psf extract_spots / detect_spots', async () => {
   const meta = await fetchJson('smlm/movie.json');
@@ -245,4 +246,27 @@ test('insitu: whole estimate with refine=True = torch_psf InSituEstimator(refine
     `z scale vs vectorial ${f.z_scale_vs_vectorial.toFixed(4)} vs ${ref.refine.z_scale_vs_vectorial.toFixed(4)}; ${f.outer} outer, ${f.seconds.toFixed(1)} s`;
   check(f.kept === ref.refine.kept && Math.abs(dWeb - dPy) < 1e-4 && Math.abs(f.z_scale_vs_vectorial - ref.refine.z_scale_vs_vectorial) < 0.01, msg);
   return msg;
+});
+
+test('viewer: localization files written by torch_psf (Dataset HDF5, Picasso HDF5 + yaml, ThunderSTORM csv)', async () => {
+  const ref = await parseNpz(await fetchBuf('smlm/locs_ref.npz'));
+  const pos = ref.pos.data as Float64Array, crlb = ref.crlb.data as Float32Array, fr = ref.frame.data as Int32Array, N = fr.length;
+  const file = async (name: string) => new File([await fetchBuf('smlm/' + name)], name);
+  const out: string[] = [];
+  for (const [label, files, zTol] of [['dataset', ['locs_dataset.hdf5'], 1e-4], ['picasso', ['locs_picasso.hdf5', 'locs_picasso.yaml'], 1e-3], ['csv', ['locs_ts.csv'], 1e-3]] as [string, string[], number][]) {
+    const L = await readLocFile(await Promise.all(files.map(file)), 108);
+    check(L.n === N, `${label}: ${L.n} localizations, expected ${N}`);
+    let dxy = 0, dz = 0, dc = 0, df = 0;
+    for (let i = 0; i < N; i++) {
+      const o = i * NCOL;
+      dxy = Math.max(dxy, Math.abs(L.rows[o + 1] - pos[i * 3]), Math.abs(L.rows[o + 2] - pos[i * 3 + 1]));
+      dz = Math.max(dz, Math.abs(L.rows[o + 3] - pos[i * 3 + 2] * 0.108));   // pos z in px of 108 nm -> um
+      dc = Math.max(dc, Math.abs(L.rows[o + 6] - crlb[i * 3]));
+      df = Math.max(df, Math.abs(L.rows[o] - fr[i]));
+    }
+    out.push(`${label} (${L.format}, ${L.W} x ${L.H} px, ${L.pixel_nm} nm): |dxy| ${dxy.toExponential(1)} px, |dz| ${dz.toExponential(1)} um, |dcrlb| ${dc.toExponential(1)} px, |dframe| ${df}`);
+    // Picasso z: the web reads it in nm (Picasso's convention); torch_psf's save_picasso writes px (reported) - not compared
+    check(dxy < 1e-3 && (label === 'picasso' || dz < zTol) && dc < 1e-3 && df === 0 && L.pixel_nm === 108, out[out.length - 1]);
+  }
+  return out.join('; ');
 });

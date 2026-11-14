@@ -35,7 +35,10 @@ async function initDevice(): Promise<{ device: GPUDevice; info: GpuInfo }> {
   if (!adapter) throw new WebGpuUnavailable('No WebGPU adapter was found. ' + WEBGPU_HELP);
   const L = adapter.limits;
   // Ask for what the adapter has (the defaults, 128 / 256 MiB and 16 KiB, are lower than most GPUs support).
+  // float32-blendable: the point-cloud accumulation texture in float32 when the adapter has it (else float16)
+  const features: GPUFeatureName[] = adapter.features.has('float32-blendable' as GPUFeatureName) ? ['float32-blendable' as GPUFeatureName] : [];
   const device = await adapter.requestDevice({
+    requiredFeatures: features,
     requiredLimits: {
       maxStorageBufferBindingSize: L.maxStorageBufferBindingSize,
       maxBufferSize: L.maxBufferSize,
