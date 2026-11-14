@@ -1,8 +1,12 @@
 # torch-psf: library design
 
-Status: design proposal (2026-11-14). Nothing has been moved yet. The restructuring starts once the laptop commits on
-`insitu-study` (paper draft, index_select knot read-out, benchmarks, `study/realdata/insitu_*.py`, README, quick-start)
-are on the server, and it is done on top of them.
+Status: implemented (2026-11-14); the stable API is documented in docs/API.md, the viewer API in docs/VIEWER_API.md.
+Differences from the proposal below: lengths carry units in their names (pixel_um, wavelength_um, dz_um), z ranges are
+z_range=(lo, hi) everywhere, every estimator returns one type (PSFEstimate: psf, report, history, data, save), the
+top-level namespace is small (models, files, Optics / Camera, open_movie, detect_spots / extract_spots, localize / crlb,
+localize_movie, estimate_psf_beads / estimate_psf_insitu), the viewer front end is part of web/ and bundled at
+packaging time, the server returns binary arrays with a JSON header, and the planned real-data validation
+runs outside this repository.
 
 ## Goal
 

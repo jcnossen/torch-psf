@@ -8,3 +8,5 @@ study/realdata/out_tub/
 # generated test references and the bundled viewer front end (built at packaging time)
 tests/.cache/
 torch_psf/viewer_static/
+docs/overview.svg
+docs/overview.pdf
