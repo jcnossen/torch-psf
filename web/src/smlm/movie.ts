@@ -37,9 +37,9 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
   const zpad = form.zpad ?? 2;
   const grid = splineGrid(P, form.zlo, form.zhi, 2, 0.04, zpad, 3.0);
   progress({ stage: 'spline', done: 0, total: 1 });
-  const k = await buildKnots(device, { ...form.optics, roisize: 0, npupil: form.npupil, oversample: form.oversample, zernike_noll: form.noll },
-    form.zcoef, { roisize: P, focus_um: form.focus_um, zmin: form.zlo, zmax: form.zhi, S: grid.S, hz: grid.hz, zpad, xmax: grid.xmax }, () => tok.check());
-  const loc = new SplineLocalizer(device, grid, k.knots);
+  const knots = form.knots ?? (await buildKnots(device, { ...form.optics, roisize: 0, npupil: form.npupil, oversample: form.oversample, zernike_noll: form.noll },
+    form.zcoef, { roisize: P, focus_um: form.focus_um, zmin: form.zlo, zmax: form.zhi, S: grid.S, hz: grid.hz, zpad, xmax: grid.xmax }, () => tok.check())).knots;
+  const loc = new SplineLocalizer(device, grid, knots);
   const chunk = Math.max(1, Math.min(form.chunk, nFrames));
   const det = new Detector(device, mv.H, mv.W, chunk, { threshold: form.threshold, border: h + 2, isolation: form.isolation > 0 ? form.isolation : null });
   const eta = new Eta();

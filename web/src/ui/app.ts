@@ -9,7 +9,8 @@ import { makePsfJson, readPsfJson } from '../io/psfjson';
 import { WEBGPU_HELP } from '../gpu/device';
 import { TiffMovie } from '../io/tiff';
 import type { FitForm, FitSummary, VolumeSpec, Req, MovieForm, InsituForm, MovieSourceSpec } from './protocol';
-import type { InsituReport } from '../smlm/estimate';
+import { InsituReport, FREE_KNOT_WARNING } from '../smlm/estimate';
+import { splineGrid } from '../gpu/spline_lm';
 import { Recon } from './recon';
 import { locsToCsv, MovieSummary, NCOL } from '../smlm/movie';
 
@@ -88,7 +89,7 @@ export function startApp(root: HTMLElement) {
   const fillPresets = () => {
     const v = sel.value;
     sel.innerHTML = PRESETS.map((p) => `<option value="${p.name}">${p.label}</option>`).join('') +
-      `<option value="insitu" ${insitu ? '' : 'disabled'}>In-situ estimate</option><option value="fit" ${fitResult ? '' : 'disabled'}>Bead fit result</option>`;
+      `<option value="insitu" ${insitu ? '' : 'disabled'}>In-situ estimate</option><option value="refined" ${insitu?.refine?.knots ? '' : 'disabled'}>In-situ refined spline</option><option value="fit" ${fitResult ? '' : 'disabled'}>Bead fit result</option>`;
     if (v) sel.value = v;
   };
   fillPresets();
@@ -96,6 +97,7 @@ export function startApp(root: HTMLElement) {
   async function showPreset(name: string) {
     if (name === 'fit') { if (fitResult) setVolume(fitResult.volume, fitResult.volumeSpec, beadNote(fitResult)); return; }
     if (name === 'insitu') { if (insitu) showInsituVolume(); return; }
+    if (name === 'refined') { if (insitu?.refine?.knots) showRefinedVolume(); return; }
     const p = PRESETS.find((q) => q.name === name)!;
     sel.value = name;
     $('preset-note').textContent = 'computing...';
@@ -242,7 +244,7 @@ export function startApp(root: HTMLElement) {
     optics: optics(), gain: n('o-gain'), offset: n('o-offset'), readnoise_e: n('o-rn'), focus_um: n('m-focus'), zlo: n('m-zlo'), zhi: n('m-zhi'),
     roisize: Math.round(n('m-roi')), threshold: n('m-thr'), isolation: Math.round(n('m-iso')), chunk: Math.round(n('m-chunk')), maxFrames: Math.round(n('m-frames')),
     npupil: 64, oversample: 3, noll: psf.noll, zcoef: psf.zcoef, nspots: Math.round(n('m-nspots')), nheldout: Math.round(n('m-nheld')), iters: Math.round(n('m-iters')), tile: 16,
-    rejectOverlap: n('m-devk') > 0, devianceK: n('m-devk'),
+    rejectOverlap: n('m-devk') > 0, devianceK: n('m-devk'), refine: $<HTMLInputElement>('m-refine').checked, refineOuter: 12,
   });
 
   // --- progress, stop
@@ -284,7 +286,7 @@ export function startApp(root: HTMLElement) {
 
   // --- the one button: Estimate PSF (then localize the movie with it)
   let startZ: number[] | null = null;
-  onInsitu = (r) => { insitu = r; fillPresets(); showInsitu(r); showInsituVolume(); };
+  onInsitu = (r) => { insitu = r; fillPresets(); showInsitu(r); if (r.refine?.knots) showRefinedVolume(); else showInsituVolume(); };
   async function runMovie(kind: 'estimate' | 'localize') {
     if (!player) { $('mtext').textContent = 'No movie yet.'; return; }
     const psf = kind === 'localize' && psfSel.value === 'guess' && insitu ? { noll: insitu.noll, zcoef: insitu.zcoef } : startPsf();
@@ -324,6 +326,14 @@ export function startApp(root: HTMLElement) {
     sel.value = 'insitu';
     setVolume(r.volume, spec, `In-situ estimate (Noll 5-21; ${fmtZ(insitu.noll, insitu.zcoef)}). z = emitter height above the coverslip (${zlo}-${zhi} um) at the focal plane ${n('m-focus')} um.`);
   }
+  function showRefinedVolume() {
+    const r = insitu!, K = r.refine!.knots!;
+    const g = splineGrid(n('m-roi'), n('m-zlo'), n('m-zhi'), 2, 0.04, r.grid.zpad, 3.0);
+    const spec: VolumeSpec = { optics: optics(), npupil: 64, noll: r.noll, zcoef: r.zcoef, nxy: g.nu, dxy_um: n('o-px') / g.S, zmin: g.z0, zmax: g.z0 + (g.nz - 1) * g.hz, nz: g.nz, ze_um: 0, focus_um: n('m-focus') };
+    sel.value = 'refined';
+    setVolume(K, spec, `In-situ refined spline: free knots regularised towards the vectorial fit (kept: held-out NLL better). The knots themselves, ` +
+      `every ${(1000 * n('o-px') / g.S).toFixed(0)} nm laterally and ${(1000 * g.hz).toFixed(0)} nm in z. ${FREE_KNOT_WARNING}.`);
+  }
   function showInsitu(r: InsituReport) {
     $('p-insitu').hidden = false;
     const rows: [string, string][] = [
@@ -334,6 +344,12 @@ export function startApp(root: HTMLElement) {
       ['z scale vs the start PSF', `${r.z_scale.toFixed(3)} (offset ${(1000 * r.z_offset_um).toFixed(0)} nm)`],
       ['spots at the offset limit', (100 * r.at_limit).toFixed(2) + ' %'],
     ];
+    if (r.refine) {
+      const f = r.refine;
+      rows.push(['spline refinement', `${f.kept ? 'kept' : 'not kept'}: held-out NLL / px ${f.heldout_refined === null ? 'n/a' : (f.heldout_refined - (r.heldout?.start ?? 0)).toFixed(4)} vs start ` +
+        `(vectorial ${r.heldout ? r.heldout.diff.toFixed(4) : 'n/a'}); z scale vs vectorial ${f.z_scale_vs_vectorial.toFixed(3)}; ${f.outer} outer iterations, ${f.seconds.toFixed(1)} s` +
+        (f.kept ? '. The movie is localized with the refined spline. ' + FREE_KNOT_WARNING : '')]);
+    }
     if (truthZ) {
       const t = DEFAULT_NOLL.map((j) => truthZ![j] ?? 0);
       const rms = (a: number[]) => Math.sqrt(a.reduce((s, v, i) => s + (v - t[i]) ** 2, 0) / t.length);
@@ -580,6 +596,7 @@ const TEMPLATE = `
           ${num('m-roi', 'ROI (px, odd)', 15, '2')}${num('m-thr', 'detection threshold (x noise)', 6)}${num('m-iso', 'isolation (px, 0 = off)', 0, '1')}
           ${num('m-nspots', 'spots for the fit', 8000, '1')}${num('m-nheld', 'held-out spots', 4000, '1')}${num('m-iters', 'iterations', 80, '1')}
           ${num('m-chunk', 'frames per chunk', 500, '1', 'the detection noise is estimated per chunk (torch_psf default 500)')}${num('m-frames', 'max frames (0 = all)', 0, '1')}
+          <label title="free spline knots regularised towards the fitted vectorial PSF (torch_psf InSituEstimator refine=True); kept only if the held-out NLL improves"><input id="m-refine" type="checkbox"> spline refinement</label>
           ${num('m-devk', 'overlap rejection k (0 = off)', 3, 'any', 'after the first pass, spots with a Poisson deviance per pixel above 1 + k sqrt(2 / P^2) are dropped and the fit is repeated (torch_psf InSituEstimator deviance_k)')}
           <label>start PSF <select id="m-psf"><option value="guess">generic astigmatic (Noll 6 = 0.08)</option><option value="view">the PSF in the 3D view</option><option value="insitu">the last in-situ estimate</option><option value="json">a PSF json file</option></select></label>
           <input id="m-psfjson" type="file" accept=".json" hidden><span id="m-psfinfo" class="note"></span>

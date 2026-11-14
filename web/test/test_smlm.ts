@@ -10,6 +10,7 @@ import { localizeMovie, NCOL } from '../src/smlm/movie';
 import { StopToken } from '../src/core/task';
 import { knotsAndJacobian, fitZernikeKnots } from '../src/smlm/insitu';
 import { estimateInsitu } from '../src/smlm/estimate';
+import { fitFreeKnots } from '../src/smlm/refine';
 
 test('smlm: spot detection = torch_psf extract_spots / detect_spots', async () => {
   const meta = await fetchJson('smlm/movie.json');
@@ -207,5 +208,41 @@ test('insitu: spot deviance per pixel = torch_psf insitu.spot_deviance (start sp
   for (let i = 0; i < N; i++) { md = Math.max(md, Math.abs(r.deviance[i] - ref[i])); if ((r.deviance[i] > thr) !== (ref[i] > thr)) flip++; }
   const msg = `${N} spots; max |deviance web - torch_psf| ${md.toExponential(1)}; spots on different sides of the 1.283 threshold: ${flip}`;
   check(md < 1e-3 && flip <= 2, msg);
+  return msg;
+});
+
+test('insitu: free-knot refinement (3 outer L-BFGS iterations) = torch_psf fit_free_knots', async () => {
+  const z = await parseNpz(await fetchBuf('smlm/insitu_grad.npz'));
+  const zr = await parseNpz(await fetchBuf('smlm/insitu_refine.npz'));
+  const meta = await fetchJson('smlm/insitu_refine.json');
+  const { device } = await getDevice();
+  const g = splineGrid(15, 0, 0.8, 2, 0.04, 5, 3.0) as any;
+  const Kv = zr.K_vec.data as Float32Array, Kref = zr.knots.data as Float32Array;
+  const r = await fitFreeKnots(device, g, Kv, Kv, new Float32Array(z.rois.data as Float32Array), z.rois.shape[0], { lamRef: meta.lam_ref, lamS: meta.lam_s, outer: meta.outer });
+  let m = 0, dd = 0, dv = 0, ddv = 0;
+  for (let i = 0; i < Kref.length; i++) { m = Math.max(m, Math.abs(Kref[i])); dd = Math.max(dd, Math.abs(r.knots[i] - Kref[i])); dv = Math.max(dv, Math.abs(Kref[i] - Kv[i])); }
+  const lw = r.history.map((h) => h.loss), lp = meta.history.map((h: any) => h.loss);
+  const msg = `${z.rois.shape[0]} ROIs, ${r.history.length} outer iterations in ${r.seconds.toFixed(1)} s; loss per outer web ${lw.map((v) => v.toFixed(0)).join(' / ')} vs torch_psf ${lp.map((v: number) => v.toFixed(0)).join(' / ')}; ` +
+    `knots: max |web - torch_psf| ${(dd / m).toExponential(1)} of the peak, while the refinement moved them by ${(dv / m).toExponential(1)}`;
+  check(dd < 0.1 * dv && Math.abs(lw[lw.length - 1] - lp[lp.length - 1]) < 50, msg);
+  return msg;
+});
+
+test('insitu: whole estimate with refine=True = torch_psf InSituEstimator(refine=True)', async () => {
+  const meta = await fetchJson('smlm/insitu.json');
+  const ref = await fetchJson('smlm/insitu_refine_est.json');
+  const { device } = await getDevice();
+  const files = [new File([await fetchBuf('smlm/insitu_movie.tif')], 'insitu_movie.tif')];
+  const r = await estimateInsitu(device, files, {
+    optics: meta.optics, gain: meta.params.gain_e_per_adu, offset: meta.params.offset_adu, readnoise_e: 0, focus_um: meta.focus_um,
+    zlo: meta.z_range[0], zhi: meta.z_range[1], roisize: meta.roisize, threshold: 6, isolation: 0, chunk: 500, maxFrames: 0,
+    npupil: 64, oversample: 3, noll: meta.noll, zcoef: meta.noll.map((j: number) => meta.start_zernike[String(j)] ?? 0),
+    nspots: meta.nspots, nheldout: meta.nheldout, iters: meta.iters, tile: 16, refine: true, refineOuter: ref.refine_outer,
+  }, new StopToken(), () => {});
+  const f = r.refine!, h = ref.heldout;
+  const dWeb = f.heldout_refined! - (r.heldout!.start + r.heldout!.diff), dPy = h.refined.nll_per_px - h.vectorial.nll_per_px;
+  const msg = `kept web ${f.kept} / torch_psf ${ref.refine.kept}; held-out NLL/px refined - vectorial web ${dWeb.toExponential(2)} vs ${dPy.toExponential(2)}; ` +
+    `z scale vs vectorial ${f.z_scale_vs_vectorial.toFixed(4)} vs ${ref.refine.z_scale_vs_vectorial.toFixed(4)}; ${f.outer} outer, ${f.seconds.toFixed(1)} s`;
+  check(f.kept === ref.refine.kept && Math.abs(dWeb - dPy) < 1e-4 && Math.abs(f.z_scale_vs_vectorial - ref.refine.z_scale_vs_vectorial) < 0.01, msg);
   return msg;
 });

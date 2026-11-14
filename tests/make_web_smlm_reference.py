@@ -140,3 +140,24 @@ from torch_psf.insitu import spot_deviance
 dv, thd = spot_deviance(spl5, d)
 np.savez(os.path.join(a.out, 'insitu_deviance.npz'), deviance=dv.astype(np.float32), theta=thd.cpu().numpy())
 print('deviance: median', float(np.median(dv)), 'above 1.283:', int((dv > 1 + 3 * np.sqrt(2 / 225)).sum()))
+
+# free-knot refinement (fit_free_knots, as InSituEstimator(refine=True)): 3 outer iterations from the vectorial spline
+# of fit_zernike_knots on the training ROIs, regularised towards it (lam_ref 3000, lam_s 1000)
+from torch_psf.insitu import fit_free_knots
+s_ref = fz['psf'].to_spline(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0)
+K_vec = s_ref.knots.clone()
+hist_r = []
+rr = fit_free_knots(s_ref, K_vec, rois=d, ref=K_vec, lam_ref=3000.0, lam_s=1000.0, outer=3,
+                    log=lambda o, l, sec, K: hist_r.append(dict(it=o, loss=float(l))))
+np.savez(os.path.join(a.out, 'insitu_refine.npz'), K_vec=K_vec.cpu().numpy(), knots=rr['psf'].knots.cpu().numpy())
+json.dump(dict(history=hist_r, outer=3, lam_ref=3000.0, lam_s=1000.0), open(os.path.join(a.out, 'insitu_refine.json'), 'w'), indent=1)
+print('refine: loss per outer', [round(h['loss'], 2) for h in hist_r])
+
+# the whole estimator with refine=True
+estr = InSituEstimator(start=start, camera=r['camera'], roisize=15, z_range=(0.0, 0.8), nspots=3000, nheldout=1500, iters=40,
+                       refine=True, refine_outer=4, device=dev)
+psf_r = estr.estimate(r['movie_adu'])
+rep_r = estr.report
+json.dump(dict(chosen=rep_r['chosen'], refine=rep_r.get('refine'), heldout=rep_r.get('heldout'), refine_outer=4),
+          open(os.path.join(a.out, 'insitu_refine_est.json'), 'w'), indent=1, default=float)
+print('estimator refine:', rep_r['chosen'], rep_r.get('refine'), {k: v['nll_per_px'] for k, v in rep_r['heldout'].items()})
