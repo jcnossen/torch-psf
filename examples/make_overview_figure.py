@@ -18,7 +18,7 @@ from matplotlib.colors import LogNorm, Normalize
 from scipy.ndimage import gaussian_filter
 import torch_psf as tp
 from torch_psf.simulate import simulate_movie, filament_sites
-from torch_psf.insitu import fit_zernike_knots
+from torch_psf.estimation import fit_zernike_knots
 from torch_psf.fit import localize
 
 ap = argparse.ArgumentParser()

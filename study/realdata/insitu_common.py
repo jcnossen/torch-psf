@@ -7,7 +7,7 @@ from torch_psf import VectorialPSF
 from torch_psf.zernike import zernike
 from torch_psf import CubicSplinePSF
 from torch_psf.fit import poisson_nll, lm_poisson, model_and_jacobian
-from torch_psf.insitu import knot_loss
+from torch_psf.estimation import knot_loss
 from rdcommon import transfer_knots
 
 DEV = 'cuda'

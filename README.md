@@ -116,7 +116,7 @@ pixel images, gradients, CRLB vs z; API in [docs/VIEWER_API.md](docs/VIEWER_API.
 the `web/` project (`scripts/build_viewer.sh`).
 
 **Lower level**: `tp.extract_spots(movie, roisize, camera)` (detection + ROIs), `torch_psf.fit` (`localize`,
-`crlb`, `lm_poisson` for any model with an analytic Jacobian), `torch_psf.insitu` (`fit_beads`, `fit_zernike_knots`,
+`crlb`, `lm_poisson` for any model with an analytic Jacobian), `torch_psf.estimation` (`fit_beads`, `fit_zernike_knots`,
 `fit_pupil_knots`, `fit_free_knots`, `fit_tracks` with variable projection, held-out checks, `z_scale`),
 `torch_psf.simulate` (emitters, bead stacks, blinking movies, filament structures).
 
@@ -128,13 +128,14 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `psf.py` | `PSF`: the base class (statistics, fitting, localization, files, to_spline). |
 | `spline.py` | `CubicSplinePSF`: Catmull-Rom (cubic) knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_zstack`. |
 | `gaussian.py` | `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D), pixel-integrated. |
-| `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`. |
+| `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`; `solve_linear` (variable projection: closed-form per-frame intensities and backgrounds of a track). |
 | `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `link_tracks`, `Tracks` / `extract_tracks`. |
 | `estimators.py` | `ZStackEstimator`, `InSituEstimator`. |
-| `insitu/` | the estimation steps (bead fit, knot-route fits, free knots, tracks), held-out checks. |
+| `estimation/` | the PSF estimation steps (`beads`: bead fit; `knots`: knot-route fits, free knots; `tracks`: variable projection on tracks; `heldout`: held-out checks; `zscale`). |
 | `dataset.py` | `Dataset`: the localizations (dict of tensors; format in [docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)). |
-| `config.py`, `movie.py`, `io.py` | `Optics`, `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs), movie readers (TIFF incl. ImageJ > 4 GB and multi-part, memory-mapped), PSF files. |
-| `calibrate.py` | `photon_transfer`: camera offset and gain from the background pixels of a movie. |
+| `optics.py` | `Optics` (pixel size, NA, wavelength, refractive indices). |
+| `camera.py` | `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs); `photon_transfer`: camera offset and gain from the background pixels of a movie. |
+| `movie.py`, `io.py` | movie readers (TIFF incl. ImageJ > 4 GB and multi-part, memory-mapped), PSF files. |
 | `__main__.py`, `viewer.py` | the command line, the viewer server. |
 
 **PSF file**: one JSON (`format: "torch-psf"`, `type`, `optics`, `zernike_noll`, `zernike_waves`, `focus_um`, optional

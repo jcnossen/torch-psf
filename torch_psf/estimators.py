@@ -15,7 +15,8 @@ import numpy as np
 import tifffile
 import torch
 from scipy.ndimage import gaussian_filter, maximum_filter
-from torch_psf.config import Optics, Camera, resolve_device
+from torch_psf.optics import Optics, resolve_device
+from torch_psf.camera import Camera
 from torch_psf.fit import poisson_nll
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
@@ -23,7 +24,7 @@ from torch_psf.spline import CubicSplinePSF, stage_scan_pos_fn
 from torch_psf.gaussian import AstigmaticGaussianPSF
 from torch_psf.movie import open_movie
 from torch_psf.spots import extract_spots
-from torch_psf.insitu import (fit_beads, stage_focus, fit_zernike_knots, fit_pupil_knots, fit_free_knots,
+from torch_psf.estimation import (fit_beads, stage_focus, fit_zernike_knots, fit_pupil_knots, fit_free_knots,
                               split_checkerboard, compare_heldout, spot_deviance, z_scale, FREE_KNOT_WARNING)
 
 
@@ -114,7 +115,7 @@ class ZStackEstimator(Estimator):
     emitter_z_um (starting bead centre height; default bead_diameter_um / 2, else 0), fit_height (fit it),
     bead_diameter_um (finite bead size; with fit_height the diameter is tied to 2 x the fitted height: a bead lies on
     the coverslip), fit_na / fit_n_med (fit NA / the medium index), intensity ('free' or 'bead_x_plane': per-plane
-    factors, e.g. bleaching); see insitu.fit_beads.
+    factors, e.g. bleaching); see estimation.fit_beads.
     Spline grid: oversample, spline_dz_um, xy_limit.
 
     estimate(stacks, dz_um) -> PSF. Plane k of a stack is at focus sign dz_um (k - (nk - 1) / 2) um (the stack centre
@@ -261,7 +262,7 @@ class ZStackEstimator(Estimator):
 
 class InSituEstimator(Estimator):
     """In-situ PSF from an SMLM movie: detection, spot ROIs sampled over the whole frame range, a checkerboard split
-    into training / held-out spots, the vectorial Zernike fit by the knot route (torch_psf.insitu.fit_zernike_knots;
+    into training / held-out spots, the vectorial Zernike fit by the knot route (torch_psf.estimation.fit_zernike_knots;
     method 'pupil' adds free pupil maps), rejection of spots the single-emitter model does not explain (overlapping
     emitters; see deviance_rule), an optional scan of the focus and / or the wavelength by held-out NLL, an optional
     cubic-spline refinement (refine=True: free knots regularised towards the vectorial spline, kept only if the

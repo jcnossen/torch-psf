@@ -2,7 +2,7 @@
 import torch
 from conftest import DEV, needs_gpu
 from torch_psf import VectorialPSF, CubicSplinePSF
-from torch_psf.insitu import fit_beads, fit_zernike_knots, stage_focus, z_scale
+from torch_psf.estimation import fit_beads, fit_zernike_knots, stage_focus, z_scale
 from torch_psf.simulate import simulate_bead_stack, simulate_emitters
 
 TRUE = {5: 0.02, 6: 0.10, 7: -0.03, 8: 0.02, 11: 0.04}
@@ -67,7 +67,7 @@ def test_bead_fit_cubic_drift_and_tied_bead_size():
     drift = torch.stack([0.3 * t ** 3, 0.2 * t], 1)                   # px, per plane
     g = torch.Generator(device=DEV).manual_seed(7)
     xy = torch.rand(4, 2, generator=g, device=DEV) - 0.5
-    from torch_psf.insitu.beads import sphere_points
+    from torch_psf.estimation.beads import sphere_points
     ball = sphere_points(0.2, 32).to(DEV)                            # beads of 200 nm on the coverslip (centre 100 nm)
     imgs = []
     for b in range(4):

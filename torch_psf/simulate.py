@@ -5,7 +5,8 @@ lambda p: vec.forward_batched(p, focus)); for bead stacks render(pos, focus [n])
 All random numbers come from the given torch.Generator (reproducible)."""
 import math
 import torch
-from torch_psf.config import Optics, Camera, resolve_device
+from torch_psf.optics import Optics, resolve_device
+from torch_psf.camera import Camera
 from torch_psf.vectorial import VectorialPSF
 
 

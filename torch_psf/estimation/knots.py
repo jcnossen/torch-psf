@@ -24,7 +24,7 @@ def _result(psf, report, history, data):
 from torch_psf.fit import localize, poisson_nll, at_limit
 from torch_psf.zernike import zernike
 from torch_psf.spline import CubicSplinePSF, emitter_height_pos_fn
-from torch_psf.insitu.zscale import z_scale, FREE_KNOT_WARNING
+from torch_psf.estimation.zscale import z_scale, FREE_KNOT_WARNING
 
 
 def limit_fraction(spline, theta):

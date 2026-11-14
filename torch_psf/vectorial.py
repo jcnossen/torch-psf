@@ -28,7 +28,7 @@ import math
 import numpy as np
 import torch
 from torch_psf.zernike import zernike
-from torch_psf.config import default_device, Optics
+from torch_psf.optics import default_device, Optics
 from torch_psf.psf import PSF
 from torch_psf.spline import CubicSplinePSF
 

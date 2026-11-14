@@ -11,7 +11,7 @@ import torch
 from scipy.spatial import cKDTree
 from torch_psf.detect import detect_spots
 from torch_psf.movie import open_movie
-from torch_psf.config import resolve_device
+from torch_psf.optics import resolve_device
 
 
 @dataclasses.dataclass

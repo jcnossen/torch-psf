@@ -30,7 +30,7 @@ only what is SIMCODE-specific.
   - `__call__(pos, intensity=None, bg=None)` = intensity * render(pos) + bg.
 - Parameter vector of the fitter: theta = (x, y, z, photons, bg). For a 2D model, z is held fixed.
 
-## Shared configuration objects (`torch_psf.config`)
+## Shared configuration objects (`torch_psf.optics`, `torch_psf.camera`)
 
 These are small dataclasses with `to_dict()` and `from_dict()`. Their field names and units are the ones that SIMCODE
 already uses, so SIMCODE's ConfigDict blocks (`simcode/auto/config.py` DEFAULTS `optics`, `camera`) map 1:1 onto
@@ -55,21 +55,25 @@ them, and SIMCODE can build them from its config instead of duplicating them.
 
 ```
 torch_psf/
-  config.py      Optics, Camera
+  optics.py      Optics (+ default_device, resolve_device)
+  camera.py      Camera (scalars or per-pixel maps, excess noise), photon_transfer (offset / gain from a movie)
   movie.py       TiffMovie, ArrayMovie, open_movie (reader interface)
   zernike.py     noll_to_nm, zernike, zernike_basis
-  vectorial.py   VectorialPSF (+ gauss_blur_os, dipole_tensor, photosel_tensor)
-  gaussian.py    GaussianPSF (pixel-integrated, 2D, optionally astigmatic)
-  spline.py      ConvSplinePSF, spline_weights
-  fit.py         lm_poisson, localize, fisher, crlb, poisson_nll
+  fit.py         lm_poisson, localize, fisher, crlb, poisson_nll, solve_linear (variable projection: closed-form
+                 intensities / backgrounds)
   detect.py      detect_spots (DoG / local maxima / threshold / isolation)
   spots.py       Spots (rois + frame + corner + variance), extract_spots, link_tracks, Tracks
-  varpro.py      solve_linear (closed-form intensities / backgrounds)
-  insitu/        fit_beads, fit_zernike_knots, fit_pupil_knots, fit_free_knots, fit_tracks (varpro), heldout
-  io.py          save_psf, load_psf (own format + SIMCODE calib json), load_camera
-  pipeline.py    localize_movie, estimate_psf_beads, estimate_psf_insitu
-  simulate.py    simulate_emitters, simulate_movie (blinking), simulate_bead_stack
-  table.py       LOC_DTYPE: the localization table (numpy structured array)
+  dataset.py     Dataset (the localizations)
+  psf.py         PSF (base class: render, expected, fisher / crlb, fit, localize, save / load, to_spline)
+  vectorial.py   VectorialPSF (+ gauss_blur_os, dipole_tensor, photosel_tensor)
+  spline.py      CubicSplinePSF (+ geometry_matrix, emitter_height_pos_fn, stage_scan_pos_fn)
+  gaussian.py    GaussianPSF (2D), AstigmaticGaussianPSF
+  io.py          save, load (own format + SIMCODE calib json), load_camera
+  estimation/    PSF estimation steps: beads (fit_beads), knots (fit_zernike_knots, fit_pupil_knots, fit_free_knots),
+                 tracks (fit_tracks, variable projection), heldout, zscale
+  simulate.py    simulate_emitters, simulate_movie (blinking), simulate_bead_stack, filament_sites, simulate_reference_movie
+  estimators.py  ZStackEstimator, InSituEstimator
+  viewer.py, __main__.py   the viewer server, the command line
 ```
 
 ### vectorial: `VectorialPSF(torch.nn.Module)`
@@ -135,7 +139,7 @@ torch_psf/
   P, P], mask, frames, corner, xy_init), as in SIMCODE `insitu/extract_tracks.py`, for the varpro fit.
 - Test: recall and precision of detection on a simulated blinking movie with known truth.
 
-### varpro + insitu (PSF estimation; every function returns a PSF object and a result record)
+### estimation (PSF estimation; `torch_psf.estimation`; every function returns a PSF object and a result record)
 - `fit_beads(stack, focus_um [nplanes], model, bead_diameter=None, drift=True, holdout=...)` fits the vectorial model
   (Zernikes, optional NA / n_med) to bead z-stacks, with xy shared per bead, I and bg per plane, optional finite bead size
   (SIMCODE nball) and optional per-stack drift. Sources: study `fit_vec_stack`, SIMCODE `psf/fit_beads.py`.
@@ -145,7 +149,7 @@ torch_psf/
   projected out and an optional roughness penalty.
 - `fit_free_knots(...)`: free knots with alternating localize and L-BFGS on the knots, with prior / roughness terms.
 - `fit_tracks(tracks, model, camera, ...)`: the variable-projection fit of SIMCODE `insitu/fit_insitu2.py`. Per-frame
-  intensities and per-group backgrounds come from `varpro.solve_linear`. Per-sample xyz and the PSF parameters (Zernikes,
+  intensities and per-group backgrounds come from `fit.solve_linear`. Per-sample xyz and the PSF parameters (Zernikes,
   focus, optional line blur) are fitted with Adam. SIMCODE-specific extras (per-pattern-angle photoselection) are hooks,
   not built in.
 - `heldout`: checkerboard split of the spots by position (`split_checkerboard(tile)`, as SIMCODE `--split cb0/cb1`).
@@ -196,7 +200,7 @@ torch_psf/
   `poisson_nll` move to `torch_psf.fit`.
 - `study/insitu/common.py` keeps only the study scenarios (optics, Zernike sets, scenario B screen, F0, pos maps). The
   simulators and `detect_crop` go to `torch_psf.simulate` / `detect`. `study/insitu/fit.py` keeps only the study
-  metrics (`evaluate`, `psf_rel_err`), and its estimators are replaced by `torch_psf.insitu` calls.
+  metrics (`evaluate`, `psf_rel_err`), and its estimators are replaced by `torch_psf.estimation` calls.
 - Check: the study driver (`run_all.py`, seed 0, reduced size) and each real-data script run after the change. The
   study's headline numbers are reproduced within noise (RNG streams for detection / simulation are kept).
 

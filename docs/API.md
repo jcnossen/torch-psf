@@ -9,6 +9,21 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 
 ## Changes
 
+### 2026-11-15: module renames (breaking for submodule imports; no aliases; no behaviour change)
+
+The top-level names are unchanged (`from torch_psf import Optics, Camera, photon_transfer, ...`). Only imports from the
+submodules below change; the old module paths are removed (no re-exports).
+
+| old module path | new module path |
+|---|---|
+| `torch_psf.insitu` (package: `beads`, `knots`, `tracks`, `heldout`, `zscale`) | `torch_psf.estimation` (same submodules and names: `torch_psf.estimation.fit_beads`, `torch_psf.estimation.knots.knot_loss`, ...) |
+| `torch_psf.config.Optics` | `torch_psf.optics.Optics` |
+| `torch_psf.config.default_device`, `resolve_device` | `torch_psf.optics.default_device`, `resolve_device` |
+| `torch_psf.config.Camera` | `torch_psf.camera.Camera` |
+| `torch_psf.calibrate.photon_transfer` | `torch_psf.camera.photon_transfer` |
+| `torch_psf.varpro.solve_linear` | `torch_psf.fit.solve_linear` |
+| module layers: config, zernike, fit, varpro -> detect, movie, spots, dataset, calibrate -> psf -> vectorial, spline, gaussian -> io, insitu, simulate -> estimators -> viewer, `__main__` | optics, zernike, fit -> detect, movie, spots, dataset, camera -> psf -> vectorial, spline, gaussian -> io, estimation, simulate -> estimators -> viewer, `__main__` |
+
 ### 2026-11-14: class design (breaking; no aliases)
 
 | old | new |
@@ -185,6 +200,11 @@ progress=None, **detect_kw)`
 
 `at_limit(theta, psf, margin=0.06)`: `max(|x|, |y|) > xy_limit - margin`.
 
+`solve_linear(psf, data, mask, group, rn2, ngroups=2, iters=3, I_min=0.0)` (variable projection, used by
+`estimation.fit_tracks`): the per-frame intensities I [B, T] and per-group backgrounds bg [B, ngroups] of
+`mu[b, t] = I[b, t] psf[b] + bg[b, group[b, t]]` by `iters` rounds of weighted linear least squares (weights
+`1 / (mu + rn2)`), I clamped >= I_min; masked frames give I = 0.
+
 ## The convolutional cubic spline (`torch_psf.spline.CubicSplinePSF`)
 
 `CubicSplinePSF(roisize, z_range, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, device=None)`: knots
@@ -201,7 +221,7 @@ u = u0 + j / S, u0 = -(c S + S - 1) / S.
 - `vjp_vectorial(vectorial, pos_fn, grad_knots, names=('zcoef',), chunk=4)`: (d knots / d parameters)^T grad_knots.
 - `vectorial.to_spline(roisize, z_range=None, ...)` (any model: `PSF.to_spline`), `from_zstack(zstack, z0_um, dz_um, roisize)`.
 
-## In-situ estimation (`torch_psf.insitu`, `torch_psf.estimate`)
+## PSF estimation (`torch_psf.estimation`; used by `ZStackEstimator`, `InSituEstimator`)
 
 `fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, route='K', loc_iters=3, ...)`: per
 iteration: build the knots from the current Zernikes; localize (30 LM iterations the first time, then `loc_iters`,

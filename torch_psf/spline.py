@@ -25,7 +25,7 @@ Units: x, y in px relative to the patch centre (pixel centres at integers), z in
 """
 import math
 import torch
-from torch_psf.config import resolve_device
+from torch_psf.optics import resolve_device
 from torch_psf.psf import PSF
 
 

@@ -4,7 +4,7 @@ astigmatic calibration curves sigma_x(z) = sx0 sqrt(1 + ((z - gamma) / d)^2), si
 and sum to 1 over the image plane."""
 import math
 import torch
-from torch_psf.config import resolve_device
+from torch_psf.optics import resolve_device
 from torch_psf.psf import PSF
 
 

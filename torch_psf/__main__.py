@@ -13,7 +13,8 @@ import json
 import sys
 import numpy as np
 import torch
-from torch_psf.config import Optics, Camera
+from torch_psf.optics import Optics
+from torch_psf.camera import Camera
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
 from torch_psf.estimators import ZStackEstimator, InSituEstimator

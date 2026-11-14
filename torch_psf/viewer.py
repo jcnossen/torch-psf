@@ -17,7 +17,7 @@ import webbrowser
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import numpy as np
 import torch
-from torch_psf.config import Optics, resolve_device
+from torch_psf.optics import Optics, resolve_device
 from torch_psf.fit import crlb
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF

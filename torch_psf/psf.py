@@ -17,7 +17,7 @@ import json
 import os
 import numpy as np
 import torch
-from torch_psf.config import Camera
+from torch_psf.camera import Camera
 from torch_psf.fit import fisher, crlb, localize, at_limit
 from torch_psf.movie import open_movie
 from torch_psf.spots import Spots, extract_spots

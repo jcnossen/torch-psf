@@ -2,7 +2,7 @@
 
 Each sample is one emitter seen on up to T consecutive frames (Tracks from torch_psf.spots.extract_tracks). Per frame
 the intensity, per (sample, group) the background are solved exactly (weighted linear least squares,
-torch_psf.varpro.solve_linear) at every iteration; the per-sample position (x, y, and z through a sigmoid on
+torch_psf.fit.solve_linear) at every iteration; the per-sample position (x, y, and z through a sigmoid on
 [0, zmax_um]) and the global PSF parameters (Zernikes, focus, optional line blur, optional extra parameters of a
 per-group PSF hook) are fitted with Adam on the Gaussian approximation of the Poisson + read-noise likelihood. The
 first `warmup` iterations move only the per-sample positions.
@@ -18,7 +18,7 @@ import torch
 def _result(psf, report, history, data):
     """Result of the low-level estimators: dict(psf, report, history, **data)."""
     return dict(psf=psf, report=report, history=history, **data)
-from torch_psf.varpro import solve_linear
+from torch_psf.fit import solve_linear
 
 
 def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0, blur='none',

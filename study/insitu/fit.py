@@ -1,18 +1,18 @@
 """PSF estimators of the in-situ study: the torch_psf estimators with the study's settings (common.py), and the
 study's scoring.
 
-  fit_vec_stack     vectorial Zernike model fitted to the bead stack (torch_psf.insitu.fit_beads)
-  fit_knots         free spline knots from bead stack and / or SMLM patches (torch_psf.insitu.fit_free_knots)
+  fit_vec_stack     vectorial Zernike model fitted to the bead stack (torch_psf.estimation.fit_beads)
+  fit_knots         free spline knots from bead stack and / or SMLM patches (torch_psf.estimation.fit_free_knots)
   fit_vec_insitu    vectorial Zernike model fitted to SMLM patches through the knot route (route K) or with the
-                    vectorial model per emitter (route V) (torch_psf.insitu.fit_zernike_knots)
-  fit_pupil_insitu  Zernikes + free pupil maps (torch_psf.insitu.fit_pupil_knots)
+                    vectorial model per emitter (route V) (torch_psf.estimation.fit_zernike_knots)
+  fit_pupil_insitu  Zernikes + free pupil maps (torch_psf.estimation.fit_pupil_knots)
 """
 import math, time
 import torch
 import common as C
 from torch_psf import CubicSplinePSF
 from torch_psf.fit import localize
-from torch_psf.insitu import (fit_beads, fit_free_knots, fit_zernike_knots, fit_pupil_knots, bead_theta,
+from torch_psf.estimation import (fit_beads, fit_free_knots, fit_zernike_knots, fit_pupil_knots, bead_theta,
                               knot_gradient, vectorial_gradient, limit_fraction)
 
 

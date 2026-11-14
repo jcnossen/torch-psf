@@ -8,11 +8,12 @@ GaussianPSF and AstigmaticGaussianPSF. PSFs are estimated with ZStackEstimator (
 Conventions: x = column, y = row, in px, pixel centres at integers; ROI positions are offsets from the ROI centre;
 z = emitter height above the coverslip (um); focus_um = focal plane relative to the coverslip (um); lengths carry their
 unit in the name (pixel_um, wavelength_um, dz_um); photons for intensities and background (photons / px). Device
-default: cuda if available, else cpu. Lower-level pieces: torch_psf.fit, .spots, .detect, .insitu, .simulate, .io,
-.zernike, .varpro. Localizations: Dataset (torch_psf.dataset).
+default: cuda if available, else cpu. Lower-level pieces: torch_psf.fit (incl. solve_linear), .spots, .detect,
+.estimation, .simulate, .io, .zernike, .optics, .camera (incl. photon_transfer). Localizations: Dataset
+(torch_psf.dataset).
 
-Module layers (each imports only from the layers before it): config, zernike, fit, varpro -> detect, movie, spots,
-dataset, calibrate -> psf (the base class) -> vectorial, spline, gaussian -> io, insitu, simulate -> estimators -> viewer,
+Module layers (each imports only from the layers before it): optics, zernike, fit -> detect, movie, spots, dataset,
+camera -> psf (the base class) -> vectorial, spline, gaussian -> io, estimation, simulate -> estimators -> viewer,
 __main__. The model classes register themselves by their psf.json type name when they are defined
 (PSF.__init_subclass__), and this __init__ imports all of them, so PSF.load knows every type whenever torch_psf is
 imported; importing a submodule alone (e.g. `from torch_psf.psf import PSF`) runs this __init__ first and so
@@ -21,7 +22,8 @@ scikit-image (viewer isosurfaces).
 """
 __version__ = '0.1.0'
 
-from torch_psf.config import Optics, Camera
+from torch_psf.optics import Optics
+from torch_psf.camera import Camera, photon_transfer
 from torch_psf.movie import open_movie
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
@@ -31,5 +33,4 @@ from torch_psf.detect import detect_spots
 from torch_psf.spots import extract_spots
 from torch_psf.estimators import ZStackEstimator, InSituEstimator
 from torch_psf.dataset import Dataset
-from torch_psf.calibrate import photon_transfer
-from torch_psf import fit, insitu, simulate, spots, detect, io, zernike, varpro, calibrate   # noqa: F401
+from torch_psf import fit, estimation, simulate, spots, detect, io, zernike, optics, camera   # noqa: F401

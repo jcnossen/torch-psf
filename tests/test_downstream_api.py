@@ -10,10 +10,9 @@ from test_io import calibration_json
 from torch_psf import Camera, VectorialPSF, PSF, open_movie
 from torch_psf.io import load_camera
 from torch_psf.movie import TiffMovie, ArrayMovie
-from torch_psf.fit import lm_poisson, fisher, model_and_jacobian
-from torch_psf.varpro import solve_linear
+from torch_psf.fit import lm_poisson, fisher, model_and_jacobian, solve_linear
 from torch_psf.spots import Tracks
-from torch_psf.insitu import fit_tracks
+from torch_psf.estimation import fit_tracks
 from torch_psf.vectorial import photosel_tensor
 
 

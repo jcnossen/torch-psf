@@ -16,7 +16,8 @@ A plain calibration json (no 'format') with the vectorial keys at the top level 
 n_imm, n_med, zernike_noll, zernike_waves, focus_um, psf_blur_px2, ...) is read as a vectorial PSF.
 """
 import json
-from torch_psf.config import Optics, Camera
+from torch_psf.optics import Optics
+from torch_psf.camera import Camera
 from torch_psf.psf import PSF, FORMAT, VERSION   # noqa: F401
 from torch_psf.spline import CubicSplinePSF
 
