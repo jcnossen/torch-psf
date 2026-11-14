@@ -43,8 +43,9 @@ class GaussianPSF(_GaussianBase):
     """2D pixel-integrated Gaussian: roisize x roisize ROIs, width sigma_px (px; a float or (sx, sy)). z is ignored
     (z_range None, n_dims 2)."""
 
-    def __init__(self, roisize, sigma_px=1.3, device=None):
+    def __init__(self, roisize, sigma_px=1.3, device=None, pixel_um=None):
         self.roisize = roisize
+        self.pixel_um = None if pixel_um is None else float(pixel_um)
         self.dev = resolve_device(device)
         s = (sigma_px, sigma_px) if not isinstance(sigma_px, (tuple, list)) else sigma_px
         self.sigma = (float(s[0]), float(s[1]))
@@ -55,10 +56,10 @@ class GaussianPSF(_GaussianBase):
         return self.sigma[0] * one, self.sigma[1] * one, 0 * one, 0 * one
 
     def to(self, device):
-        return GaussianPSF(self.roisize, self.sigma, device)
+        return GaussianPSF(self.roisize, self.sigma, device, self.pixel_um)
 
     def resized(self, roisize):
-        return GaussianPSF(roisize, self.sigma, self.dev)
+        return GaussianPSF(roisize, self.sigma, self.dev, self.pixel_um)
 
     def __repr__(self):
         return f'GaussianPSF(roisize={self.roisize}, sigma_px={self.sigma})'
@@ -66,10 +67,13 @@ class GaussianPSF(_GaussianBase):
 
 class AstigmaticGaussianPSF(_GaussianBase):
     """3D astigmatic Gaussian: in-focus widths sigma_px = (sx0, sy0) (px), the x and y foci at z = +gamma_um and
-    -gamma_um, depth of focus d_um; valid over z_range (um)."""
+    -gamma_um, depth of focus d_um; valid over z_range (um). pixel_um: lateral pixel size (um), required by fit /
+    localize (z is stored in px)."""
 
-    def __init__(self, roisize, sigma_px=(1.3, 1.3), gamma_um=0.2, d_um=0.4, z_range=(-0.5, 0.5), device=None):
+    def __init__(self, roisize, sigma_px=(1.3, 1.3), gamma_um=0.2, d_um=0.4, z_range=(-0.5, 0.5), device=None,
+                 pixel_um=None):
         self.roisize = roisize
+        self.pixel_um = None if pixel_um is None else float(pixel_um)
         self.dev = resolve_device(device)
         s = (sigma_px, sigma_px) if not isinstance(sigma_px, (tuple, list)) else sigma_px
         self.sigma = (float(s[0]), float(s[1]))
@@ -84,10 +88,10 @@ class AstigmaticGaussianPSF(_GaussianBase):
         return sx0 * qx, sy0 * qy, sx0 * ax / (qx * self.d), sy0 * ay / (qy * self.d)
 
     def to(self, device):
-        return AstigmaticGaussianPSF(self.roisize, self.sigma, self.gamma, self.d, self.z_range, device)
+        return AstigmaticGaussianPSF(self.roisize, self.sigma, self.gamma, self.d, self.z_range, device, self.pixel_um)
 
     def resized(self, roisize):
-        return AstigmaticGaussianPSF(roisize, self.sigma, self.gamma, self.d, self.z_range, self.dev)
+        return AstigmaticGaussianPSF(roisize, self.sigma, self.gamma, self.d, self.z_range, self.dev, self.pixel_um)
 
     def __repr__(self):
         return (f'AstigmaticGaussianPSF(roisize={self.roisize}, sigma_px={self.sigma}, gamma_um={self.gamma}, '

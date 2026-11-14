@@ -233,7 +233,7 @@ class ZStackEstimator(Estimator):
             if self._stopped():
                 break
         out = AstigmaticGaussianPSF(P, (float(torch.exp(lsx[0])), float(torch.exp(lsx[1]))), float(gam),
-                                    float(torch.exp(ld)), zr, device=self.dev)
+                                    float(torch.exp(ld)), zr, device=self.dev, pixel_um=o.pixel_um)
         self.report.update(sigma_px=list(out.sigma), gamma_um=out.gamma, d_um=out.d,
                            nll_per_px=float(l.detach()) / dd.numel())
         return out

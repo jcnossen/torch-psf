@@ -273,10 +273,9 @@ class VectorialPSF(torch.nn.Module, PSF):
         from torch_psf.spline import ConvCubicSplinePSF
         zr = self.z_range if z_range is None else z_range
         spl = ConvCubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
-                                 xy_limit=xy_limit, device=self.dev)
+                                 xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
         big = self if self.roisize == spl.Pl else self.resized(spl.Pl)
         spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
-        spl.pixel_um = self.pixel_um
         return spl
 
     def to(self, device):

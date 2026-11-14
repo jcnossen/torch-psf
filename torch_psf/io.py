@@ -68,11 +68,12 @@ def save(path, psf, source=None, camera=None, provenance=None):
             arrays.update(a)
         arrays['knots'] = psf.knots.detach().cpu().numpy()
     elif isinstance(psf, GaussianPSF):
-        d = dict(format=FORMAT, version=VERSION, type='gaussian', gaussian=dict(sigma_px=list(psf.sigma)),
-                 roisize=psf.roisize)
+        d = dict(format=FORMAT, version=VERSION, type='gaussian',
+                 gaussian=dict(sigma_px=list(psf.sigma), pixel_um=psf.pixel_um), roisize=psf.roisize)
     elif isinstance(psf, AstigmaticGaussianPSF):
         d = dict(format=FORMAT, version=VERSION, type='astig_gaussian',
-                 gaussian=dict(sigma_px=list(psf.sigma), gamma_um=psf.gamma, d_um=psf.d, z_range_um=list(psf.z_range)),
+                 gaussian=dict(sigma_px=list(psf.sigma), gamma_um=psf.gamma, d_um=psf.d, z_range_um=list(psf.z_range),
+                               pixel_um=psf.pixel_um),
                  roisize=psf.roisize)
     else:
         raise TypeError(type(psf))
@@ -146,7 +147,7 @@ def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=No
     typ = d.get('type', 'vectorial') if d.get('format') == FORMAT else 'calib'
     if typ == 'calib' and d.get('psf_gauss_sigma_um') is not None:
         return GaussianPSF(roisize or 15, sigma_px=float(d['psf_gauss_sigma_um']) / float(d['pixelsize_um']),
-                           device=device)
+                           device=device, pixel_um=float(d['pixelsize_um']))
     if typ in ('calib', 'vectorial'):
         return _vectorial_from(d, roisize or d.get('roisize', 15), device, angle, arrays, npupil, oversample)
     if typ == 'spline':
@@ -154,16 +155,18 @@ def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=No
         spl = ConvCubicSplinePSF(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'],
                                  zpad=g['zpad'], xy_limit=g['xy_limit'], device=device,
                                  knots=torch.as_tensor(arrays['knots']), knot_u0_px=g.get('u0_px'),
-                                 knot_z0_um=g.get('z0_um'))
-        spl.pixel_um = g.get('pixel_um') or (Optics.from_dict(d['optics']).pixel_um if 'optics' in d else None)
+                                 knot_z0_um=g.get('z0_um'),
+                                 pixel_um=g.get('pixel_um') or (Optics.from_dict(d['optics']).pixel_um
+                                                                if 'optics' in d else None))
         return spl
     if typ == 'gaussian':
-        return GaussianPSF(roisize or d.get('roisize', 15), sigma_px=tuple(d['gaussian']['sigma_px']), device=device)
+        return GaussianPSF(roisize or d.get('roisize', 15), sigma_px=tuple(d['gaussian']['sigma_px']), device=device,
+                           pixel_um=d['gaussian'].get('pixel_um'))
     if typ == 'astig_gaussian':
         g = d['gaussian']
         return AstigmaticGaussianPSF(roisize or d.get('roisize', 15), sigma_px=tuple(g['sigma_px']),
                                      gamma_um=g['gamma_um'], d_um=g['d_um'], z_range=tuple(g['z_range_um']),
-                                     device=device)
+                                     device=device, pixel_um=g.get('pixel_um'))
     raise ValueError(f'unknown PSF type {typ!r}')
 
 

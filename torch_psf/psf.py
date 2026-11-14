@@ -18,7 +18,7 @@ class PSF:
     to."""
     roisize: int
     z_range = None
-    pixel_um = None          # lateral pixel size (um) when the model knows it (vectorial; splines built from one)
+    pixel_um = None          # lateral pixel size (um); needed to express z in px when fitting a 3D model
     dev = torch.device('cpu')
 
     # ------------------------------------------------------------------ the model
@@ -93,7 +93,7 @@ class PSF:
         torch_psf.fit.localize). corners [N, 2] = (x0, y0) of the ROIs in the image: positions are then image
         coordinates (else relative to the ROI centre). frames [N]: frame numbers.
         Dataset fields: id, frame, n_frames (1), pos [N, D] px (z converted from um to px with the lateral pixel size:
-        pixel_um, default the model's pixel_um; without a pixel size z stays in um and meta['z_unit'] = 'um'),
+        pixel_um, default the model's pixel_um; a 3D model without a pixel size raises ValueError),
         crlb [N, D] (same units), photons, bg, crlb_photons, crlb_bg, loglik (= -NLL, Poisson, constant dropped),
         chi2 (mean of (d - mu)^2 / (mu + var) per pixel), at_limit (x or y at the offset limit)."""
         from torch_psf.fit import localize, crlb, at_limit
@@ -126,19 +126,19 @@ class PSF:
             out['theta'].append(th); out['crlb'].append(crlb(self, th, var=v)); out['nll'].append(nll)
             out['lim'].append(at_limit(th, self)); out['xy'].append(xy)
         cat = lambda k, shape: torch.cat(out[k]).cpu() if out[k] else torch.zeros(shape)
-        th, cr = cat('theta', (0, 5)), cat('crlb', (0, 5))
         px = pixel_um if pixel_um is not None else getattr(self, 'pixel_um', None)
+        if self.n_dims == 3 and not px:
+            raise ValueError(f'{type(self).__name__} has no pixel size: z is stored in px of the lateral pixel size, so '
+                             f'pass pixel_um=... or set psf.pixel_um')
+        th, cr = cat('theta', (0, 5)), cat('crlb', (0, 5))
         meta = dict(method=f'torch_psf {type(self).__name__}.fit', n_dims=self.n_dims)
         if px:
             meta['pixel_nm'] = 1000.0 * float(px)
         pos = [cat('xy', (0, 2))]
         crp = [cr[:, :2]]
         if self.n_dims == 3:
-            zs = 1.0 / px if px else 1.0
-            pos.append(th[:, 2:3].double() * zs)
-            crp.append(cr[:, 2:3] * zs)
-            if not px:
-                meta['z_unit'] = 'um'
+            pos.append(th[:, 2:3].double() / px)
+            crp.append(cr[:, 2:3] / px)
         fr = (torch.as_tensor(frames).cpu() if frames is not None else torch.zeros(len(th), dtype=torch.int32))
         return Dataset(dict(frame=fr, pos=torch.cat(pos, 1), crlb=torch.cat(crp, 1), photons=th[:, 3], bg=th[:, 4],
                             crlb_photons=cr[:, 3], crlb_bg=cr[:, 4], loglik=-cat('nll', (0,)), chi2=cat('chi2', (0,)),
@@ -205,6 +205,6 @@ class PSF:
             raise ValueError('a 2D model has no z range: pass z_range (the spline is then constant in z)')
         zr = self.z_range if z_range is None else z_range
         spl = ConvCubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
-                                 xy_limit=xy_limit, device=self.dev)
+                                 xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
         spl.knots = spl.knots_from_model(self if self.roisize == spl.Pl else self.resized(spl.Pl), chunk=chunk)
         return spl
