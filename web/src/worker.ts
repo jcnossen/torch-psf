@@ -10,7 +10,9 @@ import { writeNpz } from './io/npy';
 import { writeTiffStack } from './io/tifwrite';
 import { DEFAULT_NOLL, VectorialConfig } from './psf/vectorial';
 import type { Req, VolumeSpec, FitForm, FitSummary } from './ui/protocol';
-import { localizeMovie } from './smlm/movie';
+import { localizeMovie, MovieSource } from './smlm/movie';
+import { estimateInsitu } from './smlm/estimate';
+import { simulateDemo, ArrayMovie } from './smlm/simulate';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 let token: StopToken | null = null;
@@ -18,6 +20,8 @@ let fitter: BeadFitter | null = null;
 let lastForm: FitForm | null = null;
 let lastNz = 0;
 let lastProgress = 0;
+let demo: ArrayMovie | null = null;
+const sourceOf = (s: 'demo' | File[]): File[] | MovieSource => { if (s === 'demo') { if (!demo) throw new Error('no demo movie'); return demo; } return s; };
 
 function post(m: unknown, transfer: Transferable[] = []) { ctx.postMessage(m, transfer); }
 function progress(p: object, force = false) {
@@ -35,6 +39,7 @@ async function volume(spec: VolumeSpec): Promise<Float32Array> {
     eng.setZernike(spec.zcoef);
     const ps = Array.from({ length: spec.nz }, (_, k) => {
       const z = spec.zmin + (spec.zmax - spec.zmin) * k / Math.max(1, spec.nz - 1);
+      if (spec.focus_um !== undefined) return { x: 0, y: 0, ze: z, f: spec.focus_um, I: 1, bg: 0 };
       return { x: 0, y: 0, ze: spec.ze_um, f: spec.ze_um - z, I: 1, bg: 0 };
     });
     eng.setImages(ps);
@@ -174,9 +179,27 @@ ctx.onmessage = async (ev: MessageEvent<Req>) => {
     } else if (m.type === 'movie') {
       token = new StopToken();
       const { device } = await getDevice();
-      const summary = await localizeMovie(device, m.files, m.form, token, (p) => progress(p),
+      const summary = await localizeMovie(device, sourceOf(m.source), m.form, token, (p) => progress(p),
         (rows) => post({ type: 'locs', rows }, [rows.buffer]));
       post({ id: m.id, type: 'result', summary });
+    } else if (m.type === 'estimate') {
+      token = new StopToken();
+      const { device } = await getDevice();
+      const report = await estimateInsitu(device, sourceOf(m.source), m.form, token, (p) => progress(p, p.stage === 'fit'));
+      post({ type: 'insitu', report });
+      let summary = null;
+      if (m.localize && token.signal !== 'abort') {
+        token.signal = 'run';
+        summary = await localizeMovie(device, sourceOf(m.source), { ...m.form, zcoef: report.zcoef, zpad: 5 }, token, (p) => progress(p),
+          (rows) => post({ type: 'locs', rows }, [rows.buffer]));
+      }
+      post({ id: m.id, type: 'result', report, summary });
+    } else if (m.type === 'demo') {
+      const { device } = await getDevice();
+      const d = await simulateDemo(device);
+      demo = new ArrayMovie(d.adu, d.T, d.H, d.W);
+      const copy = d.adu.slice();
+      post({ id: m.id, type: 'result', adu: copy, T: d.T, H: d.H, W: d.W, zernike: d.zernike, optics: d.optics, params: d.params, n_events: d.truth.length / 5 }, [copy.buffer]);
     } else if (m.type === 'export') {
       const r = await exportFile(m.kind, m.params);
       post({ id: m.id, type: 'result', bytes: r.bytes, name: r.name }, [r.bytes.buffer]);

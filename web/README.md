@@ -7,8 +7,7 @@ browser tests compare the web results with torch_psf outputs (see "Validation").
 
 ![landing view](docs/landing.png)
 
-On opening, the page shows a default PSF computed on the GPU in a slowly rotating 3D view (it stops on the first mouse
-interaction): ten nested white isosurfaces (60 % to 2 % of the peak, additive, so the inner ones add up to a soft
+The 3D view shows the PSF computed on the GPU, slowly rotating (it stops on the first mouse interaction): ten nested white isosurfaces (60 % to 2 % of the peak, additive, so the inner ones add up to a soft
 glow) and three faint slice planes. Presets: tetrapod-like, astigmatic, in-focus 2D, and the loaded file's fit result.
 The slice planes (log scale, bilinear, interpolated between z planes) move with the sliders or by dragging a plane
 (hover highlights it) along its normal.
@@ -43,6 +42,33 @@ calibration is used. The only tracked data file is a one-bead real crop of publi
 2016 real 3D data set NPC-A647-3D; source, citation and the assumed acquisition settings in `epfl_npc_bead.json`).
 
 ## Using it
+
+The Input panel has two tabs that share the optics (pixel size, NA, wavelength; refractive indices and the camera under
+"Advanced: refractive indices, camera"). Each tab shows only its essential inputs and one button; everything else is
+under its "Advanced" fold.
+
+### SMLM movie (default): in-situ PSF estimation
+
+On opening, the page simulates a small demo movie in the browser (600 frames of 128 x 128 px, astigmatic PSF with
+Noll 5 / 6 / 11 = 0.02 / 0.10 / 0.03 waves, blinking sites uniform in the frame and in z, camera with read noise; the
+model of torch_psf.simulate.simulate_reference_movie) and plays it in the Movie panel (autoplay, frame slider). Drop
+your own movie (TIFF, streamed) to replace it.
+
+"Estimate PSF" runs torch_psf.estimate_psf_insitu, ported step by step: spot detection and ROIs, a 16 px checkerboard
+split into spots for the fit and held-out spots, the in-situ fit of the vectorial PSF by the knot route
+(fit_zernike_knots: knots of the spline from the vectorial model, Levenberg-Marquardt localization on the spline, the
+NLL gradient on the knots, one vector-Jacobian product to the Zernikes, Adam), the held-out NLL of the start and the
+fitted PSF, the z scale relative to the start. The Zernike bars update during the fit (start, fitted and, for the
+demo, the truth). The fitted PSF is then shown in the 3D view (z = emitter height at the focal plane), the movie is
+localized with it and the Reconstruction panel renders the localizations (colour = z; csv export). The fit starts from
+a generic astigmatic PSF (Noll 6 = 0.08) unless another start is chosen under Advanced (the PSF in the 3D view, the last
+estimate, or a PSF json). On the demo it recovers the truth to about 0.002 waves rms in about 30 s on a laptop iGPU.
+Known limitation (as torch_psf): on dense filament structures the estimate is biased (Noll 6 low, a spurious Noll 12);
+the demo therefore uses uniform sites. "Localize only" (Advanced) localizes with the start PSF without estimating it.
+
+![landing view](docs/landing.png)
+
+### Bead z-stack
 
 1. Drop one or more bead z-stack TIFFs (or choose files). Several stacks: one file each. A stack split over several files
    (`stack.tif`, `stack_X1.tif`, ... or `_1`, `_2`, ...) is joined in part order.
@@ -121,6 +147,9 @@ checked in between.
 | SMLM movie: spot detection vs torch_psf `extract_spots` / `detect_spots` (seeded simulated movie, 300 frames, chunks of 100) | identical spots and order (718 / 718), noise rel. 2e-6 | |
 | SMLM movie: spline localization vs torch_psf `fit.localize` / `crlb` (same knots, 600 spots) | xy 99 % 4e-3 px, z 99 % 1e-3 um, CRLB 1e-3 rel. (float32 vs float64 solves) | 1e-2 px, 3e-3 um |
 | SMLM movie: whole pipeline (ADU, detection, knots, localization) vs the torch_psf localization table | same spots and frames; xy 99 % 4e-3 px | 1e-2 px |
+| in situ: knot gradient and Zernike gradient (VJP) vs torch_psf knot_gradient / vjp_vectorial (1850 ROIs) | rel. 4e-7 / 2e-6, NLL 1e-7 | 1e-3 |
+| in situ: fit_zernike_knots, 40 iterations on the torch_psf training ROIs | Zernikes 2e-6 w rms from torch_psf | 2e-3 w |
+| in situ: whole estimate_psf_insitu (movie, spots, split, fit, held-out, z scale) | same 4346 spots and split; Zernikes 2e-6 w rms; held-out NLL change and z scale identical to 4 digits | 2e-3 |
 
 With a single real bead and a free z-step scale the fit has several optima (the web LM and the Python L-BFGS ended in
 different ones), so that test keeps the z step fixed.

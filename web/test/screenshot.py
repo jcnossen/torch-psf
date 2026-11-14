@@ -1,4 +1,4 @@
-"""Drive the app page headlessly: landing view (tetrapod preset), then a bead fit of the generated tetrapod-like test
+"""Drive the app page headlessly: landing view (the astigmatic preset and the simulated demo movie), then a bead fit of the generated tetrapod-like test
 stack (test/.cache/stack_tetrapod.tif), stop controls, exports. Used by `python test/run_tests.py --screenshot`; writes
 web/docs/landing.png / result.png (palette-compressed, small) and checks the exported files in Python."""
 import json, os, time
@@ -28,7 +28,7 @@ def shot(pg, path, **kw):
 def drive_app(pg, base, outdir):
     os.makedirs(outdir, exist_ok=True)
     pg.goto(f'{base}/index.html')
-    pg.wait_for_function("window.__presetShown === 'tetrapod'", timeout=60000)
+    pg.wait_for_function("window.__presetShown === 'astig' && window.__demoReady === true", timeout=120000)
     time.sleep(1.5)
     shot(pg, os.path.join(outdir, 'landing.png'))
     compress(os.path.join(outdir, 'landing.png'))
@@ -58,14 +58,16 @@ def drive_app(pg, base, outdir):
           f'slider in sync: {"ok" if ok else "FAILED"}; z exaggeration update {t[0]:.1f} ms vs full rebuild {t[1]:.0f} ms')
     if not ok:
         raise RuntimeError(f'slice-plane drag check failed: cam {cam0} -> {cam1}, sliders {sliders}, after {after}')
-    for name in ['astig', 'focus']:
+    for name in ['tetrapod', 'focus']:
         pg.select_option('#preset', name)
         pg.wait_for_function(f"window.__presetShown === '{name}'", timeout=60000)
     print('presets ok')
     # the generated tetrapod-like stack with its known acquisition parameters
     t = json.load(open(os.path.join(CACHE, 'tetrapod.json')))
-    vals = {'f-na': t['NA'], 'f-wl': t['wavelength_um'], 'f-nimm': t['n_imm'], 'f-nmed': t['n_med'],
-            'f-px': t['pixel_um'], 'f-dz': t['dz_um'], 'f-gain': t['gain'], 'f-offset': t['offset'],
+    pg.click('.tabs button[data-tab=stack]')
+    pg.evaluate("document.querySelectorAll('details.adv').forEach((d) => { d.open = true; })")
+    vals = {'o-na': t['NA'], 'o-wl': t['wavelength_um'], 'o-nimm': t['n_imm'], 'o-nmed': t['n_med'],
+            'o-px': t['pixel_um'], 'f-dz': t['dz_um'], 'o-gain': t['gain'], 'o-offset': t['offset'],
             'f-ze': t['ze_um'], 'f-roi': t['R']}
     for k, v in vals.items():
         pg.fill('#' + k, str(v))

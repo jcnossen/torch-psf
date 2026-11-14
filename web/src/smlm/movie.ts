@@ -34,10 +34,11 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
   const P = form.roisize, h = (P - 1) >> 1;
   const nFrames = form.maxFrames > 0 ? Math.min(mv.n, form.maxFrames) : mv.n;
   // the spline PSF (torch_psf ConvSplinePSF.from_vectorial: oversample 2, dz 0.04 um, zpad 2, xy_limit 3)
-  const grid = splineGrid(P, form.zlo, form.zhi, 2, 0.04, 2, 3.0);
+  const zpad = form.zpad ?? 2;
+  const grid = splineGrid(P, form.zlo, form.zhi, 2, 0.04, zpad, 3.0);
   progress({ stage: 'spline', done: 0, total: 1 });
   const k = await buildKnots(device, { ...form.optics, roisize: 0, npupil: form.npupil, oversample: form.oversample, zernike_noll: form.noll },
-    form.zcoef, { roisize: P, focus_um: form.focus_um, zmin: form.zlo, zmax: form.zhi, S: grid.S, hz: grid.hz, zpad: 2, xmax: grid.xmax }, () => tok.check());
+    form.zcoef, { roisize: P, focus_um: form.focus_um, zmin: form.zlo, zmax: form.zhi, S: grid.S, hz: grid.hz, zpad, xmax: grid.xmax }, () => tok.check());
   const loc = new SplineLocalizer(device, grid, k.knots);
   const chunk = Math.max(1, Math.min(form.chunk, nFrames));
   const det = new Detector(device, mv.H, mv.W, chunk, { threshold: form.threshold, border: h + 2, isolation: form.isolation > 0 ? form.isolation : null });

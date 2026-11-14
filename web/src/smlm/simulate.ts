@@ -3,9 +3,11 @@
 // chain (mean on-time mean_on frames; the on-probability gives emitters_per_frame emitters on average), log-normal
 // photons, constant background, Poisson noise, then the camera: adu = round(photons / gain + offset + N(0, readnoise
 // / gain)) clipped to 0..65535. The PSF is the astigmatic preset of torch_psf.simulate.PRESETS (Zernikes 5: 0.02,
-// 6: 0.10, 11: 0.03 waves, focal plane 0.4 um, emitters 0 .. 0.8 um), rendered through its spline. The sites lie on
-// a few curved filaments (as torch_psf.simulate.filament_sites) so that the reconstruction looks like data. The
-// random numbers are not torch's: same model and statistics, not the same bits.
+// 6: 0.10, 11: 0.03 waves, focal plane 0.4 um, emitters 0 .. 0.8 um), rendered through its spline. Sites: uniform in
+// the frame and in z (as simulate_reference_movie), or on curved filaments (sites: 'filaments'). The default is
+// uniform: on dense filaments the in-situ estimate of torch_psf (and so of this port) is biased (Noll 6 low, a
+// spurious Noll 12; being fixed in torch_psf), so the demo would not show the method working. The random numbers are
+// not torch's: same model and statistics, not the same bits.
 import { buildKnots } from '../psf/spline';
 import { DEFAULT_NOLL, Optics } from '../psf/vectorial';
 import { splineGrid } from '../gpu/spline_lm';
@@ -13,8 +15,8 @@ import { renderSpline, KnotGridFull } from './insitu';
 
 export const DEMO_ZERNIKE: Record<number, number> = { 5: 0.02, 6: 0.10, 11: 0.03 };
 export const DEMO_OPTICS: Optics = { pixel_um: 0.108, NA: 1.49, wavelength_um: 0.68, n_imm: 1.518, n_med: 1.33 };
-export const DEMO = { T: 400, H: 128, W: 128, nsites: 900, emitters_per_frame: 10, mean_on: 3, photons: 3000, photons_logsd: 0.3, bg: 20,
-  gain: 0.5, offset: 100, readnoise: 1.5, focus_um: 0.4, zlo: 0.0, zhi: 0.8, roisize: 19, filaments: 7, seed: 1 };
+export const DEMO = { T: 600, H: 128, W: 128, nsites: 900, emitters_per_frame: 10, mean_on: 3, photons: 3000, photons_logsd: 0.3, bg: 20,
+  gain: 0.5, offset: 100, readnoise: 1.5, focus_um: 0.4, zlo: 0.0, zhi: 0.8, roisize: 19, filaments: 7, sites: 'uniform' as 'uniform' | 'filaments', seed: 1 };
 
 /** mulberry32 */
 function rng(seed: number) {
@@ -52,7 +54,10 @@ export async function simulateDemo(dev: GPUDevice, p = DEMO): Promise<DemoMovie>
   // filament sites: smooth random curves (quadratic Bezier), z varying slowly along each
   const sx: number[] = [], sy: number[] = [], sz: number[] = [];
   const m = 6;
-  for (let f = 0; f < p.filaments; f++) {
+  if (p.sites === 'uniform') {
+    for (let i = 0; i < p.nsites; i++) { sx.push(4 + (p.W - 8) * u()); sy.push(4 + (p.H - 8) * u()); sz.push(p.zlo + (p.zhi - p.zlo) * u()); }
+  }
+  for (let f = 0; f < (p.sites === 'filaments' ? p.filaments : 0); f++) {
     const P0 = [m + u() * (p.W - 2 * m), m + u() * (p.H - 2 * m)], P2 = [m + u() * (p.W - 2 * m), m + u() * (p.H - 2 * m)];
     const P1 = [m + u() * (p.W - 2 * m), m + u() * (p.H - 2 * m)];
     const z0 = p.zlo + 0.1 + 0.6 * u(), z1 = p.zlo + 0.1 + 0.6 * u();

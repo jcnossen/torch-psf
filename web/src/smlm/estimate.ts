@@ -7,9 +7,7 @@ import { SplineLocalizer, splineGrid } from '../gpu/spline_lm';
 import { StopToken, Eta, Progress } from '../core/task';
 import { openSource, MovieSource } from './movie';
 import { fitZernikeKnots, knotsAndJacobian, zScale, checkerboard, KnotGridFull, InsituIter } from './insitu';
-import type { MovieForm } from '../ui/protocol';
-
-export interface InsituForm extends MovieForm { nspots: number; nheldout: number; iters: number; tile: number; }
+import type { InsituForm } from '../ui/protocol';
 
 export interface InsituReport {
   zcoef: number[]; zcoef_start: number[]; noll: number[]; iterations: number; partial: boolean; seconds: number;

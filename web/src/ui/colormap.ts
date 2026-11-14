@@ -17,7 +17,7 @@ export function diverging(t: number): [number, number, number] {   // t in [-1, 
 }
 
 /** RGBA pixels of a 2D array (h x w) with a log10 scale over `decades` below vmax, or linear when decades = 0. */
-export function toRgba(a: ArrayLike<number>, w: number, h: number, opts: { vmax?: number; decades?: number; diverging?: boolean; alpha?: boolean } = {}): Uint8ClampedArray {
+export function toRgba(a: ArrayLike<number>, w: number, h: number, opts: { vmax?: number; decades?: number; diverging?: boolean; alpha?: boolean; gray?: boolean } = {}): Uint8ClampedArray {
   const out = new Uint8ClampedArray(w * h * 4);
   let vmax = opts.vmax ?? 0;
   if (!opts.vmax) for (let i = 0; i < w * h; i++) vmax = Math.max(vmax, Math.abs(a[i]));
@@ -27,6 +27,7 @@ export function toRgba(a: ArrayLike<number>, w: number, h: number, opts: { vmax?
     let c: [number, number, number], t = 1;
     if (opts.diverging) c = diverging(a[i] / vmax);
     else if (dec > 0) { t = 1 + Math.log10(Math.max(a[i] / vmax, 10 ** -dec)) / dec; c = viridis(t); }
+    else if (opts.gray) { t = Math.min(1, Math.max(0, a[i] / vmax)); const g = Math.round(255 * Math.sqrt(t)); c = [g, g, g]; }
     else { t = a[i] / vmax; c = viridis(t); }
     out[4 * i] = c[0]; out[4 * i + 1] = c[1]; out[4 * i + 2] = c[2];
     out[4 * i + 3] = opts.alpha ? 255 * Math.min(1, Math.max(0, t) * 1.4) : 255;   // alpha: the low end fades out
