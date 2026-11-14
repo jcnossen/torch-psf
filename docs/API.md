@@ -56,6 +56,14 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 | `ZStackEstimator(...)` | adds `emitter_z_um` (starting bead centre height; **default** bead_diameter_um / 2, else 0), `fit_na`, `fit_n_med`, `drift_order` (**default** 3, passed to fit_beads; drift is on by default as before) |
 | `Dataset.estimate_drift` stored `meta['drift_info']` = dict(method, n, version) | stores `meta['drift']` = the run record: method, entry point (`dme.dme_prior.dme_prior_estimate`), version, package path, parameters (n_frames, dims, n_rows, time, row rule), `dme_info` (the choices DME made), result per axis (ptp_px, rms_px); `return_info=True` also returns it. DME is found through `DME_PATH` (a checkout) if set, else the installed package. `set_drift(info=)` stores into `meta['drift']` |
 
+### 2026-11-14: imports (no behaviour change; files identical)
+
+| old | new |
+|---|---|
+| `PSF.load` / `torch_psf.io` imported the model classes | registry: each model class sets `type_name` (its psf.json `type`: `vectorial`, `spline`, `gaussian`, `astig_gaussian`) and is registered by `PSF.__init_subclass__`; `PSF.load` looks the type up (`PSF._registry`). Each class writes / reads its own parameters (`_file_dict`, `_from_file`); `psf.save` writes the common part. `torch_psf/__init__` imports all models, so they are registered whenever torch_psf (or any submodule) is imported. A new model class: set `type_name` and implement the two methods |
+| `torch_psf.io.save` / `load` / `load_spline_source` / `load_camera` held the implementation | thin wrappers of `psf.save`, `PSF.load`, `CubicSplinePSF.load_source`, `Camera.from_json` (new) |
+| function-level imports | all imports at module top, in layers (each importing only from earlier ones): config, zernike, fit, varpro -> detect, movie, spots, dataset -> psf -> spline -> vectorial, gaussian -> io, insitu, simulate -> estimators -> viewer, `__main__`. Still imported where used: the optional dme (`Dataset.estimate_drift`) and scikit-image (viewer meshes) |
+
 ## Dataset (`torch_psf.dataset.Dataset`; format: docs/DATASET_FORMAT.md)
 
 `Dataset(fields, meta=None, drift=None, drift_applied=False)`, `Dataset.from_arrays(pos, frame, crlb, photons, bg,

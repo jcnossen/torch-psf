@@ -30,10 +30,14 @@ load_picasso), ThunderSTORM csv (save_csv / load_csv: nm, frames from 1, first p
 Dependencies: torch, numpy; h5py for hdf5; scipy for render(sigma_nm > 0); the `dme` package
 (github.com/jcnossen/drift-estimation, version >= 2) for estimate_drift.
 """
+import importlib
 import json
 import os
+import sys
+import h5py
 import numpy as np
 import torch
+from scipy.ndimage import gaussian_filter
 
 FORMAT, FORMAT_VERSION = 'torch-psf dataset', 1
 CORE = ('id', 'frame', 'n_frames', 'pos', 'crlb', 'photons', 'bg')
@@ -364,8 +368,6 @@ class Dataset:
         (method, entry point, version, package path, parameters: n_frames / dims / n_rows / time, the choices DME made
         (its info dict), and per-axis results: peak-to-peak and rms drift in px); returns the drift (and the record with
         return_info). apply=True also subtracts it."""
-        import importlib
-        import sys
         if self.drift_applied:
             raise ValueError('positions are already drift corrected: undo_drift() first')
         p = os.environ.get('DME_PATH')
@@ -431,7 +433,6 @@ class Dataset:
         img = np.histogram2d(p[:, 1], p[:, 0], bins=(ny, nx), range=[[y0, y0 + ny / s], [x0, x0 + nx / s]],
                              weights=None if w is None else _tensor(w).cpu().numpy())[0].astype(np.float32)
         if sigma_nm > 0:
-            from scipy.ndimage import gaussian_filter
             img = gaussian_filter(img, sigma_nm / pixel_nm)
         return (img, (x0, x0 + nx / s, y0, y0 + ny / s)) if return_extent else img
 
@@ -508,7 +509,6 @@ class Dataset:
         """By extension: .hdf5 / .h5 (this format, or a Picasso file: one with a 'locs' table), .csv (ThunderSTORM)."""
         ext = os.path.splitext(str(path))[1].lower()
         if ext in ('.hdf5', '.h5'):
-            import h5py
             with h5py.File(path, 'r') as f:
                 picasso = 'locs' in f and 'localizations' not in f
             return cls.load_picasso(path, **kw) if picasso else cls.load_hdf5(path)
@@ -519,7 +519,6 @@ class Dataset:
     def save_hdf5(self, path):
         """docs/DATASET_FORMAT.md: /localizations/<field> (one dataset per field, its dtype and shape), /metadata
         (attributes; dicts / lists as JSON strings), /drift (optional, attributes applied, info). Returns the path."""
-        import h5py
         tmp = str(path) + '.tmp'
         with h5py.File(tmp, 'w') as f:
             f.attrs['format'] = FORMAT
@@ -543,7 +542,6 @@ class Dataset:
 
     @classmethod
     def load_hdf5(cls, path):
-        import h5py
         with h5py.File(path, 'r') as f:
             F = {k: torch.from_numpy(np.asarray(f['localizations'][k][...])) for k in f['localizations']}
             meta = {}
@@ -566,7 +564,6 @@ class Dataset:
         """Picasso hdf5 (dataset 'locs': frame u4, x, y, photons, sx, sy (PSF width: field psf_sx / psf_sy, else
         psf_sigma_px), bg, lpx, lpy (precision = crlb), ellipticity, net_gradient, z / lpz in 3D (z in px)) and the .yaml
         Picasso needs. Other 1D fields are added under their names. Returns the path."""
-        import h5py
         n, F = len(self), self.numpy()
         z0 = np.zeros(n, np.float32)
         psx = F.get('psf_sx', np.full(n, psf_sigma_px, np.float32))
@@ -601,7 +598,6 @@ class Dataset:
     def load_picasso(cls, path, pixel_nm=None):
         """A Picasso hdf5 ('locs'): x, y (z) -> pos, lpx, lpy (lpz) -> crlb, sx, sy -> psf_sx, psf_sy, other fields by
         name; image size, frames, pixel size from the .yaml next to it."""
-        import h5py
         with h5py.File(path, 'r') as f:
             L = f['locs'][:]
         names = L.dtype.names

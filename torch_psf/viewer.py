@@ -8,6 +8,7 @@ scripts/build_viewer.sh) from the same origin. Without the bundle, / shows how t
     python -m torch_psf.viewer --dump-fixtures DIR     one response of every endpoint (tetrapod preset) for offline
                                                         front-end tests
 """
+import argparse
 import json
 import os
 import struct
@@ -16,6 +17,12 @@ import webbrowser
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import numpy as np
 import torch
+from torch_psf.config import Optics, resolve_device
+from torch_psf.fit import crlb
+from torch_psf.psf import PSF
+from torch_psf.vectorial import VectorialPSF
+from torch_psf.spline import CubicSplinePSF
+from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
 
 API_VERSION = 1
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'viewer_static')
@@ -91,7 +98,6 @@ class Engine:
     """Builds the PSF models of a parameter set (cached) and computes the API results."""
 
     def __init__(self, device=None, psf_path=None):
-        from torch_psf.config import resolve_device
         self.dev = resolve_device(device)
         self.lock = threading.Lock()
         self.cache = {}
@@ -101,10 +107,6 @@ class Engine:
             self.default.update(self.load(psf_path))
 
     def load(self, path):
-        from torch_psf.psf import PSF
-        from torch_psf.vectorial import VectorialPSF
-        from torch_psf.spline import CubicSplinePSF
-        from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
         if not path or not os.path.isfile(str(path)):
             raise ApiError(404, 'not_found', f'no such file: {path}')
         try:
@@ -127,8 +129,6 @@ class Engine:
         return p
 
     def _vectorial(self, p, roisize):
-        from torch_psf.vectorial import VectorialPSF
-        from torch_psf.config import Optics
         v = VectorialPSF.from_optics(Optics.from_dict(p['optics']), roisize, zernike_indices=NOLL, npupil=64,
                                      oversample=3, device=self.dev, focus_um=float(p['focus_um']),
                                      z_range=tuple(p['z_range']))
@@ -136,7 +136,6 @@ class Engine:
 
     def models(self, p):
         """(model for the pixel panels, CubicSplinePSF whose knots give the volume (or None))."""
-        from torch_psf.gaussian import GaussianPSF
         key = json.dumps({k: p.get(k) for k in ('model', 'optics', 'focus_um', 'z_range', 'zernike', 'roisize',
                                                  'sigma_px')}, sort_keys=True)
         if key in self.cache:
@@ -212,7 +211,6 @@ class Engine:
     def render(self, p):
         """(header, arrays): the normalized PSF at (0, 0, z_um) on the pixel grid, d/dx, d/dy (per px), d/dz (per
         um), and the CRLB of x, y, z (nm) over 41 heights in z_range at the given photons / bg."""
-        from torch_psf.fit import crlb
         _check_params(p)
         render, spl = self.models(p)
         pos = torch.tensor([[0.0, 0.0, float(p['z_um'])]], device=self.dev)
@@ -342,7 +340,6 @@ def dump_fixtures(out, device=None):
 
 
 if __name__ == '__main__':
-    import argparse
     ap = argparse.ArgumentParser(description='torch-psf viewer server')
     ap.add_argument('psf', nargs='?')
     ap.add_argument('--port', type=int, default=8000)

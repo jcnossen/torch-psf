@@ -10,6 +10,14 @@ z = emitter height above the coverslip (um); focus_um = focal plane relative to 
 unit in the name (pixel_um, wavelength_um, dz_um); photons for intensities and background (photons / px). Device
 default: cuda if available, else cpu. Lower-level pieces: torch_psf.fit, .spots, .detect, .insitu, .simulate, .io,
 .zernike, .varpro. Localizations: Dataset (torch_psf.dataset).
+
+Module layers (each imports only from the layers before it): config, zernike, fit, varpro -> detect, movie, spots,
+dataset -> psf (the base class) -> vectorial, spline, gaussian -> io, insitu, simulate -> estimators -> viewer,
+__main__. The model classes register themselves by their psf.json type name when they are defined
+(PSF.__init_subclass__), and this __init__ imports all of them, so PSF.load knows every type whenever torch_psf is
+imported; importing a submodule alone (e.g. `from torch_psf.psf import PSF`) runs this __init__ first and so
+registers them too. Optional dependencies are imported where they are used: dme (Dataset.estimate_drift) and
+scikit-image (viewer isosurfaces).
 """
 __version__ = '0.1.0'
 

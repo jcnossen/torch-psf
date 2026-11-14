@@ -1,5 +1,6 @@
 """z scale of one PSF relative to another, and the free-knot warning text (used in the in-situ reports)."""
 import torch
+from torch_psf.fit import localize
 
 
 @torch.no_grad()
@@ -11,7 +12,6 @@ def z_scale(psf_new, psf_ref, z_range=None, n=33, photons=1e5, bg=1.0):
     z = torch.linspace(zr[0], zr[1], n, device=psf_ref.dev if hasattr(psf_ref, 'dev') else None)
     pos = torch.stack([torch.zeros_like(z), torch.zeros_like(z), z], 1)
     mu = photons * psf_new.render(pos) + bg
-    from torch_psf.fit import localize
     th, _ = localize(psf_ref, mu, None)
     k = slice(int(0.1 * n), n - int(0.1 * n))
     A = torch.stack([torch.ones_like(z[k]), z[k] - z[k].mean()], 1).double()

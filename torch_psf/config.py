@@ -4,6 +4,7 @@ A pipeline configuration with `optics` and `camera` blocks of the same field nam
     Optics.from_dict(cfg['optics']), Camera.from_dict(cfg['camera']).
 """
 import dataclasses
+import json
 import os
 from typing import Optional, Union
 import numpy as np
@@ -81,6 +82,16 @@ class Camera:
         if load_maps and c.maps:
             c.load_maps()
         return c
+
+    @classmethod
+    def from_json(cls, path, load_maps=True):
+        """Camera block of a calibration / torch-psf json (relative map paths resolved against the json's directory), or
+        None when the file has none."""
+        with open(path) as f:
+            c = json.load(f).get('camera')
+        if not c:
+            return None
+        return cls.from_dict(c, base_dir=os.path.dirname(os.path.abspath(str(path))), load_maps=load_maps)
 
     def to_dict(self):
         out = {}

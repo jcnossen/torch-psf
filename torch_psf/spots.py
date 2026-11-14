@@ -8,6 +8,7 @@ import dataclasses
 from typing import Optional
 import numpy as np
 import torch
+from scipy.spatial import cKDTree
 from torch_psf.detect import detect_spots
 from torch_psf.movie import open_movie
 from torch_psf.config import resolve_device
@@ -109,7 +110,6 @@ def link_tracks(frame, x, y, max_dist=0.8, max_gap=1, min_len=6, isolation=7.0):
     """Link localizations (numpy arrays frame, x, y; image px) over consecutive frames (gaps up to max_gap frames) into
     tracks; keep tracks spanning >= min_len frames with no other localization within `isolation` px of the track mean
     in the track frames +- 1. Returns a list of index arrays (into the inputs, in frame order)."""
-    from scipy.spatial import cKDTree
     f = np.asarray(frame).astype(np.int64)
     xy = np.stack([np.asarray(x), np.asarray(y)], 1).astype(np.float64)
     o = np.argsort(f, kind='stable')

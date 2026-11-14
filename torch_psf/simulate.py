@@ -5,7 +5,8 @@ lambda p: vec.forward_batched(p, focus)); for bead stacks render(pos, focus [n])
 All random numbers come from the given torch.Generator (reproducible)."""
 import math
 import torch
-from torch_psf.config import resolve_device
+from torch_psf.config import Optics, Camera, resolve_device
+from torch_psf.vectorial import VectorialPSF
 
 
 def _gen(generator, device, seed):
@@ -153,8 +154,6 @@ def simulate_reference_movie(psf='astigmatic', T=200, H=64, W=64, emitters_per_f
     adu = round(photons / gain + offset + N(0, readnoise_e / gain)) clipped to 0..65535.
     Returns dict(movie_adu [T, H, W] uint16 numpy, truth [n, 6] numpy = (frame, x px, y px, z um, photons, site),
     psf (the VectorialPSF), camera (Camera), params (dict of the settings))."""
-    from torch_psf.vectorial import VectorialPSF
-    from torch_psf.config import Optics, Camera
     device = resolve_device(device)
     if isinstance(psf, str):
         pr = PRESETS[psf]

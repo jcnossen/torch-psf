@@ -13,6 +13,11 @@ import json
 import sys
 import numpy as np
 import torch
+from torch_psf.config import Optics, Camera
+from torch_psf.psf import PSF
+from torch_psf.vectorial import VectorialPSF
+from torch_psf.estimators import ZStackEstimator, InSituEstimator
+from torch_psf.viewer import serve
 
 
 def _optics_args(p):
@@ -37,17 +42,14 @@ def _common(p):
 
 
 def _camera(a):
-    from torch_psf.config import Camera
-    from torch_psf.io import load_camera
     if a.camera:
-        return load_camera(a.camera)
+        return Camera.from_json(a.camera)
     if a.gain is not None or a.offset is not None:
         return Camera(gain_e_per_adu=a.gain or 1.0, offset_adu=a.offset or 0.0, readnoise_e=a.readnoise)
     return None
 
 
 def _optics(a):
-    from torch_psf.config import Optics
     return Optics(pixel_um=a.pixel_um, NA=a.na, wavelength_um=a.wavelength_um, n_imm=a.n_imm, n_med=a.n_med)
 
 
@@ -132,7 +134,6 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
     if a.cmd == 'beads':
-        from torch_psf.estimators import ZStackEstimator
         est = ZStackEstimator(a.model, start=a.psf, optics=_optics(a), camera=_camera(a), roisize=a.roisize,
                               sign=a.sign, nbeads=a.nbeads, iters=a.iters, holdout=a.holdout, device=a.device,
                               progress=_progress)
@@ -140,7 +141,6 @@ def main(argv=None):
         psf.save(a.out, camera=_camera(a), provenance=dict(report=_jsonable(est.report)))
         _print_report(est)
     elif a.cmd == 'insitu':
-        from torch_psf.estimators import InSituEstimator
         est = InSituEstimator(start=a.psf, optics=_optics(a), camera=_camera(a), focus_um=a.focus_um,
                               roisize=a.roisize, z_range=tuple(a.z_range), nspots=a.nspots, method=a.method,
                               iters=a.iters, threshold=a.threshold, isolation=a.isolation, refine=a.refine,
@@ -149,8 +149,6 @@ def main(argv=None):
         psf.save(a.out, camera=_camera(a), provenance=dict(report=_jsonable(est.report)))
         _print_report(est)
     elif a.cmd == 'localize':
-        from torch_psf.psf import PSF
-        from torch_psf.vectorial import VectorialPSF
         psf = PSF.load(a.psf, roisize=a.roisize, device=a.device)
         if isinstance(psf, VectorialPSF):
             psf = psf.to_spline(psf.roisize, tuple(a.z_range) if a.z_range else None)
@@ -162,7 +160,6 @@ def main(argv=None):
         L.save(a.out)
         print(f'{len(L)} localizations -> {a.out}')
     elif a.cmd == 'view':
-        from torch_psf.viewer import serve
         serve(a.psf, port=a.port, device=a.device, open_browser=not a.no_browser)
     return 0
 

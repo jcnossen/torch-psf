@@ -55,6 +55,7 @@ def stage_scan_pos_fn(focus0_um, scale, emitter_z=0.0):
 
 
 class CubicSplinePSF(PSF):
+    type_name = 'spline'
     """Spline PSF for roisize x roisize patches (odd or even roisize) and emitter heights z_range = (lo, hi) um.
 
     oversample: knots per px laterally; dz_um: knot spacing in z (um); zpad: extra knot planes below and above
@@ -276,6 +277,30 @@ class CubicSplinePSF(PSF):
             zs = zs / zs.sum((1, 2), keepdim=True)
         return cls(roisize, (z0, z0 + (nz - 1) * hz), oversample=1, dz_um=hz, zpad=0, xy_limit=xmax, device=zs.device,
                    knots=zs.contiguous(), pixel_um=pixel_um)
+
+    def _file_dict(self, source=None):
+        d, arrays = {}, {}
+        if source is not None:
+            d, arrays = source._file_dict()
+        d['spline'] = self.to_dict()
+        arrays['knots'] = self.knots.detach().cpu().numpy()
+        return d, arrays
+
+    @classmethod
+    def _from_file(cls, d, arrays, roisize=None, device=None, **kw):
+        g = d['spline']
+        px = g.get('pixel_um') or (d['optics'].get('pixel_um') if 'optics' in d else None)
+        return cls(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'],
+                   xy_limit=g['xy_limit'], device=device, knots=torch.as_tensor(arrays['knots']),
+                   knot_u0_px=g.get('u0_px'), knot_z0_um=g.get('z0_um'), pixel_um=px)
+
+    @staticmethod
+    def load_source(path, device=None):
+        """The vectorial model a saved spline was built from (save(..., source=...)), or None."""
+        d, arrays, _ = PSF.read_file(path)
+        if 'zernike_waves' not in d:
+            return None
+        return PSF._registry['vectorial']._from_file(d, arrays, roisize=d.get('roisize', 15), device=device)
 
     def to_dict(self):
         """Grid description (without the knots) for the PSF file."""

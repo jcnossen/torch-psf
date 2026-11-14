@@ -10,8 +10,18 @@ estimator.history (list of per-iteration records).
 """
 import time
 import numpy as np
+import tifffile
 import torch
+from scipy.ndimage import gaussian_filter, maximum_filter
 from torch_psf.config import Optics, Camera, resolve_device
+from torch_psf.fit import poisson_nll
+from torch_psf.psf import PSF
+from torch_psf.vectorial import VectorialPSF
+from torch_psf.spline import CubicSplinePSF, stage_scan_pos_fn
+from torch_psf.gaussian import AstigmaticGaussianPSF
+from torch_psf.spots import extract_spots
+from torch_psf.insitu import (fit_beads, stage_focus, fit_zernike_knots, fit_pupil_knots, fit_free_knots,
+                              split_checkerboard, compare_heldout, spot_deviance, z_scale, FREE_KNOT_WARNING)
 
 
 def _camera(camera):
@@ -19,14 +29,11 @@ def _camera(camera):
         return camera
     if isinstance(camera, dict):
         return Camera.from_dict(camera)
-    from torch_psf.io import load_camera
-    return load_camera(camera)
+    return Camera.from_json(camera)
 
 
 def _start_vectorial(start, optics, roisize, device, zernike_indices=tuple(range(5, 22)), npupil=64, oversample=3):
     """Starting VectorialPSF: start (VectorialPSF or PSF file), else optics (Optics / dict / None = defaults)."""
-    from torch_psf.vectorial import VectorialPSF
-    from torch_psf.psf import PSF
     if start is not None and not isinstance(start, PSF):
         start = PSF.load(start, roisize=roisize, device=device)
     if start is not None:
@@ -42,7 +49,6 @@ def find_beads(stack, roisize, nmax=32, min_sep=None, sigma=2.0, border=None):
     """Bright isolated beads in a z-stack [nk, H, W] (any units): maxima of the blurred maximum projection, at least
     min_sep (default roisize) px from each other and roisize / 2 + 1 px from the border, brightest first.
     Returns corners [n, 2] = (x0, y0) of roisize x roisize ROIs centred on them (numpy int)."""
-    from scipy.ndimage import gaussian_filter, maximum_filter
     mp = gaussian_filter(np.asarray(stack, np.float32).max(0), sigma)
     mp = mp - np.median(mp)
     h = roisize // 2
@@ -135,7 +141,6 @@ class ZStackEstimator(Estimator):
         self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
 
     def _rois(self, stacks):
-        import tifffile
         rois, sid = [], []
         ii = torch.arange(self.roisize, device=self.dev)
         for i, s in enumerate(stacks):
@@ -152,8 +157,6 @@ class ZStackEstimator(Estimator):
 
     def estimate(self, stacks, dz_um):
         """stacks: list of [nk, H, W] arrays or TIFF paths (one bead field each, the same nk). Returns the PSF."""
-        from torch_psf.insitu.beads import fit_beads, stage_focus
-        from torch_psf.fit import poisson_nll
         self._reset()
         if isinstance(stacks, (str, np.ndarray)) or torch.is_tensor(stacks):
             stacks = [stacks]
@@ -190,8 +193,6 @@ class ZStackEstimator(Estimator):
 
     def _fit_spline(self, vec, d, focus, sid):
         """knots fitted to the bead stacks (z = -focus), starting from and regularised towards the vectorial fit"""
-        from torch_psf.spline import stage_scan_pos_fn
-        from torch_psf.insitu.knots import fit_free_knots
         zlo, zhi = float(-focus.max()), float(-focus.min())
         dz = self.spline_dz_um or max(abs(float(focus[1] - focus[0])), 0.02)
         spl = vec.to_spline(self.roisize, (zlo + dz, zhi - dz), oversample=self.oversample, dz_um=dz, zpad=2,
@@ -211,8 +212,6 @@ class ZStackEstimator(Estimator):
     def _fit_astig(self, d, focus, w):
         """Poisson fit of the astigmatic Gaussian curves (sx0, sy0, gamma, d) with per-bead xy and per-plane
         photons / bg; z = -focus."""
-        from torch_psf.gaussian import AstigmaticGaussianPSF
-        from torch_psf.fit import poisson_nll
         nb, nk, P = d.shape[0], d.shape[1], d.shape[-1]
         o = Optics.from_dict(self.optics) if isinstance(self.optics, dict) else (self.optics or Optics())
         s0 = 0.21 * o.wavelength_um / o.NA / o.pixel_um * 1.1
@@ -283,17 +282,12 @@ class InSituEstimator(Estimator):
         self.threshold, self.isolation, self.tile, self.detect_kw = threshold, isolation, tile, detect_kw
 
     def _fit(self, spline, rois, vec, iters, stage):
-        from torch_psf.insitu import fit_zernike_knots, fit_pupil_knots
         fn = fit_zernike_knots if self.method == 'zernike' else fit_pupil_knots
         if self.method not in ('zernike', 'pupil'):
             raise ValueError(self.method)
         return fn(spline, rois, vec, iters=iters, log=self._log(stage), stop=self.stop)
 
     def estimate(self, movie, frames=None):
-        from torch_psf.spline import CubicSplinePSF
-        from torch_psf.spots import extract_spots
-        from torch_psf.insitu import (split_checkerboard, compare_heldout, spot_deviance, fit_free_knots, z_scale,
-                                      FREE_KNOT_WARNING, limit_fraction)
         self._reset()
         R, zr = self.roisize, self.z_range
         vec0 = _start_vectorial(self.start, self.optics, R, self.dev)

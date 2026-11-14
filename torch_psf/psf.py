@@ -7,9 +7,23 @@ the conversion to a cubic-spline model.
 
 Parameter vector of an emitter: theta = (x px, y px, z um, photons, bg photons / px), x, y relative to the ROI centre
 (pixel centres at integers, x = column, y = row). 2D models (z_range None) keep z fixed (any value).
+
+Files: every subclass sets the class attribute type_name (its psf.json `type`) and is registered when its class is
+defined (PSF.__init_subclass__); PSF.load looks the type up in that registry, so this module never imports its
+subclasses. Importing torch_psf (also implicitly, e.g. `import torch_psf.psf`, which runs the package __init__ first)
+registers all of them.
 """
+import json
+import os
 import numpy as np
 import torch
+from torch_psf.config import Camera
+from torch_psf.fit import fisher, crlb, localize, at_limit
+from torch_psf.movie import open_movie
+from torch_psf.spots import Spots, extract_spots
+from torch_psf.dataset import Dataset
+
+FORMAT, VERSION = 'torch-psf', '0.1.0'
 
 
 class PSF:
@@ -17,9 +31,17 @@ class PSF:
     self.dev (torch.device) and implement render(pos, grad=False); they may override xy_limit, z_limits, resized and
     to."""
     roisize: int
+    type_name = None         # psf.json `type` of the subclass
+    _registry = {}           # type_name -> class
     z_range = None
     pixel_um = None          # lateral pixel size (um); needed to express z in px when fitting a 3D model
     dev = torch.device('cpu')
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        name = cls.__dict__.get('type_name')
+        if name:
+            PSF._registry[name] = cls
 
     # ------------------------------------------------------------------ the model
     def render(self, pos, grad=False):
@@ -73,14 +95,12 @@ class PSF:
     def fisher(self, theta, var=None):
         """Poisson Fisher information [N, p, p] at theta [N, 5] (p = 5, or 4 without z for 2D models: x, y, photons,
         bg). var: sCMOS read-noise variance (e^2; scalar or [N, P, P])."""
-        from torch_psf.fit import fisher
         params = (0, 1, 2, 3, 4) if self.n_dims == 3 else (0, 1, 3, 4)
         return fisher(self, torch.as_tensor(theta, dtype=torch.float32, device=self.dev), var, None, params)
 
     def crlb(self, theta, var=None):
         """Cramer-Rao lower bound (standard deviation) [N, 5] of (x px, y px, z um, photons, bg) at theta [N, 5]; the z
         column is NaN for 2D models."""
-        from torch_psf.fit import crlb
         return crlb(self, torch.as_tensor(theta, dtype=torch.float32, device=self.dev), var)
 
     # ------------------------------------------------------------------ fitting
@@ -97,9 +117,6 @@ class PSF:
         pixel_um, default the model's pixel_um; a 3D model without a pixel size raises ValueError),
         crlb [N, D] (same units), photons, bg, crlb_photons, crlb_bg, loglik (= -NLL, Poisson, constant dropped),
         chi2 (mean of (d - mu)^2 / (mu + var) per pixel), at_limit (x or y at the offset limit)."""
-        from torch_psf.fit import localize, crlb, at_limit
-        from torch_psf.spots import Spots
-        from torch_psf.dataset import Dataset
         if isinstance(rois, Spots):
             corners = rois.corner if corners is None else corners
             frames = rois.frame if frames is None else frames
@@ -154,13 +171,8 @@ class PSF:
         progress(frames_done, frames_total, n_locs), stop() -> bool: callbacks. detect_kw: detect_spots options
         (sigma, nms, noise, isolation, median). Returns a Dataset (image coordinates; ids 0..n-1; meta image_size,
         n_frames)."""
-        from torch_psf.movie import open_movie
-        from torch_psf.spots import extract_spots
-        from torch_psf.config import Camera
-        from torch_psf.dataset import Dataset
         if camera is not None and not isinstance(camera, Camera):
-            from torch_psf.io import load_camera
-            camera = load_camera(camera)
+            camera = Camera.from_json(camera)
         mv = open_movie(movie)
         f0, f1 = (0, mv.n) if frames is None else frames
         out = []
@@ -183,25 +195,71 @@ class PSF:
         return ds
 
     # ------------------------------------------------------------------ files
+    def _file_dict(self, source=None):
+        """(json dict without format / version / type, {name: array} for the .npz) of this model; subclasses."""
+        raise NotImplementedError
+
+    @classmethod
+    def _from_file(cls, d, arrays, roisize=None, device=None, **kw):
+        """The model from a parsed PSF json d and its arrays; subclasses."""
+        raise NotImplementedError
+
     def save(self, path, camera=None, provenance=None, source=None):
-        """Write the model to a PSF json (plus an .npz next to it for arrays); see torch_psf.io."""
-        from torch_psf.io import save
-        return save(path, self, source=source, camera=camera, provenance=provenance)
+        """Write the model to a PSF json (format 'torch-psf': type, optics, model parameters; see the subclass) plus an
+        .npz next to it when there are arrays (pupil maps, knots). source: for a spline, the vectorial model it was
+        built from (its parameters are stored too). camera: optional Camera. Returns the json dict."""
+        d, arrays = self._file_dict(source)
+        d = dict(format=FORMAT, version=VERSION, type=self.type_name, **d)
+        if camera is not None:
+            d['camera'] = camera.to_dict()
+        d['provenance'] = provenance or {}
+        path = str(path)
+        if arrays:
+            npz = os.path.splitext(path)[0] + '.npz'
+            np.savez(npz, **arrays)
+            d['arrays'] = os.path.basename(npz)
+        with open(path, 'w') as f:
+            json.dump(d, f, indent=1)
+        return d
+
+    @staticmethod
+    def read_file(path):
+        """(parsed json, arrays or None, type name) of a PSF json or a plain calibration json (path or parsed dict;
+        array files of a dict are resolved against the current directory)."""
+        if isinstance(path, dict):
+            d, base = path, '.'
+        else:
+            path = str(path)
+            with open(path) as f:
+                d = json.load(f)
+            base = os.path.dirname(path)
+        arrays = dict(np.load(os.path.join(base, d['arrays']))) if d.get('arrays') else None
+        if d.get('format') == FORMAT:
+            typ = d.get('type', 'vectorial')
+        else:                    # plain calibration json: vectorial, or a 2D Gaussian with psf_gauss_sigma_um
+            typ = 'gaussian' if d.get('psf_gauss_sigma_um') is not None else 'vectorial'
+        return d, arrays, typ
 
     @staticmethod
     def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
         """Read a PSF json (type 'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian') or a plain calibration json and
         return the model of that type; path may also be the parsed dict (array files are then resolved against the
-        current directory). See torch_psf.io.load."""
-        from torch_psf.io import load
-        return load(path, roisize=roisize, device=device, angle=angle, npupil=npupil, oversample=oversample)
+        current directory). roisize: for vectorial / Gaussian models (default: the stored one, or 15 for a
+        calibration json). angle: for calibrations with per-pattern-angle PSF terms: 0 / 1 = that angle, None = the
+        average. npupil / oversample override the stored pupil sampling of a vectorial model. A calibration with
+        psf_gauss_sigma_um gives a GaussianPSF (sigma = psf_gauss_sigma_um / pixel size)."""
+        d, arrays, typ = PSF.read_file(path)
+        if typ not in PSF._registry:
+            raise ValueError(f'unknown PSF type {typ!r} (known: {sorted(PSF._registry)})')
+        return PSF._registry[typ]._from_file(d, arrays, roisize=roisize, device=device, angle=angle, npupil=npupil,
+                                             oversample=oversample)
 
     # ------------------------------------------------------------------ cubic spline
     def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8):
         """Tabulate the model as a CubicSplinePSF for roisize x roisize ROIs over z_range (um; default the model's
         z range): knots every 1/oversample px and dz_um um, offsets up to xy_limit px. The model is rendered on the
         larger ROI the knots need, at oversample x oversample sub-pixel shifts."""
-        from torch_psf.spline import CubicSplinePSF
+        CubicSplinePSF = PSF._registry['spline']
         if self.n_dims == 2 and z_range is None:
             raise ValueError('a 2D model has no z range: pass z_range (the spline is then constant in z)')
         zr = self.z_range if z_range is None else z_range

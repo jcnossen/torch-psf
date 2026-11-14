@@ -42,6 +42,18 @@ class _GaussianBase(PSF):
 class GaussianPSF(_GaussianBase):
     """2D pixel-integrated Gaussian: roisize x roisize ROIs, width sigma_px (px; a float or (sx, sy)). z is ignored
     (z_range None, n_dims 2)."""
+    type_name = 'gaussian'
+
+    def _file_dict(self, source=None):
+        return dict(gaussian=dict(sigma_px=list(self.sigma), pixel_um=self.pixel_um), roisize=self.roisize), {}
+
+    @classmethod
+    def _from_file(cls, d, arrays, roisize=None, device=None, **kw):
+        if 'gaussian' not in d:            # plain calibration json: psf_gauss_sigma_um, pixelsize_um
+            px = float(d['pixelsize_um'])
+            return cls(roisize or 15, sigma_px=float(d['psf_gauss_sigma_um']) / px, device=device, pixel_um=px)
+        return cls(roisize or d.get('roisize', 15), sigma_px=tuple(d['gaussian']['sigma_px']), device=device,
+                   pixel_um=d['gaussian'].get('pixel_um'))
 
     def __init__(self, roisize, sigma_px=1.3, device=None, pixel_um=None):
         self.roisize = roisize
@@ -71,6 +83,17 @@ class AstigmaticGaussianPSF(_GaussianBase):
     """3D astigmatic Gaussian: in-focus widths sigma_px = (sx0, sy0) (px), the x and y foci at z = +gamma_um and
     -gamma_um, depth of focus d_um; valid over z_range (um). pixel_um: lateral pixel size (um), required by fit /
     localize (z is stored in px)."""
+    type_name = 'astig_gaussian'
+
+    def _file_dict(self, source=None):
+        return dict(gaussian=dict(sigma_px=list(self.sigma), gamma_um=self.gamma, d_um=self.d,
+                                  z_range_um=list(self.z_range), pixel_um=self.pixel_um), roisize=self.roisize), {}
+
+    @classmethod
+    def _from_file(cls, d, arrays, roisize=None, device=None, **kw):
+        g = d['gaussian']
+        return cls(roisize or d.get('roisize', 15), sigma_px=tuple(g['sigma_px']), gamma_um=g['gamma_um'],
+                   d_um=g['d_um'], z_range=tuple(g['z_range_um']), device=device, pixel_um=g.get('pixel_um'))
 
     def __init__(self, roisize, sigma_px=(1.3, 1.3), gamma_um=0.2, d_um=0.4, z_range=(-0.5, 0.5), device=None,
                  pixel_um=None):

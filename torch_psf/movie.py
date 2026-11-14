@@ -12,12 +12,12 @@
 """
 import os
 import numpy as np
+import tifffile
 
 
 class TiffMovie:
     """Absolute-frame access to movie.tif + movie_X1.tif + ... (also a single TIFF)."""
     def __init__(self, path):
-        import tifffile
         path = str(path)
         self.parts = [path] + [path.replace('.tif', f'_X{i}.tif') for i in range(1, 10)
                                if os.path.exists(path.replace('.tif', f'_X{i}.tif'))]

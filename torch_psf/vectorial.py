@@ -25,10 +25,20 @@ z_range, xy_limit) and copy / resize helpers.
 """
 import copy
 import math
+import numpy as np
 import torch
 from torch_psf.zernike import zernike
 from torch_psf.config import default_device, Optics
 from torch_psf.psf import PSF
+from torch_psf.spline import CubicSplinePSF
+
+
+def _list(v):
+    if v is None:
+        return None
+    if torch.is_tensor(v):
+        return v.detach().cpu().tolist()
+    return np.asarray(v).tolist()
 
 
 def gauss_blur_os(I, cov, os_, pad):
@@ -86,6 +96,7 @@ class VectorialPSF(torch.nn.Module, PSF):
     diattenuation), dipM (3 x 3 dipole tensor) or dipw (its diagonal, mean 1); None = not applied.
     """
     BLUR_PAD = 3   # px of padding per side for the image-plane blur (kernel sd <~ 0.7 px)
+    type_name = 'vectorial'
 
     def __init__(self, roisize, pixel_um=0.10833, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68,
                  zernike_indices=tuple(range(5, 22)), npupil=64, oversample=3, device=None, fit_NA=False,
@@ -270,7 +281,6 @@ class VectorialPSF(torch.nn.Module, PSF):
                   pos_fn=None):
         """CubicSplinePSF of this model (see PSF.to_spline). pos_fn: knot z -> (emitter z, focus) (default: the
         emitter height at self.focus_um; e.g. spline.stage_scan_pos_fn for a bead-stack geometry)."""
-        from torch_psf.spline import CubicSplinePSF
         zr = self.z_range if z_range is None else z_range
         spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
                                  xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
@@ -294,6 +304,64 @@ class VectorialPSF(torch.nn.Module, PSF):
         return (f'VectorialPSF(roisize={self.roisize}, pixel_um={self.pixel_um}, NA={float(self.NA):.3f}, '
                 f'n_imm={self.n_imm}, n_med={float(self.n_med):.3f}, wavelength_um={self.wavelength_um}, '
                 f'npupil={self.npupil}, oversample={self.os}, focus_um={self.focus_um})')
+
+    # ------------------------------------------------------------------ files
+    def _file_dict(self, source=None):
+        o = self.optics
+        d = dict(optics=o.to_dict(), zernike_noll=list(self.zidx), zernike_waves=_list(self.zcoef),
+                 apod=_list(self.apod), saf=_list(self.saf), focus_um=self.focus_um, psf_blur_px2=_list(self.blur),
+                 psf_dipole_M=_list(self.dipM), diattenuation=None if self.diat is None else float(self.diat),
+                 npupil=self.npupil, oversample=self.os, roisize=self.roisize,
+                 z_range_um=None if self.z_range is None else list(self.z_range))
+        if self.dipw is not None:
+            d['psf_dipole_w'] = _list(self.dipw)
+        d.update(pixelsize_um=o.pixel_um, wavelength_um=o.wavelength_um, NA=o.NA, n_imm=o.n_imm, n_med=o.n_med)
+        arrays = {}
+        if bool((self.pupil_phase != 0).any()):
+            arrays['pupil_phase'] = self.pupil_phase.detach().cpu().numpy()
+        if bool((self.pupil_amp != 1).any()):
+            arrays['pupil_amp'] = self.pupil_amp.detach().cpu().numpy()
+        return d, arrays
+
+    @classmethod
+    def _from_file(cls, d, arrays, roisize=None, device=None, angle=None, npupil=None, oversample=None, **kw):
+        """From a torch-psf json or a plain calibration json (the optics and Zernikes at the top level; optional terms
+        psf_blur_px2, psf_dipole_M, psf_dipole_w, diattenuation, and per illumination angle psf_dipole_M_angle /
+        psf_blur_angle_px2: angle 0 / 1 = that angle, None = the average)."""
+        o = Optics.from_dict(d['optics'] if 'optics' in d else d)
+        zr = d.get('z_range_um')
+        vec = cls(roisize or d.get('roisize', 15), zernike_indices=tuple(d.get('zernike_noll', range(5, 22))),
+                  npupil=npupil or d.get('npupil', 64), oversample=oversample or d.get('oversample', 3), device=device,
+                  focus_um=float(d.get('focus_um', 0.0) or 0.0), z_range=tuple(zr) if zr else (0.0, 1.0),
+                  **o.vectorial_kwargs())
+        t = lambda v: torch.tensor(v, device=vec.dev, dtype=torch.float32)
+        with torch.no_grad():
+            if d.get('zernike_waves') is not None:
+                vec.zcoef.copy_(t(d['zernike_waves']))
+            if d.get('apod') is not None:
+                vec.apod.copy_(t(d['apod']))
+            if d.get('saf') is not None:
+                vec.saf.copy_(t(d['saf']))
+            if arrays is not None:
+                if 'pupil_phase' in arrays:
+                    vec.pupil_phase.copy_(t(arrays['pupil_phase']))
+                if 'pupil_amp' in arrays:
+                    vec.pupil_amp.copy_(t(arrays['pupil_amp']))
+        if d.get('psf_blur_px2') is not None:
+            vec.blur = t([float(v) for v in d['psf_blur_px2']])
+        if d.get('psf_dipole_M') is not None:
+            vec.dipM = t(d['psf_dipole_M'])
+        if d.get('psf_dipole_w') is not None:
+            vec.dipw = t(d['psf_dipole_w'])
+        if d.get('psf_dipole_M_angle') is not None:
+            M = t(d['psf_dipole_M_angle'])
+            vec.dipM = M.mean(0) if angle is None else M[angle]
+        if d.get('psf_blur_angle_px2') is not None:
+            Bc = t(d['psf_blur_angle_px2'])
+            vec.blur = Bc.mean(0) if angle is None else Bc[angle]
+        if d.get('diattenuation') is not None:
+            vec.diat = float(d['diattenuation'])
+        return vec
 
     # ------------------------------------------------------------------ copies
     @classmethod
