@@ -126,7 +126,6 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     heldout = { start: a, fitted: b, diff: b - a };
     if (refine) { refine.heldout_refined = await nllPx(refine.knots!); refine.kept = refine.heldout_refined < b; }
   }
-  if (refine && !refine.kept) refine.knots = null;
   return { zcoef: fit.zcoef, zcoef_start: [...form.zcoef], noll: form.noll, iterations: history.length, partial,
     seconds: (performance.now() - tFit0) / 1000,
     n_spots: n, n_train: tr.length, n_test: te.length, n_rejected: nRej, deviance_threshold: thr, frames_read: done, frames_total: mv.n, heldout,

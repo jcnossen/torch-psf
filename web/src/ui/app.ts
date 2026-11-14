@@ -89,7 +89,7 @@ export function startApp(root: HTMLElement) {
   const fillPresets = () => {
     const v = sel.value;
     sel.innerHTML = PRESETS.map((p) => `<option value="${p.name}">${p.label}</option>`).join('') +
-      `<option value="insitu" ${insitu ? '' : 'disabled'}>In-situ estimate</option><option value="refined" ${insitu?.refine?.knots ? '' : 'disabled'}>In-situ refined spline</option><option value="fit" ${fitResult ? '' : 'disabled'}>Bead fit result</option>`;
+      `<option value="insitu" ${insitu ? '' : 'disabled'}>In-situ estimate</option><option value="refined" ${insitu?.refine?.knots ? '' : 'disabled'}>In-situ refined spline${insitu?.refine && !insitu.refine.kept ? ' (not kept)' : ''}</option><option value="fit" ${fitResult ? '' : 'disabled'}>Bead fit result</option>`;
     if (v) sel.value = v;
   };
   fillPresets();
@@ -286,7 +286,7 @@ export function startApp(root: HTMLElement) {
 
   // --- the one button: Estimate PSF (then localize the movie with it)
   let startZ: number[] | null = null;
-  onInsitu = (r) => { insitu = r; fillPresets(); showInsitu(r); if (r.refine?.knots) showRefinedVolume(); else showInsituVolume(); };
+  onInsitu = (r) => { insitu = r; fillPresets(); showInsitu(r); if (r.refine?.kept) showRefinedVolume(); else showInsituVolume(); };
   async function runMovie(kind: 'estimate' | 'localize') {
     if (!player) { $('mtext').textContent = 'No movie yet.'; return; }
     const psf = kind === 'localize' && psfSel.value === 'guess' && insitu ? { noll: insitu.noll, zcoef: insitu.zcoef } : startPsf();
@@ -331,7 +331,8 @@ export function startApp(root: HTMLElement) {
     const g = splineGrid(n('m-roi'), n('m-zlo'), n('m-zhi'), 2, 0.04, r.grid.zpad, 3.0);
     const spec: VolumeSpec = { optics: optics(), npupil: 64, noll: r.noll, zcoef: r.zcoef, nxy: g.nu, dxy_um: n('o-px') / g.S, zmin: g.z0, zmax: g.z0 + (g.nz - 1) * g.hz, nz: g.nz, ze_um: 0, focus_um: n('m-focus') };
     sel.value = 'refined';
-    setVolume(K, spec, `In-situ refined spline: free knots regularised towards the vectorial fit (kept: held-out NLL better). The knots themselves, ` +
+    const kept = r.refine!.kept;
+    setVolume(K, spec, `In-situ refined spline: free knots regularised towards the vectorial fit; ${kept ? 'kept (held-out NLL better than the vectorial fit; the movie was localized with it)' : 'NOT kept: it explains the held-out spots worse than the vectorial fit, so the movie was localized with the vectorial PSF'}. The knots themselves, ` +
       `every ${(1000 * n('o-px') / g.S).toFixed(0)} nm laterally and ${(1000 * g.hz).toFixed(0)} nm in z. ${FREE_KNOT_WARNING}.`);
   }
   function showInsitu(r: InsituReport) {
@@ -348,7 +349,7 @@ export function startApp(root: HTMLElement) {
       const f = r.refine;
       rows.push(['spline refinement', `${f.kept ? 'kept' : 'not kept'}: held-out NLL / px ${f.heldout_refined === null ? 'n/a' : (f.heldout_refined - (r.heldout?.start ?? 0)).toFixed(4)} vs start ` +
         `(vectorial ${r.heldout ? r.heldout.diff.toFixed(4) : 'n/a'}); z scale vs vectorial ${f.z_scale_vs_vectorial.toFixed(3)}; ${f.outer} outer iterations, ${f.seconds.toFixed(1)} s` +
-        (f.kept ? '. The movie is localized with the refined spline. ' + FREE_KNOT_WARNING : '')]);
+        (f.kept ? '. The movie is localized with the refined spline. ' + FREE_KNOT_WARNING : '. The refined spline can still be viewed: PSF menu, "In-situ refined spline (not kept)".')]);
     }
     if (truthZ) {
       const t = DEFAULT_NOLL.map((j) => truthZ![j] ?? 0);
@@ -543,17 +544,25 @@ const TEMPLATE = `
 <div id="nogpu" class="warn" hidden></div>
 <main>
   <div class="col">
-  <details class="panel" data-key="view" open><summary><h2>3D PSF</h2></summary>
+  <details class="panel" data-key="view" open><summary><h2>PSF</h2></summary>
     <div class="bar">
       <label>PSF <select id="preset"></select></label>
       <label>z exaggeration <input id="zexag" type="range" min="0.25" max="4" step="0.25" value="1"><span id="zexag-v">1.0</span></label>
       <label>log decades <input id="decades" type="number" min="1" max="6" value="3" style="width:3em"></label>
     </div>
-    <div id="view3d"></div>
+    <div class="psfbox">
+      <div id="view3d"></div>
+      <div class="sections">
+        <figure><canvas id="sec-xy" width="200" height="200"></canvas><figcaption>xy</figcaption></figure>
+        <figure><canvas id="sec-xz" width="200" height="200"></canvas><figcaption>xz</figcaption></figure>
+        <figure><canvas id="sec-yz" width="200" height="200"></canvas><figcaption>yz</figcaption></figure>
+      </div>
+    </div>
     <div class="bar">slice planes (or drag them): <label>x <input id="sx" type="range" min="0" max="100" step="0.1" value="50"></label>
       <label>y <input id="sy" type="range" min="0" max="100" step="0.1" value="50"></label>
       <label>z <input id="sz" type="range" min="0" max="100" step="0.1" value="50"></label></div>
     <p id="preset-note" class="note"></p>
+    <p id="sec-label" class="note"></p>
   </details>
   <details class="panel" data-key="movie" open id="p-movie"><summary><h2>Movie</h2></summary>
     <canvas id="movie" width="384" height="384"></canvas>
@@ -569,14 +578,6 @@ const TEMPLATE = `
     <div class="recon-wrap"><canvas id="recon" width="10" height="10"></canvas></div>
     <p id="r-label" class="note"></p>
     <table id="l-table"></table>
-  </details>
-  <details class="panel" data-key="sections"><summary><h2>PSF sections</h2></summary>
-    <div class="panels">
-      <figure><canvas id="sec-xy" width="200" height="200"></canvas><figcaption>xy</figcaption></figure>
-      <figure><canvas id="sec-xz" width="200" height="200"></canvas><figcaption>xz</figcaption></figure>
-      <figure><canvas id="sec-yz" width="200" height="200"></canvas><figcaption>yz</figcaption></figure>
-    </div>
-    <p id="sec-label" class="note"></p>
   </details>
   </div>
   <div class="col">

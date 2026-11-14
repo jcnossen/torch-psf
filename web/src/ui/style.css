@@ -16,7 +16,12 @@ main { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(330px, 1fr
 .panel[open] > summary::before { transform: rotate(90deg); }
 .panel > summary h2 { margin: 0; }
 .panel[open] > summary { margin-bottom: 10px; }
-#view3d { width: 100%; height: min(470px, 62vh); border-radius: 6px; overflow: hidden; background: #14161c; touch-action: none; }
+#view3d { flex: 1 1 auto; min-width: 0; height: min(340px, 50vh); border-radius: 6px; overflow: hidden; background: #14161c; touch-action: none; }
+.psfbox { display: flex; gap: 8px; align-items: flex-start; }
+.sections { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+.sections figure { margin: 0; } .sections figcaption { font-size: 11px; line-height: 1.1; }
+.sections canvas { width: 96px; height: 96px; }
+@media (max-width: 600px) { .psfbox { flex-direction: column; } #view3d { width: 100%; flex: none; } .sections { flex-direction: row; } .sections canvas { width: 28vw; height: 28vw; } }
 .modes { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 4px 0 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }
 .modes label { font-weight: 600; }
 .recon-wrap { overflow: auto; max-height: 75vh; background: #000; border-radius: 4px; }
@@ -27,7 +32,6 @@ main { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(330px, 1fr
 .panels { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 figure { margin: 0; text-align: center; } figcaption { color: var(--dim); font-size: 12px; }
 canvas { background: #0b0c10; border-radius: 4px; display: block; }
-#sec-xy, #sec-xz, #sec-yz { width: 190px; height: 190px; }
 .drop { border: 2px dashed #3a4150; border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
 .drop.over { border-color: var(--acc); background: #221d14; }
 .drop p { margin: 4px 0; font-size: 13px; }
@@ -35,7 +39,7 @@ canvas { background: #0b0c10; border-radius: 4px; display: block; }
 fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 0 0 8px; padding: 6px 10px; display: flex; flex-wrap: wrap; gap: 6px 12px; }
 legend { color: var(--dim); font-size: 12px; padding: 0 4px; }
 label { font-size: 13px; color: var(--fg); white-space: nowrap; }
-@media (max-width: 520px) { label { white-space: normal; } #sec-xy, #sec-xz, #sec-yz { width: 28vw; height: 28vw; } #zern { width: 100%; height: auto; } .bar input[type=range] { width: 90px; } button { padding: 8px 12px; } }
+@media (max-width: 520px) { label { white-space: normal; } #zern { width: 100%; height: auto; } .bar input[type=range] { width: 90px; } button { padding: 8px 12px; } }
 fieldset label input[type=number], .exp input { width: 5.2em; margin-left: 4px; }
 input, select, button { background: #0e1015; color: var(--fg); border: 1px solid #3a4150; border-radius: 4px; padding: 3px 5px; font: inherit; }
 button { padding: 6px 12px; cursor: pointer; } button:hover:not(:disabled) { border-color: var(--acc); }

@@ -190,7 +190,7 @@ ctx.onmessage = async (ev: MessageEvent<Req>) => {
       let summary = null;
       if (m.localize && token.signal !== 'abort') {
         token.signal = 'run';
-        summary = await localizeMovie(device, sourceOf(m.source), { ...m.form, zcoef: report.zcoef, zpad: 5, knots: report.refine?.knots ?? undefined }, token, (p) => progress(p),
+        summary = await localizeMovie(device, sourceOf(m.source), { ...m.form, zcoef: report.zcoef, zpad: 5, knots: report.refine?.kept ? report.refine.knots ?? undefined : undefined }, token, (p) => progress(p),
           (rows) => post({ type: 'locs', rows }, [rows.buffer]));
       }
       post({ id: m.id, type: 'result', report, summary });
