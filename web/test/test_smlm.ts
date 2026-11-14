@@ -198,7 +198,7 @@ test('insitu: whole estimate (movie -> spots -> split -> fit -> overlap rejectio
   return msg;
 });
 
-test('insitu: spot deviance per pixel = torch_psf insitu.spot_deviance (start spline)', async () => {
+test('insitu: spot deviance per pixel = torch_psf estimation.spot_deviance (start spline)', async () => {
   const z = await parseNpz(await fetchBuf('smlm/insitu_grad.npz'));
   const dz = await parseNpz(await fetchBuf('smlm/insitu_deviance.npz'));
   const { device } = await getDevice();

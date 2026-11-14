@@ -24,7 +24,7 @@ export interface LocResult {
   nll: Float32Array;     // [N]
   crlb: Float32Array;    // [N, 5]
   chi2: Float32Array;    // [N]
-  deviance: Float32Array; // [N] Poisson deviance per pixel (torch_psf.insitu.spot_deviance)
+  deviance: Float32Array; // [N] Poisson deviance per pixel (torch_psf.estimation.spot_deviance)
 }
 
 /** torch.quantile(x, q) with linear interpolation. */
@@ -111,7 +111,7 @@ export class SplineLocalizer {
     } finally { for (const b of [bR, bT, bO, bU, rb]) b.destroy(); }
   }
 
-  /** torch_psf.insitu.knot_gradient: d NLL / d knots [nz, nv, nu] at fixed theta [N, 5] summed over the ROIs, and the
+  /** torch_psf.estimation.knot_gradient: d NLL / d knots [nz, nv, nu] at fixed theta [N, 5] summed over the ROIs, and the
    *  total NLL (poisson_nll without var, constant dropped). */
   async knotGradient(rois: Float32Array, N: number, theta: Float32Array, rvar = 0): Promise<{ gK: Float32Array; nll: number }> {
     const g = this.g, P2 = g.roisize ** 2, nK = g.nz * g.nv * g.nu;

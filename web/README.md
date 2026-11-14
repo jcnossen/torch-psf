@@ -61,7 +61,7 @@ NLL gradient on the knots, one vector-Jacobian product to the Zernikes, Adam), t
 fitted PSF, the z scale relative to the start. As torch_psf's InSituEstimator, spots the single-emitter model does
 not explain (overlapping emitters; Poisson deviance per pixel above 1 + 3 sqrt(2 / P^2) after the first pass) are
 rejected and the fit is repeated from the first-pass result (3/4 of the iterations). Optional "spline refinement"
-(Advanced; InSituEstimator(refine=True), torch_psf.insitu.fit_free_knots): free spline knots regularised towards the
+(Advanced; InSituEstimator(refine=True), torch_psf.estimation.fit_free_knots): free spline knots regularised towards the
 fitted vectorial spline and smooth, alternating localization and a torch.optim.LBFGS (strong Wolfe) step on the knots,
 12 times; kept only if it improves the held-out NLL (then the movie is localized with it and the 3D view shows the
 knots), with its z scale relative to the vectorial fit and the warning that free knots can warp z. On the demo, which
@@ -158,7 +158,7 @@ checked in between.
 | in situ: knot gradient and Zernike gradient (VJP) vs torch_psf knot_gradient / vjp_vectorial (1850 ROIs) | rel. 4e-7 / 2e-6, NLL 1e-7 | 1e-3 |
 | in situ: fit_zernike_knots, 40 iterations on the torch_psf training ROIs | Zernikes 2e-6 w rms from torch_psf | 2e-3 w |
 | in situ: whole InSituEstimator (movie, spots, split, fit, overlap rejection, second pass, held-out, z scale) | same 4346 spots and split, same 92 rejected; Zernikes 3e-6 w rms; held-out NLL change and z scale identical to 4 digits | 2e-3 |
-| in situ: spot deviance per pixel vs insitu.spot_deviance (1850 spots) | max abs. diff 2e-5; no spot on the other side of the threshold | 1e-3 |
+| in situ: spot deviance per pixel vs estimation.spot_deviance (1850 spots) | max abs. diff 2e-5; no spot on the other side of the threshold | 1e-3 |
 | in situ: fit_free_knots (3 outer L-BFGS iterations from the vectorial spline, 1850 ROIs) | loss per outer within 2 of 3e7; knots 2.5e-4 of the peak from torch_psf (the refinement moves them 7e-2) | 0.1 x the change |
 | in situ: whole InSituEstimator(refine=True) | same decision (kept); held-out NLL/px refined - vectorial -3.47e-4 vs -3.52e-4; z scale vs vectorial 1.0003 (same) | 1e-4, 0.01 |
 

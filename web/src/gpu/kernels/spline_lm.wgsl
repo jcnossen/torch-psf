@@ -4,7 +4,7 @@
 // thread 0 does the 5 x 5 solve. Same damping schedule as lm_poisson: H + lam diag(H), lam x 0.3 after an accepted
 // step, x 5 after a rejected one (clamped to 1e-4 .. 1e6); theta clamped as clamp_theta (margin 0.05).
 // Output per spot: theta[5], nll, crlb[5] (at the final theta), chi2 (mean squared normalized residual), deviance per
-// pixel (torch_psf.insitu.spot_deviance: 2 sum(d log(d / mu) - (d - mu)) / P^2).
+// pixel (torch_psf.estimation.spot_deviance: 2 sum(d log(d / mu) - (d - mu)) / P^2).
 // Outside the knot z range z is clamped and d/dz is that of the spline at the clamped position (torch_psf >= the class
 // redesign: a fit that starts outside still sees a slope towards the inside).
 

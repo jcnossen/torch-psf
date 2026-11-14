@@ -1,4 +1,4 @@
-// In-situ PSF estimation from SMLM spots by the knot route: a port of torch_psf.insitu.fit_zernike_knots (route 'K')
+// In-situ PSF estimation from SMLM spots by the knot route: a port of torch_psf.estimation.fit_zernike_knots (route 'K')
 // and torch_psf.pipeline.estimate_psf_insitu. Per iteration: knots of the CubicSplinePSF from the vectorial model at
 // the current Zernikes (with the Zernike derivatives of every knot image, for the vector-Jacobian product), emitter
 // parameters by Levenberg-Marquardt on the spline (zstarts and 30 iterations the first time, 3 afterwards), the NLL
@@ -43,7 +43,7 @@ export async function knotsAndJacobian(dev: GPUDevice, cfg: VectorialConfig, zco
 
 export interface InsituIter { it: number; nll: number; seconds: number; zcoef: number[]; }
 
-/** torch_psf.insitu.fit_zernike_knots (route 'K') on ROIs [N, P, P] (photons). */
+/** torch_psf.estimation.fit_zernike_knots (route 'K') on ROIs [N, P, P] (photons). */
 export async function fitZernikeKnots(dev: GPUDevice, rois: Float32Array, N: number, cfg: VectorialConfig, zc0: number[], g: KnotGridFull,
   focus_um: number, o: { iters?: number; lr?: number; locIters?: number; tok?: StopToken; log?: (h: InsituIter) => void; var?: number } = {}) {
   const iters = o.iters ?? 80, lr = o.lr ?? 2e-3, nZ = zc0.length, nK = g.nz * g.nv * g.nu;
@@ -119,5 +119,5 @@ export async function zScale(dev: GPUDevice, Knew: Float32Array, Kref: Float32Ar
   } finally { loc.destroy(); }
 }
 
-/** torch_psf.insitu.split_checkerboard: parity of the tile x tile px tile of each position. */
+/** torch_psf.estimation.split_checkerboard: parity of the tile x tile px tile of each position. */
 export function checkerboard(x: number, y: number, tile = 16): number { return (Math.floor(x / tile) + Math.floor(y / tile)) % 2; }

@@ -88,7 +88,7 @@ print('localized', n, 'median |x - truth| etc. not checked here')
 # only Noll 6 = 0.07 (defaults: overlap rejection on, deviance_k 3, second pass with 3/4 of the iterations)
 from torch_psf.simulate import simulate_reference_movie
 from torch_psf.estimators import InSituEstimator
-from torch_psf.insitu import knot_gradient, split_checkerboard, fit_zernike_knots
+from torch_psf.estimation import knot_gradient, split_checkerboard, fit_zernike_knots
 from torch_psf.spline import emitter_height_pos_fn
 INS = dict(T=1500, H=96, W=96, emitters_per_frame=8.0, seed=5)
 r = simulate_reference_movie('astigmatic', device=dev, **INS)
@@ -135,15 +135,15 @@ fz = fit_zernike_knots(spl5b, d, start, iters=40, log=lambda it, nll, sec, zc: h
 json.dump(dict(final_zernike=fz['psf'].zcoef.tolist(), history=hist), open(os.path.join(a.out, 'insitu_fit.json'), 'w'), indent=1)
 print('fit_zernike_knots only:', np.round(fz['psf'].zcoef.tolist(), 4).tolist())
 
-# the spot deviance of the overlap rejection (insitu.spot_deviance) on these ROIs with the start spline
-from torch_psf.insitu import spot_deviance
+# the spot deviance of the overlap rejection (estimation.spot_deviance) on these ROIs with the start spline
+from torch_psf.estimation import spot_deviance
 dv, thd = spot_deviance(spl5, d)
 np.savez(os.path.join(a.out, 'insitu_deviance.npz'), deviance=dv.astype(np.float32), theta=thd.cpu().numpy())
 print('deviance: median', float(np.median(dv)), 'above 1.283:', int((dv > 1 + 3 * np.sqrt(2 / 225)).sum()))
 
 # free-knot refinement (fit_free_knots, as InSituEstimator(refine=True)): 3 outer iterations from the vectorial spline
 # of fit_zernike_knots on the training ROIs, regularised towards it (lam_ref 3000, lam_s 1000)
-from torch_psf.insitu import fit_free_knots
+from torch_psf.estimation import fit_free_knots
 s_ref = fz['psf'].to_spline(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0)
 K_vec = s_ref.knots.clone()
 hist_r = []

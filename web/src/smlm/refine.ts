@@ -1,4 +1,4 @@
-// Optional cubic-spline refinement of the in-situ PSF: a port of torch_psf.insitu.fit_free_knots as used by
+// Optional cubic-spline refinement of the in-situ PSF: a port of torch_psf.estimation.fit_free_knots as used by
 // InSituEstimator(refine=True): free knots K, regularised towards the vectorial spline (ref) and smooth, alternating
 // (1) emitter parameters at fixed knots (Levenberg-Marquardt; zstarts and 30 iterations the first time, 5 afterwards)
 // and (2) the knots at fixed emitter parameters with a fresh torch.optim.LBFGS (max_iter = inner, history 10, strong
@@ -115,7 +115,7 @@ export async function lbfgsStep(x: Vec, closure: (x: Vec) => Promise<{ f: number
 
 export interface RefineResult { knots: Float32Array; theta: Float32Array; history: { it: number; loss: number; seconds: number }[]; seconds: number; }
 
-/** torch_psf.insitu.fit_free_knots(spline, knots0, rois=rois, ref=ref, lam_ref, lam_s, outer, inner) without a bead stack. */
+/** torch_psf.estimation.fit_free_knots(spline, knots0, rois=rois, ref=ref, lam_ref, lam_s, outer, inner) without a bead stack. */
 export async function fitFreeKnots(dev: GPUDevice, g: KnotGridFull, K0: Float32Array, ref: Float32Array, rois: Float32Array, N: number,
   o: { lamRef?: number; lamS?: number; outer?: number; inner?: number; tok?: StopToken; log?: (h: { it: number; loss: number; seconds: number }) => void; var?: number } = {}): Promise<RefineResult> {
   const lamRef = o.lamRef ?? 3000, lamS = o.lamS ?? 1000, outer = o.outer ?? 12, inner = o.inner ?? 8, eps = 1e-4;
