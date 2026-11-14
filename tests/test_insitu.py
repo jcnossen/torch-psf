@@ -56,3 +56,29 @@ def test_bead_fit_dz_scale_height_and_heldout_refit():
     rep = est['report']
     assert abs(rep['dz_scale'] - 0.8) < 0.03 and abs(rep['height_um'] - 0.1) < 0.03, rep
     assert 'heldout_nll_per_px' in rep and rep['heldout_nll_per_px'] < rep['nll_per_px'] + 0.5
+
+
+@needs_gpu
+def test_bead_fit_cubic_drift_and_tied_bead_size():
+    vec = true_model(15)
+    nk = 26
+    focus = stage_focus(nk, 0.04, 1.0).to(DEV)
+    t = torch.linspace(-1, 1, nk, device=DEV)
+    drift = torch.stack([0.3 * t ** 3, 0.2 * t], 1)                   # px, per plane
+    g = torch.Generator(device=DEV).manual_seed(7)
+    xy = torch.rand(4, 2, generator=g, device=DEV) - 0.5
+    from torch_psf.insitu.beads import sphere_points
+    ball = sphere_points(0.2, 32).to(DEV)                            # beads of 200 nm on the coverslip (centre 100 nm)
+    imgs = []
+    for b in range(4):
+        pos = torch.cat([xy[b][None] + drift, torch.full((nk, 1), 0.1, device=DEV)], 1)
+        pb = pos[:, None] + torch.stack([ball[:, 0] / vec.pixel_um, ball[:, 1] / vec.pixel_um, ball[:, 2]], 1)[None]
+        imgs.append(vec.forward_batched(pb.reshape(-1, 3), focus.repeat_interleave(32)).reshape(nk, 32, 15, 15).mean(1))
+    d = torch.poisson(40000 * torch.stack(imgs) + 30, generator=g)
+    start = VectorialPSF(15, npupil=48, oversample=2, device=DEV)
+    r3 = fit_beads(d, focus, start, iters=400, drift=True, drift_order=3, bead_diameter_um=0.2, fit_height=True)
+    r1 = fit_beads(d, focus, start, iters=400, drift=True, drift_order=1, bead_diameter_um=0.2, fit_height=True)
+    assert r3['report']['nll_per_px'] < r1['report']['nll_per_px']
+    assert abs(r3['height_um'] - 0.1) < 0.03 and abs(r3['bead_diameter_um'] - 2 * r3['height_um']) < 1e-6
+    err = (r3['psf'].zcoef.detach() - vec.zcoef.detach()).pow(2).mean().sqrt()
+    assert float(err) < 0.006, float(err)

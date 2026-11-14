@@ -56,7 +56,9 @@ class GaussianPSF(_GaussianBase):
         return self.sigma[0] * one, self.sigma[1] * one, 0 * one, 0 * one
 
     def to(self, device):
-        return GaussianPSF(self.roisize, self.sigma, device, self.pixel_um)
+        """In place (the model holds no tensors); returns self."""
+        self.dev = torch.device(device)
+        return self
 
     def resized(self, roisize):
         return GaussianPSF(roisize, self.sigma, self.dev, self.pixel_um)
@@ -88,7 +90,9 @@ class AstigmaticGaussianPSF(_GaussianBase):
         return sx0 * qx, sy0 * qy, sx0 * ax / (qx * self.d), sy0 * ay / (qy * self.d)
 
     def to(self, device):
-        return AstigmaticGaussianPSF(self.roisize, self.sigma, self.gamma, self.d, self.z_range, device, self.pixel_um)
+        """In place (the model holds no tensors); returns self."""
+        self.dev = torch.device(device)
+        return self
 
     def resized(self, roisize):
         return AstigmaticGaussianPSF(roisize, self.sigma, self.gamma, self.d, self.z_range, self.dev, self.pixel_um)

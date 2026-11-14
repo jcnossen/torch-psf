@@ -278,10 +278,17 @@ class VectorialPSF(torch.nn.Module, PSF):
         spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
         return spl
 
-    def to(self, device):
-        """A copy on another device (torch.nn.Module.to semantics are not used: buffers and the cached geometry
-        are rebuilt)."""
-        return self.resized(self.roisize, device=device)
+    def _apply(self, fn, *args, **kwargs):
+        """torch.nn.Module semantics for .to(device / dtype), .cuda(), .cpu(), .float(): parameters and buffers are
+        converted in place; the optional plain tensor attributes (blur, dipM, dipw, diat) and self.dev follow. Returns
+        self. (A copy of another size: resized().)"""
+        super()._apply(fn, *args, **kwargs)
+        for k in ('blur', 'dipM', 'dipw', 'diat'):
+            v = getattr(self, k, None)
+            if torch.is_tensor(v):
+                setattr(self, k, fn(v))
+        self.dev = self.u.device
+        return self
 
     def __repr__(self):
         return (f'VectorialPSF(roisize={self.roisize}, pixel_um={self.pixel_um}, NA={float(self.NA):.3f}, '

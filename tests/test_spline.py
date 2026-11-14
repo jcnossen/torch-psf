@@ -108,3 +108,19 @@ def test_to_spline_of_gaussians():
     ga = AstigmaticGaussianPSF(11, sigma_px=1.3, gamma_um=0.2, d_um=0.4, z_range=(-0.4, 0.4), device=DEV)
     sa = ga.to_spline(11, dz_um=0.02)
     assert err(sa, ga) < 0.02
+
+
+def test_to_device_is_in_place_for_every_model():
+    from torch_psf import AstigmaticGaussianPSF
+    dev2 = 'cpu'
+    vec = VectorialPSF(13, npupil=32, oversample=2, device=DEV).set_zernike({6: 0.1})
+    vec.blur = torch.tensor([0.1, 0.1, 0.0], device=DEV)
+    assert vec.to(dev2) is vec and vec.dev == torch.device(dev2) and vec.zcoef.device.type == 'cpu'
+    assert vec.blur.device.type == 'cpu' and vec.roisize == 13
+    img = vec.render(torch.tensor([[0.0, 0.0, 0.2]]))
+    assert img.shape == (1, 13, 13) and img.device.type == 'cpu'
+    spl = VectorialPSF(13, npupil=32, oversample=2, device=DEV, z_range=(0, 0.4)).to_spline(11, dz_um=0.05)
+    r0 = spl.render(torch.tensor([[0.1, 0.0, 0.2]], device=DEV)).cpu()
+    assert spl.to(dev2) is spl and torch.allclose(spl.render(torch.tensor([[0.1, 0.0, 0.2]])), r0, atol=1e-6)
+    for m in (GaussianPSF(11, device=DEV), AstigmaticGaussianPSF(11, device=DEV)):
+        assert m.to(dev2) is m and m.render(torch.zeros(1, 3)).device.type == 'cpu'

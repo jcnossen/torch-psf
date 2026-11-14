@@ -21,7 +21,8 @@ Fields (every field has its own dtype and shape [n, ...]):
   bg        [n] float32      background (photons / px / frame)
   optional: chi2, score, group, cov ([n, 3] = xy, xz, yz covariances, px^2), and any other field (add_fields); all are
   carried through indexing, filters, crop, concatenate, save and load.
-Metadata (dict meta): pixel_nm, image_size [h, w], n_frames (of the movie), method, n_dims, ... (free; JSON-serializable).
+Metadata (dict meta): pixel_nm, image_size [h, w], n_frames (of the movie), method, n_dims, drift (the record of the
+drift estimate), ... (free; JSON-serializable).
 Drift: [F, D] px per movie frame; the drift of a localization is drift[frame + n_frames // 2] (its centre frame).
 
 Files: .hdf5 / .h5 (this class's format: docs/DATASET_FORMAT.md), Picasso hdf5 export / import (save_picasso /
@@ -58,6 +59,19 @@ def _jsonable(o):
         return o.tolist()
     if isinstance(o, np.generic):
         return o.item()
+    return str(o)
+
+
+def _plain(o):
+    """JSON-safe copy (str keys, lists for arrays / tuples, str for anything else)"""
+    if isinstance(o, dict):
+        return {str(k): _plain(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_plain(v) for v in o]
+    if isinstance(o, (np.ndarray, np.generic)) or torch.is_tensor(o):
+        return _plain(o.tolist())
+    if o is None or isinstance(o, (str, int, float, bool)):
+        return o
     return str(o)
 
 
@@ -313,7 +327,7 @@ class Dataset:
             raise ValueError('positions are drift corrected: undo_drift() first')
         self.drift = _tensor(drift, torch.float64)
         if info is not None:
-            self.meta['drift_info'] = info
+            self.meta['drift'] = info
         return self
 
     def apply_drift(self, drift=None):
@@ -340,21 +354,32 @@ class Dataset:
         self.drift_applied = False
         return self
 
-    def estimate_drift(self, n_frames=None, rows=None, dims=2, apply=False, device=None):
-        """Drift with DME v2 (the `dme` package, github.com/jcnossen/drift-estimation, version >= 2; found as an installed
-        package or via the environment variable DME_PATH = a checkout). Rows: `rows` (mask) or all, always only rows
-        with finite positions and 0 < crlb < 1 px. Time = centre frame. dims: 2 (lateral) or 3. Stores and returns the
-        drift [F, dims] px; apply=True also subtracts it."""
+    def estimate_drift(self, n_frames=None, rows=None, dims=2, apply=False, device=None, return_info=False):
+        """Drift with DME v2 (package `dme`, github.com/jcnossen/drift-estimation, version >= 2; entry point
+        dme.dme_prior.dme_prior_estimate). The package is found as follows: a checkout named by the environment
+        variable DME_PATH (the directory that holds dme/) if set, else the installed package
+        (pip install git+https://github.com/jcnossen/drift-estimation).
+        Rows: `rows` (mask) or all, always only rows with finite positions and 0 < crlb < 1 px. Time = centre frame.
+        dims: 2 (lateral) or 3. Stores the drift [F, dims] px in self.drift and the run record in meta['drift']
+        (method, entry point, version, package path, parameters: n_frames / dims / n_rows / time, the choices DME made
+        (its info dict), and per-axis results: peak-to-peak and rms drift in px); returns the drift (and the record with
+        return_info). apply=True also subtracts it."""
         import importlib
         import sys
         if self.drift_applied:
             raise ValueError('positions are already drift corrected: undo_drift() first')
         p = os.environ.get('DME_PATH')
-        if p and p not in sys.path:
-            sys.path.insert(0, p)
-        dme = importlib.import_module('dme')
-        if int(str(getattr(dme, '__version__', '1')).split('.')[0]) < 2:
-            raise RuntimeError('DME v2 is needed (github.com/jcnossen/drift-estimation); set DME_PATH to a checkout')
+        if p:
+            p = os.path.abspath(os.path.expanduser(p))
+            if not os.path.isfile(os.path.join(p, 'dme', '__init__.py')):
+                raise RuntimeError(f'DME_PATH={p} is not a checkout of github.com/jcnossen/drift-estimation')
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        dme = sys.modules.get('dme') or importlib.import_module('dme')
+        version = str(getattr(dme, '__version__', '1'))
+        if int(version.split('.')[0]) < 2:
+            raise RuntimeError(f'the dme package at {getattr(dme, "__file__", "?")} is version {version}; DME v2 is '
+                               f'needed: set DME_PATH to a checkout of github.com/jcnossen/drift-estimation or pip install it')
         from dme.dme_prior import dme_prior_estimate
         from dme.dme_gpu import default_device
         F = int(n_frames or self.num_frames)
@@ -367,11 +392,19 @@ class Dataset:
             ok &= _tensor(rows).cpu().numpy().astype(bool)
         d, info = dme_prior_estimate(pos[ok], t[ok], crlb[ok], numframes=F, device=default_device(device),
                                      verbose=False, return_info=True)
-        self.drift = torch.as_tensor(np.asarray(d)[:F, :dims], dtype=torch.float64)
-        self.meta['drift_info'] = dict(method='DME v2', n=int(ok.sum()), version=str(dme.__version__))
+        d = np.asarray(d)[:F, :dims]
+        self.drift = torch.as_tensor(d, dtype=torch.float64)
+        rec = dict(method='DME v2', entry_point='dme.dme_prior.dme_prior_estimate', version=version,
+                   package=os.path.dirname(os.path.abspath(dme.__file__)),
+                   parameters=dict(n_frames=F, dims=dims, n_rows=int(ok.sum()), time='frame + n_frames // 2',
+                                   rows='finite, 0 < crlb < 1 px' + (', user mask' if rows is not None else '')),
+                   dme_info=_plain(info),
+                   result=dict(axes='xyz'[:dims], ptp_px=np.ptp(d, 0).round(5).tolist(),
+                               rms_px=np.sqrt(((d - d.mean(0)) ** 2).mean(0)).round(5).tolist()))
+        self.meta['drift'] = rec
         if apply:
             self.apply_drift()
-        return self.drift
+        return (self.drift, rec) if return_info else self.drift
 
     # ------------------------------------------------------------------ render, FRC
     def region(self):
@@ -504,7 +537,7 @@ class Dataset:
             if self.drift is not None:
                 d = f.create_dataset('drift', data=self.drift.cpu().numpy())
                 d.attrs['applied'] = self.drift_applied
-                d.attrs['info'] = json.dumps(self.meta.get('drift_info', {}), default=_jsonable)
+                d.attrs['info'] = json.dumps(self.meta.get('drift', {}), default=_jsonable)
         os.replace(tmp, path)
         return path
 

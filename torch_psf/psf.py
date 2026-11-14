@@ -47,7 +47,8 @@ class PSF:
         return self.dev
 
     def to(self, device):
-        """The model on another device (a new object or self)."""
+        """Move the model to another device in place and return self (torch.nn.Module semantics; a copy of another
+        ROI size is resized())."""
         raise NotImplementedError
 
     def resized(self, roisize):

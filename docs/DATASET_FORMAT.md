@@ -39,7 +39,7 @@ Any other field (any dtype, shape [n, ...], e.g. per-frame intensities [n, frame
 
 A free dictionary of JSON-serializable values. Common keys: `pixel_nm` (camera pixel size in the sample, nm),
 `image_size` [h, w] (px), `n_frames` (frames of the movie), `n_dims`,
-`method`, `source`, `region` / `origin` (set by crop), `drift_info`.
+`method`, `source`, `region` / `origin` (set by crop), `drift` (the record of the drift estimate: method, version, parameters, per-axis result).
 
 ## Drift
 

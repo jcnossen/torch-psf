@@ -171,11 +171,17 @@ class CubicSplinePSF(PSF):
         """render() (value only) in batches of nb emitters."""
         return torch.cat([self.render(pos[s:s + nb]) for s in range(0, len(pos), nb)])
 
-    def to(self, device):
-        s = CubicSplinePSF(self.roisize, self.z_range, oversample=self.S, dz_um=self.hz, zpad=self.zpad,
-                               xy_limit=self.xmax, device=device, dtype=self.dtype, pixel_um=self.pixel_um)
-        s.knots = self.knots.to(s.dev)
-        return s
+    def to(self, device=None, dtype=None):
+        """Move the knots and the index tensors to another device (and the knots to another float dtype), in place;
+        returns self (torch.nn.Module semantics)."""
+        dev = self.dev if device is None else torch.device(device)
+        if dtype is not None:
+            self.dtype = dtype
+            self.G = self.G.to(dtype)
+        self.knots = self.knots.to(dev, self.dtype)
+        self.pat, self.G, self.e = self.pat.to(dev), self.G.to(dev), self.e.to(dev)
+        self.dev = self.knots.device
+        return self
 
     def to_spline(self, roisize=None, z_range=None, **kw):
         """A cubic spline is already a spline: returns self (other arguments are not supported)."""

@@ -107,8 +107,10 @@ def test_estimate_drift():
     true = torch.stack([torch.linspace(0, 1.5, F), torch.linspace(0, -1.0, F)], 1).double()
     ds = Dataset.from_arrays(sites[k] + true[fr] + 0.05 * torch.randn(n, 2, generator=g, dtype=torch.float64), fr,
                              crlb=torch.full((n, 2), 0.05), meta=dict(pixel_nm=100.0, n_frames=F))
-    d = ds.estimate_drift()
+    d, rec = ds.estimate_drift(return_info=True)
     assert float((d - d.mean(0) - (true - true.mean(0))).abs().max()) < 0.05
+    assert ds.meta['drift'] is rec and rec['method'] == 'DME v2' and rec['parameters']['n_rows'] == n
+    assert len(rec['result']['ptp_px']) == 2 and abs(rec['result']['ptp_px'][0] - 1.5) < 0.1
 
 
 def test_fit_needs_a_pixel_size_for_3d():
@@ -122,3 +124,11 @@ def test_fit_needs_a_pixel_size_for_3d():
     assert ds.pixel_nm == 100.0 and abs(float(ds.pos[:, 2].median()) - 2.0) < 0.5      # 0.2 um = 2 px of 0.1 um
     g = GaussianPSF(11, device='cpu')
     assert g.fit(torch.poisson(g.expected(th))).n_dims == 2                          # 2D: no pixel size needed
+
+
+def test_drift_record():
+    ds = make()
+    ds.set_drift(torch.zeros(1006, 2), info=dict(method='given'))
+    assert ds.meta['drift'] == dict(method='given')
+    p = ds.copy()
+    assert p.meta['drift']['method'] == 'given'

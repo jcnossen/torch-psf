@@ -1,6 +1,6 @@
 """Vectorial PSF fit to bead z-stacks (Poisson likelihood, Adam): the Zernike coefficients (and optionally NA /
 n_med / apodization) of a VectorialPSF, with per bead x, y (shared by its planes), per plane photons and background,
-an optional finite bead size and an optional linear lateral drift of each stack over the planes."""
+an optional finite bead size and an optional polynomial lateral drift of each stack over the planes."""
 import time
 import torch
 
@@ -20,23 +20,28 @@ def sphere_points(diameter_um, n=32, seed=0):
 
 def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), emitter_z_um=0.0, stack_id=None,
               drift=False, bead_diameter_um=None, nball=32, chunk=None, log=None, stop=None, weights=None,
-              fit_dz_scale=False, fit_height=False, intensity='free', heldout_iters=150):
+              fit_dz_scale=False, fit_height=False, intensity='free', heldout_iters=150, drift_order=3):
     """Fit a VectorialPSF (copied; roisize = the ROI size) to bead stacks [nbeads, nk, P, P] (photons) imaged at the
     focus positions focus_um [nk] (focal plane relative to the coverslip, um; a stage scan gives
     focus = f0 + sign dz k). The beads sit at height emitter_z_um. Poisson likelihood, Adam (lr for the PSF
     parameters).
 
     fit: names of the vectorial parameters to fit ('zcoef', 'NA', 'n_med', 'apod'). stack_id [nbeads] (long) and
-    drift=True: per stack a linear xy drift (px per plane). bead_diameter_um: the bead is modelled as nball points on
-    a sphere (else a point). fit_dz_scale: fit a scale factor of the focus steps (stage calibration; the focus
+    drift=True: per stack a lateral xy drift over the planes, a polynomial of degree drift_order (1 = linear, default 3:
+    cubic) in the plane index without a constant term (the constant is the bead position). bead_diameter_um: the bead
+    is modelled as nball points on a sphere (else a point). With fit_height the sphere stays tied to the fitted
+    centre height: a bead lies on the coverslip, so its diameter = 2 x the height (bead_diameter_um only switches the
+    sphere on and gives the starting height when emitter_z_um is 0). fit_dz_scale: fit a scale factor of the focus steps (stage calibration; the focus
     positions become focus_um * scale). fit_height: fit the bead (centre) height above the coverslip, starting at
     emitter_z_um. intensity: 'free' (photons per bead and plane) or 'bead_x_plane' (photons per bead times a per-plane
     factor shared by all beads, e.g. bleaching or illumination drift; fewer parameters). chunk: beads per backward
     pass (memory; None = all at once). weights [nbeads]: e.g. 0 for held-out beads; after the fit those beads get
-    their own position / photons / bg refitted with the PSF fixed (heldout_iters Adam steps) and are scored
+    their own position / photons / bg (and the drift of their stack) refitted with the PSF fixed (heldout_iters Adam
+    steps) and are scored
     (report: heldout_nll_per_px). log(it, nll, seconds, zcoef), stop(): progress / early stop.
     Returns dict(psf, report, history, xy [nbeads, 2] px rel. to the ROI centre, photons [nbeads, nk],
-    bg [nbeads, nk], drift [nstacks, 2] px per plane or None, dz_scale, height_um)."""
+    bg [nbeads, nk], drift [nstacks, drift_order, 2] px (polynomial coefficients for t = plane index / half the
+    stack, t in [-1, 1]) or None, dz_scale, height_um, bead_diameter_um)."""
     d, focus, vec, emitter_z = stack, focus_um, vectorial, emitter_z_um
     nb, nk, P = d.shape[0], d.shape[1], d.shape[-1]
     dev = d.device
@@ -66,18 +71,22 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
     dr = None
     if drift:
         sid = torch.zeros(nb, dtype=torch.long, device=dev) if stack_id is None else stack_id.to(dev)
-        dr = torch.zeros(int(sid.max()) + 1, 2, device=dev, requires_grad=True)
-        groups.append(dict(params=[dr], lr=1e-4))
+        dr = torch.zeros(int(sid.max()) + 1, int(drift_order), 2, device=dev, requires_grad=True)
+        groups.append(dict(params=[dr], lr=2e-3))
     log_s = height = None
     if fit_dz_scale:
         log_s = torch.zeros((), device=dev, requires_grad=True)
         groups.append(dict(params=[log_s], lr=1e-3))
     if fit_height:
-        height = torch.tensor(float(emitter_z), device=dev, requires_grad=True)
+        z_start = float(emitter_z) if (emitter_z or bead_diameter_um is None) else 0.5 * float(bead_diameter_um)
+        height = torch.tensor(z_start, device=dev, requires_grad=True)
         groups.append(dict(params=[height], lr=2e-3))
     opt = torch.optim.Adam(groups)
     ball = None if bead_diameter_um is None else sphere_points(bead_diameter_um, nball).to(dev)
+    unit_ball = None if bead_diameter_um is None else sphere_points(1.0, nball).to(dev)     # diameter 1
     kk = torch.arange(nk, device=dev, dtype=torch.float32) - (nk - 1) / 2
+    tt = kk / max((nk - 1) / 2, 1.0)                                     # plane index in [-1, 1]
+    tpow = torch.stack([tt ** (k + 1) for k in range(int(drift_order))], 0)          # [order, nk]
     w = None if weights is None else weights.to(dev).float()
     sl_all = [slice(None)] if chunk is None else [slice(s, s + chunk) for s in range(0, nb, chunk)]
 
@@ -85,7 +94,7 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
         n_ = d[sl].shape[0]
         pxy = xy[sl][:, None].expand(-1, nk, -1)
         if dr is not None:
-            pxy = pxy + dr[sid[sl]][:, None, :] * kk[None, :, None]
+            pxy = pxy + torch.einsum('bkc,kn->bnc', dr[sid[sl]], tpow)
         ze = torch.full((n_, nk, 1), float(emitter_z), device=dev) if height is None else height.expand(n_, nk, 1)
         pos = torch.cat([pxy, ze], -1).reshape(-1, 3)
         fs = focus[None].expand(n_, -1).reshape(-1) if (chunk is not None or not isinstance(sl, slice)) else f
@@ -94,8 +103,9 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
         if ball is None:
             img = psf(pos, fs)
         else:
-            q = ball / psf.pixel_um
-            pb = pos[:, None, :] + torch.stack([q[:, 0], q[:, 1], ball[:, 2]], 1)[None]
+            b = ball if height is None else unit_ball * (2 * height)      # tied: diameter = 2 x centre height
+            q = b / psf.pixel_um
+            pb = pos[:, None, :] + torch.stack([q[:, 0], q[:, 1], b[:, 2]], 1)[None]
             img = psf(pb.reshape(-1, 3), fs.repeat_interleave(len(ball))).reshape(len(pos), len(ball), P, P).mean(1)
         return photons(sl).reshape(-1, 1, 1) * img + bg[sl].reshape(-1, 1, 1)
 
@@ -126,12 +136,15 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
     if w is not None and bool((w == 0).any()):
         # held-out beads: their own position / photons / bg with the PSF (and all global terms) fixed, then scored
         ho = torch.nonzero(w == 0)[:, 0]
-        frozen = [log_s, height, dr] + [psf.zcoef] + int_params[1:]
+        frozen = [log_s, height] + [psf.zcoef] + int_params[1:]
         for v in frozen:
             if v is not None:
                 v.requires_grad_(False)
         own_int = int_params[:1]                     # photons per bead (the per-plane factors stay fixed)
-        opt2 = torch.optim.Adam([dict(params=[xy], lr=1e-2), dict(params=own_int, lr=1e-2), dict(params=[bg], lr=0.3)])
+        g2 = [dict(params=[xy], lr=1e-2), dict(params=own_int, lr=1e-2), dict(params=[bg], lr=0.3)]
+        if dr is not None:                           # the drift of the held-out stacks (only they get a gradient)
+            g2.append(dict(params=[dr], lr=2e-3))
+        opt2 = torch.optim.Adam(g2)
         for it in range(heldout_iters):
             opt2.zero_grad()
             l = poisson_nll(d[ho].reshape(-1, P, P), model(ho)).sum()
@@ -149,7 +162,9 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
     return _result(psf, rep, hist, dict(xy=xy.detach(), photons=ph, bg=bg.detach(),
                                         drift=None if dr is None else dr.detach(),
                                         dz_scale=None if log_s is None else float(torch.exp(log_s)),
-                                        height_um=None if height is None else float(height)))
+                                        height_um=None if height is None else float(height),
+                                        bead_diameter_um=None if bead_diameter_um is None else
+                                        (float(2 * height) if height is not None else float(bead_diameter_um))))
 
 
 def stage_focus(nk, dz_um, sign=1.0, f0=0.0):

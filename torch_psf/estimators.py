@@ -100,9 +100,12 @@ class ZStackEstimator(Estimator):
     Gaussian calibration curves). start (VectorialPSF or PSF file) or optics: the starting vectorial model.
     camera: Camera / calibration json / None (stacks in photons). roisize (px), nbeads (per stack, the brightest
     isolated ones), sign (scan direction), iters, holdout (index of a stack kept out of the fit; its beads are refitted
-    (own position / photons / bg, PSF fixed) and their NLL per pixel is reported), drift (linear xy drift per stack),
-    fit_dz_scale (fit the z-step scale), fit_height (fit the bead height above the coverslip), bead_diameter_um (finite
-    bead size), intensity ('free' or 'bead_x_plane': per-plane factors, e.g. bleaching); see insitu.fit_beads.
+    (own position / photons / bg, PSF fixed) and their NLL per pixel is reported), drift / drift_order (lateral drift
+    of each stack over the planes, a polynomial of this degree; default cubic), fit_dz_scale (fit the z-step scale),
+    emitter_z_um (starting bead centre height; default bead_diameter_um / 2, else 0), fit_height (fit it),
+    bead_diameter_um (finite bead size; with fit_height the diameter is tied to 2 x the fitted height: a bead lies on
+    the coverslip), fit_na / fit_n_med (fit NA / the medium index), intensity ('free' or 'bead_x_plane': per-plane
+    factors, e.g. bleaching); see insitu.fit_beads.
     Spline grid: oversample, spline_dz_um, xy_limit.
 
     estimate(stacks, dz_um) -> PSF. Plane k of a stack is at focus sign dz_um (k - (nk - 1) / 2) um (the stack centre
@@ -111,8 +114,9 @@ class ZStackEstimator(Estimator):
     rescaling) over the scanned range."""
 
     def __init__(self, model='vectorial', start=None, optics=None, camera=None, roisize=21, nbeads=8, sign=1.0,
-                 iters=300, holdout=None, drift=True, fit_dz_scale=False, fit_height=False, bead_diameter_um=None,
-                 intensity='free', regularize=3000.0, oversample=2, spline_dz_um=None, xy_limit=3.0,
+                 iters=300, holdout=None, drift=True, drift_order=3, fit_dz_scale=False, fit_height=False,
+                 emitter_z_um=None, bead_diameter_um=None, fit_na=False, fit_n_med=False, intensity='free',
+                 regularize=3000.0, oversample=2, spline_dz_um=None, xy_limit=3.0,
                  zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, device=None, progress=None,
                  stop=None):
         super().__init__(device, progress, stop)
@@ -123,6 +127,10 @@ class ZStackEstimator(Estimator):
         self.holdout, self.drift, self.regularize = holdout, drift, regularize
         self.fit_dz_scale, self.fit_height, self.bead_diameter_um, self.intensity = (fit_dz_scale, fit_height,
                                                                                      bead_diameter_um, intensity)
+        self.drift_order, self.fit_na, self.fit_n_med = drift_order, fit_na, fit_n_med
+        # starting bead (centre) height: given, else the bead radius (a bead lies on the coverslip), else 0
+        self.emitter_z_um = (float(emitter_z_um) if emitter_z_um is not None else
+                             0.5 * float(bead_diameter_um) if bead_diameter_um else 0.0)
         self.oversample, self.spline_dz_um, self.xy_limit = oversample, spline_dz_um, xy_limit
         self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
 
@@ -161,12 +169,16 @@ class ZStackEstimator(Estimator):
             return psf
         vec = _start_vectorial(self.start, self.optics, P, self.dev, self.zernike_indices, self.npupil,
                                self.oversample_pupil)
-        r = fit_beads(d, focus, vec, iters=self.iters, stack_id=sid, drift=self.drift, weights=w,
+        fit = ('zcoef',) + (('NA',) if self.fit_na else ()) + (('n_med',) if self.fit_n_med else ())
+        r = fit_beads(d, focus, vec, iters=self.iters, fit=fit, stack_id=sid, drift=self.drift,
+                      drift_order=self.drift_order, weights=w, emitter_z_um=self.emitter_z_um,
                       fit_dz_scale=self.fit_dz_scale, fit_height=self.fit_height,
                       bead_diameter_um=self.bead_diameter_um, intensity=self.intensity,
                       log=self._log('vectorial'), stop=self.stop)
         psf = r['psf']
         psf.focus_um = 0.0
+        if self.fit_na or self.fit_n_med:
+            self.report.update(NA=float(psf.NA), n_med=float(psf.n_med))
         for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um'):
             if k in r['report']:
                 self.report[k] = r['report'][k]

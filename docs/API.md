@@ -45,6 +45,17 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 | `CubicSplinePSF` | has `pixel_um` (set by `VectorialPSF.to_spline`, stored in the spline file) |
 | (follow-up) z unit | one unit per Dataset: z in px of the lateral pixel size, always. Every model has `pixel_um` (constructor argument of CubicSplinePSF, `from_zstack`, GaussianPSF, AstigmaticGaussianPSF; VectorialPSF has it anyway); fitting / localizing a 3D model without one raises ValueError (pass `pixel_um=` to fit / localize or set it on the model) |
 
+### 2026-11-14: follow-ups (defaults changed: marked **default**)
+
+| old | new |
+|---|---|
+| `VectorialPSF.to(device)` returned a resized copy; `CubicSplinePSF.to` / the Gaussians returned new objects | `.to(device)` has torch.nn.Module semantics for every PSF: in place, returns self (VectorialPSF: also dtype, `.cuda()`, `.cpu()`; the optional blur / dipM / dipw / diat tensors move along). A copy of another ROI size: `resized()` |
+| `fit_beads(drift=True)`: linear drift per stack (px per plane, lr 1e-4) | **default** `drift_order=3`: cubic polynomial in t = plane index / half the stack (t in [-1, 1]), no constant term, lr 2e-3; `drift_order=1` = linear. Returned `drift` is [nstacks, order, 2] px (coefficients). On six real bead stacks (19 beads, 151 planes, one stack held out) the cubic drift gave a lower training NLL (-82.40 vs -82.27 per px) and a lower held-out NLL (-52.58 vs -52.56 per px) than the linear one |
+| held-out beads refitted: position / photons / bg | also the drift of their stack |
+| bead size and height independent | with `bead_diameter_um` and `fit_height` the sphere diameter is tied to 2 x the fitted centre height (a bead lies on the coverslip); without fit_height the diameter is fixed and the starting / fixed height is `emitter_z_um`; the result reports `bead_diameter_um` |
+| `ZStackEstimator(...)` | adds `emitter_z_um` (starting bead centre height; **default** bead_diameter_um / 2, else 0), `fit_na`, `fit_n_med`, `drift_order` (**default** 3, passed to fit_beads; drift is on by default as before) |
+| `Dataset.estimate_drift` stored `meta['drift_info']` = dict(method, n, version) | stores `meta['drift']` = the run record: method, entry point (`dme.dme_prior.dme_prior_estimate`), version, package path, parameters (n_frames, dims, n_rows, time, row rule), `dme_info` (the choices DME made), result per axis (ptp_px, rms_px); `return_info=True` also returns it. DME is found through `DME_PATH` (a checkout) if set, else the installed package. `set_drift(info=)` stores into `meta['drift']` |
+
 ## Dataset (`torch_psf.dataset.Dataset`; format: docs/DATASET_FORMAT.md)
 
 `Dataset(fields, meta=None, drift=None, drift_applied=False)`, `Dataset.from_arrays(pos, frame, crlb, photons, bg,
