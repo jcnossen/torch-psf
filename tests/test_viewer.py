@@ -46,4 +46,9 @@ def test_viewer_api(tmp_path):
 def test_dump_fixtures(tmp_path):
     dump_fixtures(str(tmp_path), DEV)
     h, arr = unpack(open(tmp_path / 'volume_tetrapod.bin', 'rb').read())
-    assert h['kind'] == 'volume' and arr['volume'].ndim == 3 and len(h['meshes']) > 0
+    assert h['kind'] == 'volume' and arr['volume'].ndim == 3
+    try:
+        import skimage  # noqa: F401
+        assert len(h['meshes']) > 0
+    except ImportError:          # meshes are optional (scikit-image)
+        assert h['meshes'] == []

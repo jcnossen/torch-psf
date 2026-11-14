@@ -1,0 +1,38 @@
+# Python tests of torch_psf on the CPU (GPU-only tests are skipped). CPU wheels of PyTorch keep the install small.
+name: python-tests
+
+on:
+  push:
+    paths-ignore: ['web/**', 'docs/**', 'study/**', '**.md']
+  pull_request:
+    paths-ignore: ['web/**', 'docs/**', 'study/**', '**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0          # the legacy reference test regenerates its images from commit e8e6fc5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install (CPU PyTorch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e .[test,viewer]
+      - name: Tests
+        env:
+          CUDA_VISIBLE_DEVICES: ''
+        run: pytest -q tests
