@@ -20,9 +20,17 @@ export interface MovieSummary {
   H: number; W: number; spots_per_s: number; at_limit_fraction: number;
 }
 
-export async function localizeMovie(device: GPUDevice, files: File[], form: MovieForm, tok: StopToken,
+/** A movie reader: TiffMovie (streamed from files) or an in-memory movie (the demo). read() returns ADU frames. */
+export interface MovieSource { n: number; H: number; W: number; read(f0: number, f1: number): Promise<Float32Array>; }
+
+export async function openSource(src: File[] | MovieSource, progress?: (p: Progress) => void): Promise<MovieSource> {
+  if (!Array.isArray(src)) return src;
+  return TiffMovie.open(src, (msg) => progress?.({ stage: 'header', done: 0, total: 1, info: { msg } }));
+}
+
+export async function localizeMovie(device: GPUDevice, source: File[] | MovieSource, form: MovieForm, tok: StopToken,
   progress: (p: Progress) => void, emit: (rows: Float32Array) => void): Promise<MovieSummary> {
-  const mv = await TiffMovie.open(files, (msg) => progress({ stage: 'header', done: 0, total: 1, info: { msg } }));
+  const mv = await openSource(source, progress);
   const P = form.roisize, h = (P - 1) >> 1;
   const nFrames = form.maxFrames > 0 ? Math.min(mv.n, form.maxFrames) : mv.n;
   // the spline PSF (torch_psf ConvSplinePSF.from_vectorial: oversample 2, dz 0.04 um, zpad 2, xy_limit 3)

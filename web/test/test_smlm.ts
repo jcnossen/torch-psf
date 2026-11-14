@@ -9,6 +9,7 @@ import { buildKnots } from '../src/psf/spline';
 import { localizeMovie, NCOL } from '../src/smlm/movie';
 import { StopToken } from '../src/core/task';
 import { knotsAndJacobian, fitZernikeKnots } from '../src/smlm/insitu';
+import { estimateInsitu } from '../src/smlm/estimate';
 
 test('smlm: spot detection = torch_psf extract_spots / detect_spots', async () => {
   const meta = await fetchJson('smlm/movie.json');
@@ -168,5 +169,25 @@ test('insitu: fit_zernike_knots on the torch_psf training ROIs (40 iterations) r
     `final ${rms(r.zcoef, fin).toExponential(1)} w; vs truth: web ${rms(r.zcoef, tru).toFixed(4)}, torch_psf ${rms(fin, tru).toFixed(4)} w; ` +
     `web Noll 5/6/11: ${[5, 6, 11].map((j) => r.zcoef[meta.noll.indexOf(j)].toFixed(4)).join(' / ')}`;
   check(rms(r.zcoef, fin) < 2e-3 && rms(h1, p1) < 1e-4, msg);
+  return msg;
+});
+
+test('insitu: whole estimate (movie -> spots -> split -> fit -> held-out, z scale) = torch_psf estimate_psf_insitu', async () => {
+  const meta = await fetchJson('smlm/insitu.json');
+  const { device } = await getDevice();
+  const files = [new File([await fetchBuf('smlm/insitu_movie.tif')], 'insitu_movie.tif')];
+  const r = await estimateInsitu(device, files, {
+    optics: meta.optics, gain: meta.params.gain_e_per_adu, offset: meta.params.offset_adu, readnoise_e: 0, focus_um: meta.focus_um,
+    zlo: meta.z_range[0], zhi: meta.z_range[1], roisize: meta.roisize, threshold: 6, isolation: 0, chunk: 500, maxFrames: 0,
+    npupil: 64, oversample: 3, noll: meta.noll, zcoef: meta.noll.map((j: number) => meta.start_zernike[String(j)] ?? 0),
+    nspots: meta.nspots, nheldout: meta.nheldout, iters: meta.iters, tile: 16,
+  }, new StopToken(), () => {});
+  const rp = meta.report, fin: number[] = meta.final_zernike;
+  const rms = Math.sqrt(r.zcoef.reduce((s, v, i) => s + (v - fin[i]) ** 2, 0) / fin.length);
+  const hp = rp.heldout ? rp.heldout.fitted.nll_per_px_vs_first : NaN;
+  const msg = `spots ${r.n_spots} (torch_psf ${rp.n_spots}), train ${r.n_train} (${rp.n_train}), test ${r.n_test} (${rp.n_test}); ` +
+    `zcoef rms vs torch_psf ${rms.toExponential(1)} w; held-out NLL/px fitted - start ${r.heldout?.diff.toFixed(5)} (${hp.toFixed(5)}); ` +
+    `z scale ${r.z_scale.toFixed(4)} (${rp.z_scale.toFixed(4)}); at limit ${r.at_limit.toFixed(4)} (${rp.at_limit.toFixed(4)}); ${r.seconds.toFixed(1)} s`;
+  check(r.n_spots === rp.n_spots && r.n_train === rp.n_train && rms < 2e-3 && Math.abs((r.heldout?.diff ?? 0) - hp) < 2e-3 && Math.abs(r.z_scale - rp.z_scale) < 0.01, msg);
   return msg;
 });
