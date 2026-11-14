@@ -71,7 +71,7 @@ export async function simulateDemo(dev: GPUDevice, p = DEMO): Promise<DemoMovie>
   }
   const ns = sx.length;
   const frac = p.emitters_per_frame / ns, pOn = frac / (1 - frac) / p.mean_on;
-  // the PSF through its spline (torch_psf ConvSplinePSF grid), roisize 19 as the preset
+  // the PSF through its spline (torch_psf CubicSplinePSF grid), roisize 19 as the preset
   const zc = DEFAULT_NOLL.map((j) => DEMO_ZERNIKE[j] ?? 0);
   const g = splineGrid(p.roisize, p.zlo, p.zhi, 2, 0.04, 2, 3.0) as KnotGridFull;
   const k = await buildKnots(dev, { ...DEMO_OPTICS, roisize: 0, npupil: 64, oversample: 3, zernike_noll: DEFAULT_NOLL }, zc,

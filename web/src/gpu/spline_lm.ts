@@ -1,17 +1,17 @@
 // Spline PSF localization on the GPU: torch_psf.fit.localize (Levenberg-Marquardt, zstarts starting heights, best
-// likelihood wins), crlb and the chi2 of torch_psf.pipeline.localize_spots, for a ConvSplinePSF given by its knots.
+// likelihood wins), crlb and the chi2 of torch_psf.pipeline.localize_spots, for a CubicSplinePSF given by its knots.
 import src from './kernels/spline_lm.wgsl?raw';
 import gradSrc from './kernels/knot_grad.wgsl?raw';
 
 const SU = GPUBufferUsage.STORAGE, CD = GPUBufferUsage.COPY_DST, CS = GPUBufferUsage.COPY_SRC;
 
-/** Grid of a torch_psf ConvSplinePSF (knots [nz, nv, nu]). */
+/** Grid of a torch_psf CubicSplinePSF (knots [nz, nv, nu]). */
 export interface SplineGrid {
   roisize: number; S: number; hz: number; z0: number; nz: number; nv: number; nu: number; xmax: number;
   zlo: number; zhi: number;            // z_range (um)
 }
 
-/** ConvSplinePSF geometry for roisize P, z_range, oversample S, dz_um hz, zpad, xy_limit (torch_psf defaults). */
+/** CubicSplinePSF geometry for roisize P, z_range, oversample S, dz_um hz, zpad, xy_limit (torch_psf defaults). */
 export function splineGrid(P: number, zlo: number, zhi: number, S = 2, hz = 0.04, zpad = 2, xmax = 3.0): SplineGrid & { c: number; Pl: number } {
   const h = (P - 1) >> 1;
   const c = Math.ceil(h + xmax) + 2, Pl = 2 * c + 1;

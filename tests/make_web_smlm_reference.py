@@ -6,7 +6,7 @@ tracked).
 
 Cases:
   movie.tif + movie.json       a seeded movie (torch_psf.simulate.simulate_movie, astigmatic vectorial PSF via its
-                               ConvCubicSplinePSF), its optics and truth
+                               CubicSplinePSF), its optics and truth
   detect.json                  torch_psf.spots.extract_spots on it (chunk = 100 frames, threshold 6, border h + 2):
                                frame, corner, score per spot, and the noise / median of each chunk
   localize.npz / .json         the spline knots (VectorialPSF.to_spline), the ROIs of the first 600 detections,
@@ -26,7 +26,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, a.torch_psf)
 import torch, tifffile
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import ConvCubicSplinePSF
+from torch_psf.spline import CubicSplinePSF
 from torch_psf.simulate import simulate_movie
 from torch_psf.spots import extract_spots
 from torch_psf.detect import filter_frames
@@ -112,7 +112,7 @@ print('insitu: spots', rep.get('n_spots'), 'train', rep.get('n_train'), 'rejecte
 print('heldout', rep.get('heldout'), 'z_scale', rep.get('z_scale'), 'at_limit', rep.get('at_limit'))
 
 # the gradient at the start: spline grid of estimate_psf_insitu (zpad 5), theta by localize, knot gradient, VJP
-spl5 = ConvCubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
+spl5 = CubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 big = start.resized(spl5.Pl)
 pf = emitter_height_pos_fn(0.4)
 spl5.knots = spl5.knots_from_vectorial(big, pf, chunk=spl5.nz)
@@ -130,7 +130,7 @@ print('gradient: nll', nll0, 'gz', np.round(gz.cpu().numpy(), 2).tolist())
 
 # fit_zernike_knots alone on these training ROIs (no overlap rejection), with the Zernikes of every iteration
 hist = []
-spl5b = ConvCubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
+spl5b = CubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 fz = fit_zernike_knots(spl5b, d, start, iters=40, log=lambda it, nll, sec, zc: hist.append(dict(it=it, nll=nll, zcoef=zc.tolist())))
 json.dump(dict(final_zernike=fz['psf'].zcoef.tolist(), history=hist), open(os.path.join(a.out, 'insitu_fit.json'), 'w'), indent=1)
 print('fit_zernike_knots only:', np.round(fz['psf'].zcoef.tolist(), 4).tolist())

@@ -1,4 +1,4 @@
-// Spline knots of a vectorial PSF for the convolutional Catmull-Rom spline (torch_psf ConvSplinePSF / SIMCODE
+// Spline knots of a vectorial PSF for the convolutional Catmull-Rom spline (torch_psf CubicSplinePSF / SIMCODE
 // simcode/psf/conv_spline.py): the PSF on a big ROI evaluated at S x S sub-pixel shifts and nz emitter heights
 // (focus fixed), interleaved into an S-times oversampled z-stack [nz, nv, nu]. Same construction and grid as SIMCODE.
 import { VecEngine } from '../gpu/ops';

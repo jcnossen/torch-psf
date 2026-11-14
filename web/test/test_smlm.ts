@@ -81,7 +81,7 @@ test('smlm: spline localization = torch_psf fit.localize / crlb (same knots)', a
   return msg;
 });
 
-test('smlm: knots from the vectorial model = torch_psf ConvSplinePSF.from_vectorial', async () => {
+test('smlm: knots from the vectorial model = torch_psf CubicSplinePSF.from_vectorial', async () => {
   const meta = await fetchJson('smlm/movie.json');
   const z = await parseNpz(await fetchBuf('smlm/localize.npz'));
   const { device } = await getDevice();

@@ -86,7 +86,7 @@ estimate, or a PSF json). On the demo it recovers the truth to about 0.001 waves
 5. Exports: `psf.json` (torch-psf schema: `format`, `optics`, `zernike_noll`, `zernike_waves`, `focus_um`, ...; also
    the calib keys `pixelsize_um`, `wavelength_um`, `NA`, `n_imm`, `n_med`; `provenance` records the fit, including
    `partial`), `psf_spline.npz` (knots of the convolutional Catmull-Rom spline, S = 2, hz = 0.04 um, the same grid as
-   torch_psf's `ConvCubicSplinePSF`: `knots [nz, nv, nu]`, `z0`, `hz`, `S`, `u0`, `roisize`, `xmax`, `focus_um`, Zernikes) and
+   torch_psf's `CubicSplinePSF`: `knots [nz, nv, nu]`, `z0`, `hz`, `S`, `u0`, `roisize`, `xmax`, `focus_um`, Zernikes) and
    `psf_model_zstack.tif` (float32 normalized model PSF at the stack's planes, ImageJ stack).
 
 ![result](docs/result.png)
@@ -146,7 +146,7 @@ checked in between.
 | bead fit, generated astigmatic stack (3 beads, z-step scale fitted) vs the Python fit of the same model | Zernikes 0.0000 w rms, focus 0.00 nm, PSF L2 2e-6, held-out NLL 1.5e-6 rel.; vs truth 0.0002 w rms | 0.005 w, 5 nm, 1e-2, 1e-3 |
 | bead fit, generated tetrapod-like stack (3 beads, ROI 40, 3 um z range) | Zernikes 0.0000 w rms, focus 0.00 nm, PSF L2 3e-7, held-out NLL 1.2e-6 rel.; vs truth 0.0001 w rms | same |
 | bead fit, one-bead real crop vs the Python fit (no held-out bead; z-step scale fixed) | Zernikes 0.0000 w rms, focus 0.05 nm, PSF L2 7e-5, NLL 4e-7 rel. | same |
-| spline knots vs torch_psf's `ConvCubicSplinePSF` (knots_from_vectorial) | max rel. error 2e-6 | |
+| spline knots vs torch_psf's `CubicSplinePSF` (knots_from_vectorial) | max rel. error 2e-6 | |
 | SMLM movie: spot detection vs torch_psf `extract_spots` / `detect_spots` (seeded simulated movie, 300 frames, chunks of 100) | identical spots and order (718 / 718), noise rel. 2e-6 | |
 | SMLM movie: spline localization vs torch_psf `fit.localize` / `crlb` (same knots, 600 spots) | xy 99 % 4e-3 px, z 99 % 1e-3 um, CRLB 1e-3 rel. (float32 vs float64 solves) | 1e-2 px, 3e-3 um |
 | SMLM movie: whole pipeline (ADU, detection, knots, localization) vs the torch_psf localization table | same spots and frames; xy 99 % 4e-3 px | 1e-2 px |

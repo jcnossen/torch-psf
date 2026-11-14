@@ -1,5 +1,5 @@
 // Gradient of the Poisson NLL with respect to the spline knots at fixed emitter parameters: a port of
-// torch_psf.insitu.knot_gradient (autograd through ConvSplinePSF.render; the adjoint of the knot read-out is a
+// torch_psf.insitu.knot_gradient (autograd through CubicSplinePSF.render; the adjoint of the knot read-out is a
 // scatter-add). One workgroup per spot: (1) the per-pixel factor r = photons x (1 - d / mu) (0 where mu is clamped at
 // 1e-6, as torch's clamp_min gradient), (2) every knot of the spot's 4 x Lw x Lw window gathers the pixels it
 // touches (at most 2 x 2 for S = 2) and adds its sum to the global gradient with a float atomic (compare-exchange).

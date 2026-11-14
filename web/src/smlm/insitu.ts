@@ -1,5 +1,5 @@
 // In-situ PSF estimation from SMLM spots by the knot route: a port of torch_psf.insitu.fit_zernike_knots (route 'K')
-// and torch_psf.pipeline.estimate_psf_insitu. Per iteration: knots of the ConvSplinePSF from the vectorial model at
+// and torch_psf.pipeline.estimate_psf_insitu. Per iteration: knots of the CubicSplinePSF from the vectorial model at
 // the current Zernikes (with the Zernike derivatives of every knot image, for the vector-Jacobian product), emitter
 // parameters by Levenberg-Marquardt on the spline (zstarts and 30 iterations the first time, 3 afterwards), the NLL
 // gradient on the knots, its VJP to the Zernikes, an Adam step (lr 2e-3, betas 0.9 / 0.999, eps 1e-12).
@@ -11,7 +11,7 @@ import { StopToken } from '../core/task';
 export interface KnotGridFull extends SplineGrid { c: number; Pl: number; }
 
 /** Knots [nz, nv, nu] of the vectorial model at zcoef and their derivatives with respect to every Zernike
- *  [nZ, nz, nv, nu] (torch_psf ConvSplinePSF.build_planes: knot z = emitter height, focus fixed). */
+ *  [nZ, nz, nv, nu] (torch_psf CubicSplinePSF.build_planes: knot z = emitter height, focus fixed). */
 export async function knotsAndJacobian(dev: GPUDevice, cfg: VectorialConfig, zcoef: ArrayLike<number>, g: KnotGridFull, focus_um: number,
   check?: () => void): Promise<{ knots: Float32Array; dK: Float32Array }> {
   const S = g.S, Pl = g.Pl, nK = g.nz * g.nv * g.nu, nZ = cfg.zernike_noll.length;
@@ -80,7 +80,7 @@ export async function fitZernikeKnots(dev: GPUDevice, rois: Float32Array, N: num
   return { zcoef: Array.from(zc), theta: th!, K0: K0!, knots: lastKnots!, history: hist, seconds: (performance.now() - t0) / 1000 };
 }
 
-/** Value-only spline render of one emitter (CPU; torch_psf ConvSplinePSF.render), for z_scale. */
+/** Value-only spline render of one emitter (CPU; torch_psf CubicSplinePSF.render), for z_scale. */
 export function renderSpline(K: Float32Array, g: KnotGridFull, x: number, y: number, z: number): Float32Array {
   const P = g.roisize, S = g.S, h = (P - 1) >> 1;
   const oS0 = (-h + (g.c * S + S - 1) / S) * S;

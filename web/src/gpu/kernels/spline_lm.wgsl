@@ -1,5 +1,5 @@
-// Per-spot maximum-likelihood fit on a ConvSplinePSF: a port of torch_psf.fit.localize / lm_poisson / crlb with the
-// spline of torch_psf.spline.ConvSplinePSF.render (Catmull-Rom knots, value and d/dx, d/dy, d/dz).
+// Per-spot maximum-likelihood fit on a CubicSplinePSF: a port of torch_psf.fit.localize / lm_poisson / crlb with the
+// spline of torch_psf.spline.CubicSplinePSF.render (Catmull-Rom knots, value and d/dx, d/dy, d/dz).
 // One workgroup per spot; the threads share the pixels, the normal equations are reduced in workgroup memory and
 // thread 0 does the 5 x 5 solve. Same damping schedule as lm_poisson: H + lam diag(H), lam x 0.3 after an accepted
 // step, x 5 after a rejected one (clamped to 1e-4 .. 1e6); theta clamped as clamp_theta (margin 0.05).

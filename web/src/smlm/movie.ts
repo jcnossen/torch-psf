@@ -1,5 +1,5 @@
-// SMLM movie -> localizations (worker side): torch_psf.pipeline.localize_movie with a ConvSplinePSF built from a
-// vectorial PSF (torch_psf ConvSplinePSF.from_vectorial grid defaults). Per chunk of frames: ADU -> photons
+// SMLM movie -> localizations (worker side): torch_psf.pipeline.localize_movie with a CubicSplinePSF built from a
+// vectorial PSF (torch_psf CubicSplinePSF.from_vectorial grid defaults). Per chunk of frames: ADU -> photons
 // (camera.to_photons: (adu - offset) x gain), detect_spots (+ extract_spots border rule (P - 1) / 2 + 2), extract_rois,
 // localize (zstarts 5, 30 iterations), crlb, chi2, at_limit -> rows of the localization table (torch_psf.table).
 import { TiffMovie } from '../io/tiff';
@@ -33,7 +33,7 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
   const mv = await openSource(source, progress);
   const P = form.roisize, h = (P - 1) >> 1;
   const nFrames = form.maxFrames > 0 ? Math.min(mv.n, form.maxFrames) : mv.n;
-  // the spline PSF (torch_psf ConvSplinePSF.from_vectorial: oversample 2, dz 0.04 um, zpad 2, xy_limit 3)
+  // the spline PSF (torch_psf CubicSplinePSF.from_vectorial: oversample 2, dz 0.04 um, zpad 2, xy_limit 3)
   const zpad = form.zpad ?? 2;
   const grid = splineGrid(P, form.zlo, form.zhi, 2, 0.04, zpad, 3.0);
   progress({ stage: 'spline', done: 0, total: 1 });
