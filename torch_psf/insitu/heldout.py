@@ -29,3 +29,19 @@ def compare_heldout(psfs, rois, var=None):
         v['nll_per_px_vs_first'] = v['nll_per_px'] - first
         v.pop('theta')
     return out
+
+
+@torch.no_grad()
+def spot_deviance(psf, rois, var=None, theta=None):
+    """Poisson deviance per pixel of every ROI under psf after its MLE fit (theta: fitted parameters, else fitted
+    here): 2 sum(d log(d / mu) - (d - mu)) / P^2, about 1 for a spot the model explains. Overlapping emitters and
+    other spots the single-emitter model does not explain give larger values. Returns (deviance [N] numpy, theta)."""
+    if theta is None:
+        theta, _ = localize(psf, rois, var=var)
+    mu = psf.expected(theta)
+    d = rois
+    if var is not None:
+        d, mu = d + var, mu + var
+    dv = 2 * (torch.where(d > 0, d * torch.log(d.clamp_min(1e-9) / mu.clamp_min(1e-6)), torch.zeros_like(d))
+              - (d - mu))
+    return (dv.flatten(1).sum(1) / d[0].numel()).cpu().numpy(), theta

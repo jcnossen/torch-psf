@@ -101,14 +101,14 @@ class Engine:
             self.default.update(self.load(psf_path))
 
     def load(self, path):
-        from torch_psf.io import load_psf
+        from torch_psf.psf import PSF
         from torch_psf.vectorial import VectorialPSF
-        from torch_psf.spline import ConvSplinePSF
-        from torch_psf.gaussian import GaussianPSF
+        from torch_psf.spline import ConvCubicSplinePSF
+        from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
         if not path or not os.path.isfile(str(path)):
             raise ApiError(404, 'not_found', f'no such file: {path}')
         try:
-            psf = load_psf(path, roisize=DEFAULT['roisize'], device=self.dev)
+            psf = PSF.load(path, roisize=DEFAULT['roisize'], device=self.dev)
         except Exception as e:
             raise ApiError(422, 'unreadable_psf', f'{type(e).__name__}: {e}')
         p = dict(file=os.path.basename(str(path)))
@@ -118,9 +118,9 @@ class Engine:
             if psf.z_range is not None:
                 p['z_range'] = list(psf.z_range)
             self.loaded = None
-        elif isinstance(psf, ConvSplinePSF):
+        elif isinstance(psf, (ConvCubicSplinePSF, AstigmaticGaussianPSF)):
             p.update(model='spline', z_range=list(psf.z_range), z_um=float(np.mean(psf.z_range)), roisize=psf.roisize)
-            self.loaded = psf
+            self.loaded = psf if isinstance(psf, ConvCubicSplinePSF) else psf.to_spline(psf.roisize, dz_um=0.02)
         elif isinstance(psf, GaussianPSF):
             p.update(model='gaussian', sigma_px=psf.sigma[0], roisize=psf.roisize)
             self.loaded = None
@@ -135,8 +135,7 @@ class Engine:
         return v.set_zernike({int(k): float(x) for k, x in p.get('zernike', {}).items() if int(k) in NOLL})
 
     def models(self, p):
-        """(model for the pixel panels, ConvSplinePSF whose knots give the volume (or None))."""
-        from torch_psf.spline import ConvSplinePSF
+        """(model for the pixel panels, ConvCubicSplinePSF whose knots give the volume (or None))."""
         from torch_psf.gaussian import GaussianPSF
         key = json.dumps({k: p.get(k) for k in ('model', 'optics', 'focus_um', 'z_range', 'zernike', 'roisize',
                                                  'sigma_px')}, sort_keys=True)
@@ -148,8 +147,8 @@ class Engine:
         elif p['model'] == 'spline' and self.loaded is not None:
             out = (self.loaded, self.loaded)
         else:
-            spl = ConvSplinePSF.from_vectorial(self._vectorial(p, R), R, tuple(p['z_range']), oversample=2,
-                                               dz_um=0.02, zpad=2, xy_limit=1.0, chunk=8)
+            spl = self._vectorial(p, R).to_spline(R, tuple(p['z_range']), oversample=2, dz_um=0.02, zpad=2,
+                                                  xy_limit=1.0, chunk=8)
             out = ((spl if p['model'] == 'spline' else self._vectorial(p, R)), spl)
         if len(self.cache) > 8:
             self.cache.clear()
@@ -327,13 +326,12 @@ def serve(psf=None, port=8000, device=None, open_browser=True, host='127.0.0.1')
 
 def dump_fixtures(out, device=None):
     """One response of every endpoint for the tetrapod preset (plus the astigmatic volume) into directory out."""
-    from torch_psf.io import save_psf
     os.makedirs(out, exist_ok=True)
     eng = Engine(device)
     p = _params(eng, PRESETS['tetrapod'])
     wj = lambda name, obj: json.dump(obj, open(os.path.join(out, name), 'w'), indent=1)
     wj('default.json', dict(eng.default, api_version=API_VERSION, presets=list(PRESETS)))
-    save_psf(os.path.join(out, 'tetrapod_psf.json'), eng._vectorial(p, p['roisize']))
+    eng._vectorial(p, p['roisize']).save(os.path.join(out, 'tetrapod_psf.json'))
     wj('load_tetrapod.json', dict(eng.load(os.path.join(out, 'tetrapod_psf.json')), api_version=API_VERSION))
     wj('request_tetrapod.json', dict(p, api_version=API_VERSION))
     for name, fn in (('volume', eng.volume), ('render', eng.render)):

@@ -1,5 +1,5 @@
 """
-ConvSplinePSF: a 3D PSF stored as Catmull-Rom spline knots on an oversampled grid, evaluated with one strided, grouped
+ConvCubicSplinePSF: a 3D PSF stored as Catmull-Rom spline knots on an oversampled grid, evaluated with one strided, grouped
 conv2d (the convolutional 3D spline of torch-spline-3d, J. Cnossen).
 
 The pixel-integrated PSF is shift invariant: patch[i, j] = g(o_j - x, o_i - y, z), with o the pixel offset from the
@@ -26,6 +26,7 @@ Units: x, y in px relative to the patch centre (pixel centres at integers), z in
 import math
 import torch
 from torch_psf.config import resolve_device
+from torch_psf.psf import PSF
 
 
 def geometry_matrix(device, tau: float = 0.5, dtype=torch.float32):
@@ -53,7 +54,7 @@ def stage_scan_pos_fn(focus0_um, scale, emitter_z=0.0):
     return pos_fn
 
 
-class ConvSplinePSF:
+class ConvCubicSplinePSF(PSF):
     """Spline PSF for roisize x roisize patches (roisize odd) and emitter heights z_range = (lo, hi) um.
 
     oversample: knots per px laterally; dz_um: knot spacing in z (um); zpad: extra knot planes below and above
@@ -111,7 +112,7 @@ class ConvSplinePSF:
         return self.xmax
 
     def __repr__(self):
-        return (f'ConvSplinePSF(roisize={self.roisize}, z_range=({self.zlo}, {self.zhi}), oversample={self.S}, '
+        return (f'ConvCubicSplinePSF(roisize={self.roisize}, z_range=({self.zlo}, {self.zhi}), oversample={self.S}, '
                 f'dz_um={self.hz}, zpad={self.zpad}, xy_limit={self.xmax}, knots {tuple(self.knots.shape)})')
 
     # ------------------------------------------------------------------ evaluation
@@ -155,14 +156,17 @@ class ConvSplinePSF:
         """render() (value only) in batches of nb emitters."""
         return torch.cat([self.render(pos[s:s + nb]) for s in range(0, len(pos), nb)])
 
-    def __call__(self, pos, intensity=None, bg=None):
-        """intensity * render(pos) + bg."""
-        out = self.render(pos)
-        if intensity is not None:
-            out = out * intensity[:, None, None]
-        if bg is not None:
-            out = out + bg[:, None, None]
-        return out
+    def to(self, device):
+        s = ConvCubicSplinePSF(self.roisize, self.z_range, oversample=self.S, dz_um=self.hz, zpad=self.zpad,
+                               xy_limit=self.xmax, device=device, dtype=self.dtype)
+        s.knots = self.knots.to(s.dev)
+        return s
+
+    def to_spline(self, roisize=None, z_range=None, **kw):
+        """A cubic spline is already a spline: returns self (other arguments are not supported)."""
+        if (roisize not in (None, self.roisize)) or (z_range is not None and tuple(z_range) != self.z_range) or kw:
+            raise ValueError('re-tabulating a spline is not supported; build it from the source model')
+        return self
 
     # ------------------------------------------------------------------ knots from a vectorial model
     def _vec_positions(self):
@@ -184,6 +188,22 @@ class ConvSplinePSF:
         imgs = imgs.reshape(n, S, S, Pl, Pl)                   # [z, b, a, i, j]
         # g at u = (j - c) - a / S -> knot index j S + (S - 1 - a) (contiguous); the same for v with (i, b)
         return imgs.flip(1).flip(2).permute(0, 3, 1, 4, 2).reshape(n, Pl * S, Pl * S)
+
+    def knots_from_model(self, model, chunk=8):
+        """Knot array [nz, nv, nu] from any PSF model with roisize Pl: model.render at the S x S sub-pixel shifts of
+        every knot plane (z = the knot z), interleaved as in build_planes."""
+        assert model.roisize == self.Pl, f'the model needs roisize {self.Pl}'
+        S, Pl = self.S, self.Pl
+        A, B = self._vec_positions()
+        out = []
+        with torch.no_grad():
+            for z0 in range(0, self.nz, chunk):
+                z = self.zs[z0:min(z0 + chunk, self.nz)].float()
+                n = len(z)
+                pos = torch.stack([A[None].expand(n, -1), B[None].expand(n, -1), z[:, None].expand(-1, S * S)], -1)
+                imgs = model.render(pos.reshape(-1, 3)).reshape(n, S, S, Pl, Pl)
+                out.append(imgs.flip(1).flip(2).permute(0, 3, 1, 4, 2).reshape(n, Pl * S, Pl * S))
+        return torch.cat(out).to(self.dtype)
 
     def knots_from_vectorial(self, vectorial, pos_fn=None, params=None, chunk=4):
         """Knot array [nz, nv, nu] from a VectorialPSF with roisize Pl (see VectorialPSF.resized). pos_fn: knot z ->
@@ -217,18 +237,6 @@ class ConvSplinePSF:
 
     # ------------------------------------------------------------------ constructors
     @classmethod
-    def from_vectorial(cls, vectorial, roisize, z_range=None, pos_fn=None, oversample=2, dz_um=0.04, zpad=2,
-                       xy_limit=3.0, chunk=4):
-        """Spline of a VectorialPSF for roisize x roisize patches over z_range (um; default vectorial.z_range). The
-        vectorial model is copied to the size the knots need (resized(Pl)); pos_fn as in knots_from_vectorial."""
-        vec = vectorial
-        zr = vec.z_range if z_range is None else z_range
-        spl = cls(roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad, xy_limit=xy_limit, device=vec.dev)
-        big = vec if vec.roisize == spl.Pl else vec.resized(spl.Pl)
-        spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
-        return spl
-
-    @classmethod
     def from_zstack(cls, zstack, z0_um, dz_um, roisize, device=None, normalize=False):
         """Spline with oversample 1 whose knots are a measured (or simulated) z-stack [nz, H, W] of an emitter centred
         on the middle pixel (H = W odd), plane k at z = z0_um + k dz_um. The offset limit follows from the stack size:
@@ -250,6 +258,6 @@ class ConvSplinePSF:
         return spl
 
     def to_dict(self):
-        """Grid description (without the knots) for io.save_psf."""
+        """Grid description (without the knots) for the PSF file."""
         return dict(roisize=self.roisize, z_range=[self.zlo, self.zhi], oversample=self.S, dz_um=self.hz,
                     zpad=self.zpad, xy_limit=self.xmax, c=self.c, z0_um=self.z0, nz=self.nz)

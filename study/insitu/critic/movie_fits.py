@@ -1,12 +1,13 @@
 """Critic test 4: is the y-vs-z tilt of the free pupil on movie patches (doc section 3.4) caused by the +-1.5 px
-offset clamp of ConvSplinePSF / localize? The detector centres high-z spots up to 1.7 px (mean) away from the true
+offset clamp of ConvCubicSplinePSF / localize? The detector centres high-z spots up to 1.7 px (mean) away from the true
 emitter (movie_diag.py), beyond the clamp. Free pupil fit (Zernike start = truth, 200 its, as fit_pupil_insitu) on
 the scenario A movie patches with the default xmax 1.5 px and with xmax 3.0 px; scored on the 6000 test emitters.
 Run from the repo root:  python study/insitu/critic/movie_fits.py MOVIE_A.pt [xmax ...]"""
 import sys, time, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import ConvSplinePSF, localize
+from torch_psf import ConvCubicSplinePSF
+from torch_psf.fit import localize
 
 D = torch.load(sys.argv[1], weights_only=False)
 rois = D['rois'].to(C.DEV)
@@ -27,7 +28,7 @@ def score(spl, K, nll_true, name):
 
 
 for xm in xmaxs:
-    spl = ConvSplinePSF(C.P, C.ZR, oversample=2, dz_um=0.04, zpad=5, xy_limit=xm, device=C.DEV)
+    spl = ConvCubicSplinePSF(C.P, C.ZR, oversample=2, dz_um=0.04, zpad=5, xy_limit=xm, device=C.DEV)
     Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
     spl.knots = Ktrue; _, nll_true = localize(spl, test['d'])
     print(f'xmax {xm} px (knot ROI {spl.Pl} px)', flush=True)

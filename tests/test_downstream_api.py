@@ -7,7 +7,7 @@ import tifffile
 import torch
 from conftest import DEV
 from test_io import calibration_json
-from torch_psf import Camera, VectorialPSF, load_psf, open_movie
+from torch_psf import Camera, VectorialPSF, PSF, open_movie
 from torch_psf.io import load_camera
 from torch_psf.movie import TiffMovie, ArrayMovie
 from torch_psf.fit import lm_poisson, fisher, model_and_jacobian
@@ -45,7 +45,7 @@ def test_camera_maps_and_roi_corners(tmp_path):
 
 def test_calibration_json_psf(tmp_path):
     calibration_json(tmp_path / 'calib.json')
-    v = load_psf(tmp_path / 'calib.json', roisize=11, device=DEV)
+    v = PSF.load(tmp_path / 'calib.json', roisize=11, device=DEV)
     assert isinstance(v, VectorialPSF) and v.zidx == list(range(5, 22))
     with torch.no_grad():
         img = v(torch.zeros(2, 3, device=DEV), torch.full((2,), v.focus_um, device=DEV))
@@ -103,5 +103,5 @@ def test_fit_tracks_with_group_hook():
     est = fit_tracks(tr, vec, readnoise_e=0.0, zmax_um=0.2, iters=150, warmup=20, groups=groups, ngroups=2,
                      group_psf_kwargs=hook, extra_params=[gam], lr_extra=0.02)
     assert abs(float(gam.detach()) - gamma_true) < 0.1, float(gam.detach())
-    assert 0.7 < est.report['resid_var'] < 1.3
-    assert est.data['I'].shape == (B, T)
+    assert 0.7 < est['report']['resid_var'] < 1.3
+    assert est['I'].shape == (B, T)

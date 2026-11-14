@@ -2,7 +2,7 @@
 import sys, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 from torch_psf.zernike import zernike
 scn = 'B'
 spl = F.new_spline()

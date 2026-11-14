@@ -1,7 +1,7 @@
 import time, torch, sys
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 scn = sys.argv[1]
 D = torch.load(f'study/insitu/out_dev_{scn}.pt')
 rois = D['rois'].to(C.DEV); stack = {k: (v.to(C.DEV) if torch.is_tensor(v) else v) for k, v in D['stack'].items()}

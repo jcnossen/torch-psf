@@ -7,7 +7,7 @@ Writes study/insitu/out/all_seed{SEED}.json.
 import sys, time, json, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 seed = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 scns = sys.argv[2] if len(sys.argv) > 2 else 'AB'
 res = {}

@@ -1,10 +1,13 @@
 # torch-psf
 
-PSF models, single-emitter fitting and PSF estimation for single-molecule localization microscopy (SMLM), in plain
-PyTorch, batched on the GPU:
+A PSF library for single-molecule localization microscopy (SMLM), in plain PyTorch, batched on the GPU. The PSF is
+the main object: every model renders the PSF with its x / y / z derivatives, and the base class `PSF` gives each of
+them the Cramér-Rao bound, maximum-likelihood fitting of spots, localization of whole movies, files and conversion to
+a cubic spline.
 
-- **models**: a vectorial pupil-function PSF (`VectorialPSF`), the convolutional 3D spline PSF (`ConvSplinePSF`: one
-  strided, grouped `conv2d` evaluates a whole batch of spots with their x / y / z derivatives) and a Gaussian PSF;
+- **models**: `VectorialPSF` (vectorial pupil function with Zernike aberrations), `ConvCubicSplinePSF` (a 3D cubic
+  spline evaluated with one strided, grouped `conv2d` per batch of spots), `GaussianPSF` (2D) and
+  `AstigmaticGaussianPSF` (3D calibration curves);
 - **fitting**: Poisson maximum likelihood (Levenberg-Marquardt, optional sCMOS read noise) and the Cramer-Rao bound;
 - **pipeline**: spot detection on movies, ROI extraction, localization tables;
 - **PSF estimation**: from bead z-stacks and *in situ* from the blinking emitters themselves. The in-situ fit evaluates
@@ -22,15 +25,15 @@ super-resolution image coloured by z. (g) Sections of an astigmatic and a tetrap
 ```python
 import torch, torch_psf as tp
 
-psf = tp.load_psf('psf.json')                       # or: tp.estimate_psf_beads(['beads.tif'], dz_um=0.02, optics=tp.Optics(pixel_um=0.108)).psf
 camera = tp.Camera(gain_e_per_adu=0.5, offset_adu=100.0, readnoise_e=1.5)
-
-spline = tp.ConvSplinePSF.from_vectorial(psf, roisize=13, z_range=(0.0, 0.8))   # fast form of the same PSF
-locs = tp.localize_movie('movie.tif', spline, camera, frames=(0, 1000))        # frame, x, y, z, photons, bg, crlb_*, ...
+psf = tp.InSituEstimator(start=tp.PSF.load('beads.json'), camera=camera).estimate('movie.tif')   # PSF from the data
+spline = psf.to_spline(roisize=13, z_range=(0.0, 0.8))                         # fast form of the same PSF
+locs = spline.localize('movie.tif', camera, frames=(0, 1000))                   # frame, x, y, z, photons, bg, crlb_*, ...
 print(len(locs), locs['crlb_x'].mean())
 
 pos = torch.tensor([[0.2, -0.1, 0.3]], device=spline.dev)                       # x, y (px from the ROI centre), z (um)
 img, dx, dy, dz = spline.render(pos, grad=True)                                  # [1, 13, 13] each
+psf.save('insitu.json')
 ```
 
 ## Install
@@ -48,81 +51,89 @@ A GPU is optional: every function takes `device=` and defaults to `cuda` when av
 - z = emitter height above the coverslip (um); `focus_um` = focal plane relative to the coverslip (um).
 - Lengths carry their unit in the name (`pixel_um`, `wavelength_um`, `dz_um`, `focus_um`); intensities and background
   in photons (photons / px for the background); aberrations in waves rms (Noll-indexed Zernikes).
-- Every PSF model has `render(pos [N, 3], grad=False)` -> `[N, P, P]` (or `(psf, d/dx, d/dy, d/dz)`), `roisize`,
-  `z_range` and `xy_limit`; fitting, CRLB and the pipeline work with any of them.
-- Every estimator returns a `PSFEstimate` with `.psf`, `.report` (dict), `.history`, `.data` and `.save(path)`.
+- `PSF` (base class): `render(pos [N, 3], grad=False)` -> `[N, P, P]` (or `(psf, d/dx, d/dy, d/dz)`), `expected`,
+  `fisher`, `crlb`, `fit(rois)` and `localize(movie)` (-> localization table), `save` / `PSF.load`, `to_spline`;
+  `roisize`, `z_range` (None for 2D), `n_dims`, `xy_limit`. A new model only implements `render`.
+- Estimators (`ZStackEstimator`, `InSituEstimator`) return the PSF; their numbers are in `estimator.report` (dict) and
+  `estimator.history`. The class diagram and the change notes are in [docs/API.md](docs/API.md).
 
 ## Entry points
 
-Each has a Python function and a command (`python -m torch_psf <command> -h`). The worked examples run on generated
+Each has a Python form and a command (`python -m torch_psf <command> -h`). The worked examples run on generated
 data in seconds on a GPU.
 
-**Bead z-stacks -> vectorial PSF** ([examples/bead_fit.py](examples/bead_fit.py); `--epfl` runs it on a one-bead crop
-of the public EPFL SMLM challenge 2016 bead stack in `tests/data/web/`):
+**Bead z-stacks -> PSF** ([examples/bead_fit.py](examples/bead_fit.py); `--epfl` runs it on a one-bead crop of the
+public EPFL SMLM challenge 2016 bead stack in `tests/data/web/`). `model='vectorial'` fits Zernikes, `'spline'` fits
+cubic-spline knots regularised towards that vectorial fit, `'astig_gauss'` the astigmatic Gaussian curves.
 
 ```python
-est = tp.estimate_psf_beads(['stack1.tif', 'stack2.tif'], dz_um=0.025, optics=tp.Optics(pixel_um=0.108, NA=1.49),
-                            camera=tp.Camera(gain_e_per_adu=0.5, offset_adu=100), roisize=21, holdout=1)
-print(est.report['heldout_nll_per_px'], est.psf.zcoef)
-est.save('beads.json')
+est = tp.ZStackEstimator('vectorial', optics=tp.Optics(pixel_um=0.108, NA=1.49),
+                         camera=tp.Camera(gain_e_per_adu=0.5, offset_adu=100), roisize=21, holdout=1)
+psf = est.estimate(['stack1.tif', 'stack2.tif'], dz_um=0.025)
+print(est.report['heldout_nll_per_px'], psf.zcoef)
+psf.save('beads.json')
 ```
 ```bash
 python -m torch_psf beads stack1.tif stack2.tif --dz-um 0.025 --pixel-um 0.108 --na 1.49 --gain 0.5 --offset 100 -o beads.json
 ```
 
 **SMLM movie -> in-situ PSF** ([examples/insitu_fit.py](examples/insitu_fit.py)): starts from a bead calibration or a
-nominal model and fits the Zernikes (or a free pupil, `method='pupil'`) to isolated spots of the movie; the report
-holds the held-out likelihood (checkerboard split by position), the fraction of fits at the offset limit and the z
-scale relative to the starting PSF.
+nominal model and fits the Zernikes (or a free pupil, `method='pupil'`) to spots of the movie. Spots the
+single-emitter model does not explain (overlapping emitters) are rejected after a first pass. `refine=True` adds a
+cubic-spline refinement that is kept only if it improves the held-out likelihood. The report holds the held-out
+comparison (checkerboard split by position), the fraction of fits at the offset limit and the z scale relative to
+the starting PSF.
 
 ```python
-est = tp.estimate_psf_insitu('movie.tif', psf='beads.json', focus_um=0.45, camera=camera, z_range=(0.0, 0.8),
-                             isolation=14)
+est = tp.InSituEstimator(start='beads.json', focus_um=0.45, camera=camera, z_range=(0.0, 0.8), isolation=14)
+psf = est.estimate('movie.tif')
 print(est.report['heldout'], est.report['at_limit'], est.report['z_scale'])
 ```
 ```bash
 python -m torch_psf insitu movie.tif --psf beads.json --focus-um 0.45 --isolation 14 -o insitu.json
 ```
 
-**Localize a movie with a given PSF** ([examples/localize_movie.py](examples/localize_movie.py)): returns a numpy
-structured array (`frame, x, y, z, photons, bg, crlb_x, crlb_y, crlb_z, crlb_photons, crlb_bg, loglik, chi2,
-at_limit`).
+**Localize a movie with a given PSF** ([examples/localize_movie.py](examples/localize_movie.py)): `psf.localize`
+returns a numpy structured array (`frame, x, y, z, photons, bg, crlb_x, crlb_y, crlb_z, crlb_photons, crlb_bg,
+loglik, chi2, at_limit`); `psf.fit(rois)` does the same for ROIs you cut yourself.
 
 ```python
-locs = tp.localize_movie('movie.tif', tp.ConvSplinePSF.from_vectorial(tp.load_psf('insitu.json'), 13), camera)
+locs = tp.PSF.load('insitu.json').to_spline(13).localize('movie.tif', camera)
 ```
 ```bash
 python -m torch_psf localize movie.tif --psf insitu.json --gain 0.5 --offset 100 -o locs.csv
 ```
 
 **A spline directly from a measured z-stack** ([examples/zstack_spline.py](examples/zstack_spline.py)):
-`tp.ConvSplinePSF.from_zstack(stack, z0_um, dz_um, roisize)` uses the stack planes as knots.
+`tp.ConvCubicSplinePSF.from_zstack(stack, z0_um, dz_um, roisize)` uses the stack planes as knots.
 
 **Look at a PSF**: `python -m torch_psf view [psf.json]` starts a viewer on localhost (3D isosurfaces and slice planes,
 pixel images, gradients, CRLB vs z; API in [docs/VIEWER_API.md](docs/VIEWER_API.md)). The page itself is built from
 the `web/` project (`scripts/build_viewer.sh`).
 
-**Lower level**: `tp.extract_spots(movie, roisize, camera)` (detection + ROIs), `tp.localize(psf, rois)`,
-`tp.crlb(psf, theta)`, `torch_psf.fit.lm_poisson` (any model with an analytic Jacobian), `torch_psf.insitu`
-(`fit_beads`, `fit_zernike_knots`, `fit_pupil_knots`, `fit_free_knots`, `fit_tracks` with variable projection),
-`torch_psf.simulate` (emitters, bead stacks, blinking movies).
+**Lower level**: `tp.extract_spots(movie, roisize, camera)` (detection + ROIs), `torch_psf.fit` (`localize`,
+`crlb`, `lm_poisson` for any model with an analytic Jacobian), `torch_psf.insitu` (`fit_beads`, `fit_zernike_knots`,
+`fit_pupil_knots`, `fit_free_knots`, `fit_tracks` with variable projection, held-out checks, `z_scale`),
+`torch_psf.simulate` (emitters, bead stacks, blinking movies, filament structures).
 
 ## Modules
 
 | | |
 |---|---|
 | `vectorial.py` | `VectorialPSF`: dipole emission with Fresnel transmission and supercritical-angle fluorescence, refractive-index mismatch, Zernike aberrations (also per emitter), free pupil phase / amplitude maps, image-plane (line) blur, emission-dipole tensor (photoselection), diattenuation; chirp-z transform to an oversampled grid and pixel integration. |
-| `spline.py` | `ConvSplinePSF`: Catmull-Rom knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_vectorial`, `from_zstack`. |
-| `gaussian.py` | `GaussianPSF`: pixel-integrated, 2D or astigmatic 3D. |
+| `psf.py` | `PSF`: the base class (statistics, fitting, localization, files, to_spline). |
+| `spline.py` | `ConvCubicSplinePSF`: Catmull-Rom (cubic) knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_zstack`. |
+| `gaussian.py` | `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D), pixel-integrated. |
 | `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`. |
 | `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `link_tracks`, `Tracks` / `extract_tracks`. |
-| `insitu/` | bead and in-situ PSF estimation, held-out checks. |
+| `estimators.py` | `ZStackEstimator`, `InSituEstimator`. |
+| `insitu/` | the estimation steps (bead fit, knot-route fits, free knots, tracks), held-out checks. |
 | `config.py`, `movie.py`, `io.py`, `table.py` | `Optics`, `Camera` (scalars or per-pixel maps), movie readers, PSF files, the localization table. |
-| `pipeline.py`, `__main__.py`, `viewer.py` | the entry points, the command line, the viewer server. |
+| `__main__.py`, `viewer.py` | the command line, the viewer server. |
 
 **PSF file**: one JSON (`format: "torch-psf"`, `type`, `optics`, `zernike_noll`, `zernike_waves`, `focus_um`, optional
 blur / dipole terms, spline grid) plus an `.npz` next to it for arrays (pupil maps, knots). The web app exports the
-same schema. `load_psf` also reads a plain calibration json with the keys at the top level (`pixelsize_um`,
+same schema. `PSF.load` also reads a plain calibration json with the keys at the top level (`pixelsize_um`,
 `wavelength_um`, `NA`, `n_imm`, `n_med`, `zernike_noll`, `zernike_waves`, `focus_um`, ...).
 
 ## The convolutional spline

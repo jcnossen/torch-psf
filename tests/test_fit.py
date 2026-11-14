@@ -1,7 +1,8 @@
 """The MLE fitter reaches the Cramer-Rao lower bound on simulated isolated emitters (2D and astigmatic 3D)."""
 import torch
 from conftest import DEV
-from torch_psf import GaussianPSF, VectorialPSF, ConvSplinePSF, localize, crlb
+from torch_psf import GaussianPSF, VectorialPSF, ConvCubicSplinePSF
+from torch_psf.fit import localize, crlb
 from torch_psf.fit import lm_poisson, model_and_jacobian, fisher
 from torch_psf.simulate import simulate_emitters
 
@@ -34,7 +35,7 @@ def test_crlb_2d_gaussian_scmos():
 def test_crlb_3d_astigmatic_spline():
     vec = VectorialPSF(15, npupil=48, oversample=2, device=DEV, focus_um=0.4, z_range=(0.0, 0.8))
     vec.set_zernike({6: 0.1})
-    spl = ConvSplinePSF.from_vectorial(vec, 15, dz_um=0.04)
+    spl = vec.to_spline(15, dz_um=0.04)
     check_crlb(spl, photons=3000.0, z_range=(0.1, 0.7), dims=(0, 1, 2, 3), tol=0.15)
 
 

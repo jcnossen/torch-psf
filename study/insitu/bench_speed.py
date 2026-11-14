@@ -3,7 +3,7 @@ one pass through the vectorial model (route K). Then both routes inside the same
 import time, json, torch, sys
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 D = torch.load('study/insitu/out_dev_A.pt', weights_only=False)
 rois = D['rois'].to(C.DEV); zc0 = D['zc_s'].to(C.DEV)
 spl = F.new_spline()

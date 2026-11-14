@@ -9,7 +9,7 @@ c and d are rendered like the movie (23 px PSF support, z in 0..0.8).
 import sys, math, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 scn = sys.argv[1] if len(sys.argv) > 1 else 'A'
 which = sys.argv[2] if len(sys.argv) > 2 else 'abcd'
 P, h = C.P, (C.P - 1) // 2

@@ -3,7 +3,7 @@ uniform sub-pixel offsets, no detection step), same photons and number of emitte
 import sys, time, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 for scn in 'AB':
     spl = F.new_spline()
     Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)

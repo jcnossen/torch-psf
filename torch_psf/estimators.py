@@ -1,0 +1,342 @@
+"""PSF estimators: from bead z-stacks (ZStackEstimator) and in situ from an SMLM movie (InSituEstimator).
+
+Both take the starting point the same way (a PSF object or file, or Optics), an optional Camera, progress / stop
+hooks, and return the estimated PSF itself; the numbers of the run are on the estimator: estimator.report (dict) and
+estimator.history (list of per-iteration records).
+
+    est = InSituEstimator(start='beads.json', camera=camera, refine=True)
+    psf = est.estimate('movie.tif')
+    print(est.report['heldout'], est.report['z_scale'])
+"""
+import time
+import numpy as np
+import torch
+from torch_psf.config import Optics, Camera, resolve_device
+
+
+def _camera(camera):
+    if camera is None or isinstance(camera, Camera):
+        return camera
+    if isinstance(camera, dict):
+        return Camera.from_dict(camera)
+    from torch_psf.io import load_camera
+    return load_camera(camera)
+
+
+def _start_vectorial(start, optics, roisize, device, zernike_indices=tuple(range(5, 22)), npupil=64, oversample=3):
+    """Starting VectorialPSF: start (VectorialPSF or PSF file), else optics (Optics / dict / None = defaults)."""
+    from torch_psf.vectorial import VectorialPSF
+    from torch_psf.psf import PSF
+    if start is not None and not isinstance(start, PSF):
+        start = PSF.load(start, roisize=roisize, device=device)
+    if start is not None:
+        if not isinstance(start, VectorialPSF):
+            raise TypeError(f'the start must be a vectorial PSF, not {type(start).__name__}')
+        return start.resized(roisize) if start.roisize != roisize else start
+    o = optics if isinstance(optics, Optics) else Optics.from_dict(optics or {})
+    return VectorialPSF.from_optics(o, roisize, zernike_indices=zernike_indices, npupil=npupil, oversample=oversample,
+                                    device=device)
+
+
+def find_beads(stack, roisize, nmax=32, min_sep=None, sigma=2.0, border=None):
+    """Bright isolated beads in a z-stack [nk, H, W] (any units): maxima of the blurred maximum projection, at least
+    min_sep (default roisize) px from each other and roisize / 2 + 1 px from the border, brightest first.
+    Returns corners [n, 2] = (x0, y0) of roisize x roisize ROIs centred on them (numpy int)."""
+    from scipy.ndimage import gaussian_filter, maximum_filter
+    mp = gaussian_filter(np.asarray(stack, np.float32).max(0), sigma)
+    mp = mp - np.median(mp)
+    h = roisize // 2
+    sep = roisize if min_sep is None else min_sep
+    pk = (mp == maximum_filter(mp, size=2 * h + 1)) & (mp > 0.1 * mp.max())
+    y, x = np.nonzero(pk)
+    b = h + 1 if border is None else border
+    ok = (x >= b) & (y >= b) & (x < mp.shape[1] - b) & (y < mp.shape[0] - b)
+    x, y = x[ok], y[ok]
+    o = np.argsort(-mp[y, x])
+    x, y = x[o], y[o]
+    keep = []
+    for i in range(len(x)):
+        dd = np.max(np.abs(np.stack([x - x[i], y - y[i]], 1)), 1)
+        if keep and (dd[keep] < sep).any():
+            continue
+        keep.append(i)
+        if len(keep) >= nmax:
+            break
+    return np.stack([x[keep] - h, y[keep] - h], 1).astype(int)
+
+
+class Estimator:
+    """Base of the estimators: device, progress(stage, iteration, value, seconds) and stop() -> bool hooks, and the
+    report / history of the last estimate()."""
+
+    def __init__(self, device=None, progress=None, stop=None):
+        self.dev = resolve_device(device)
+        self.progress, self.stop = progress, stop
+        self.report, self.history = {}, []
+        self._t0 = time.time()
+
+    def _log(self, stage):
+        """a log(it, value, seconds, ...) callback for the low-level fits that records the history and calls
+        progress"""
+        def log(it, value, seconds, *rest):
+            self.history.append(dict(stage=stage, it=it, value=float(value), seconds=float(seconds)))
+            if self.progress is not None:
+                self.progress(stage, it, float(value), float(seconds))
+        return log
+
+    def _stopped(self):
+        return self.stop is not None and bool(self.stop())
+
+    def _reset(self):
+        self.report, self.history = {}, []
+        self._t0 = time.time()
+
+
+class ZStackEstimator(Estimator):
+    """PSF from bead z-stacks.
+
+    model: 'vectorial' (Zernike fit of a VectorialPSF), 'spline' (a ConvCubicSplinePSF whose knots are fitted to the
+    stacks, regularised towards the vectorial fit with weight `regularize`), or 'astig_gauss' (the astigmatic
+    Gaussian calibration curves). start (VectorialPSF or PSF file) or optics: the starting vectorial model.
+    camera: Camera / calibration json / None (stacks in photons). roisize (px), nbeads (per stack, the brightest
+    isolated ones), sign (scan direction), iters, holdout (index of a stack kept out of the fit; its NLL per pixel is
+    reported), drift (linear xy drift per stack), spline grid: oversample, spline_dz_um, xy_limit.
+
+    estimate(stacks, dz_um) -> PSF. Plane k of a stack is at focus sign dz_um (k - (nk - 1) / 2) um (the stack centre
+    is focus 0, so centre the stacks on the beads); the beads sit on the coverslip. The vectorial model's focus_um is
+    0; the spline and the astigmatic Gaussian have z = -focus (the defocus of the bead, in stage um, no refractive-index
+    rescaling) over the scanned range."""
+
+    def __init__(self, model='vectorial', start=None, optics=None, camera=None, roisize=21, nbeads=8, sign=1.0,
+                 iters=300, holdout=None, drift=True, regularize=3000.0, oversample=2, spline_dz_um=None,
+                 xy_limit=3.0, zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, device=None,
+                 progress=None, stop=None):
+        super().__init__(device, progress, stop)
+        if model not in ('vectorial', 'spline', 'astig_gauss'):
+            raise ValueError("model: 'vectorial', 'spline' or 'astig_gauss'")
+        self.model, self.start, self.optics, self.camera = model, start, optics, _camera(camera)
+        self.roisize, self.nbeads, self.sign, self.iters = roisize, nbeads, sign, iters
+        self.holdout, self.drift, self.regularize = holdout, drift, regularize
+        self.oversample, self.spline_dz_um, self.xy_limit = oversample, spline_dz_um, xy_limit
+        self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
+
+    def _rois(self, stacks):
+        import tifffile
+        rois, sid = [], []
+        ii = torch.arange(self.roisize, device=self.dev)
+        for i, s in enumerate(stacks):
+            a = tifffile.imread(s) if isinstance(s, str) else np.asarray(s)
+            a = torch.as_tensor(np.asarray(a, np.float32), device=self.dev)
+            if self.camera is not None:
+                a = self.camera.to_photons(a)
+            for x0, y0 in find_beads(a.cpu().numpy(), self.roisize, nmax=self.nbeads):
+                rois.append(a[:, y0 + ii[:, None], x0 + ii[None, :]])
+                sid.append(i)
+        if not rois:
+            raise ValueError('no beads found')
+        return torch.stack(rois), torch.tensor(sid, device=self.dev)
+
+    def estimate(self, stacks, dz_um):
+        """stacks: list of [nk, H, W] arrays or TIFF paths (one bead field each, the same nk). Returns the PSF."""
+        from torch_psf.insitu.beads import fit_beads, stage_focus
+        from torch_psf.fit import poisson_nll
+        self._reset()
+        if isinstance(stacks, (str, np.ndarray)) or torch.is_tensor(stacks):
+            stacks = [stacks]
+        d, sid = self._rois(stacks)
+        nb, nk, P = d.shape[0], d.shape[1], d.shape[-1]
+        focus = stage_focus(nk, dz_um, self.sign).to(self.dev)
+        w = None if self.holdout is None else (sid != self.holdout).float()
+        self.report.update(model=self.model, n_stacks=len(stacks), n_beads=nb, n_planes=nk, dz_um=dz_um,
+                           sign=self.sign)
+        if self.model == 'astig_gauss':
+            psf = self._fit_astig(d, focus, w)
+            self.report['seconds'] = time.time() - self._t0
+            return psf
+        vec = _start_vectorial(self.start, self.optics, P, self.dev, self.zernike_indices, self.npupil,
+                               self.oversample_pupil)
+        r = fit_beads(d, focus, vec, iters=self.iters, stack_id=sid, drift=self.drift, weights=w,
+                      log=self._log('vectorial'), stop=self.stop)
+        psf = r['psf']
+        psf.focus_um = 0.0
+        self.report.update(nll_per_px=r['report']['nll_per_px'])
+        self.data = dict(rois=d, stack_id=sid, focus_um=focus, xy=r['xy'], photons=r['photons'], bg=r['bg'])
+        if self.holdout is not None:
+            m = sid == self.holdout
+            with torch.no_grad():
+                n = int(m.sum())
+                pos = torch.cat([r['xy'][m][:, None].expand(-1, nk, -1), torch.zeros(n, nk, 1, device=self.dev)],
+                                -1).reshape(-1, 3)
+                mu = r['photons'][m].reshape(-1, 1, 1) * psf(pos, focus[None].expand(n, -1).reshape(-1)) \
+                    + r['bg'][m].reshape(-1, 1, 1)
+                self.report['heldout_nll_per_px'] = float(poisson_nll(d[m].reshape(-1, P, P), mu).sum()) / d[m].numel()
+        if self.model == 'vectorial':
+            self.report['seconds'] = time.time() - self._t0
+            return psf
+        return self._fit_spline(psf, d, focus, sid)
+
+    def _fit_spline(self, vec, d, focus, sid):
+        """knots fitted to the bead stacks (z = -focus), starting from and regularised towards the vectorial fit"""
+        from torch_psf.spline import stage_scan_pos_fn
+        from torch_psf.insitu.knots import fit_free_knots
+        zlo, zhi = float(-focus.max()), float(-focus.min())
+        dz = self.spline_dz_um or max(abs(float(focus[1] - focus[0])), 0.02)
+        spl = vec.to_spline(self.roisize, (zlo + dz, zhi - dz), oversample=self.oversample, dz_um=dz, zpad=2,
+                            xy_limit=self.xy_limit, pos_fn=stage_scan_pos_fn(0.0, 1.0))
+        K0 = spl.knots.clone()
+        keep = sid != self.holdout if self.holdout is not None else torch.ones_like(sid, dtype=torch.bool)
+        z_nom = -focus
+        inr = (z_nom >= spl.z_limits[0]) & (z_nom <= spl.z_limits[1])
+        stack = dict(d=d[keep][:, inr], z_nom=z_nom[inr])
+        r = fit_free_knots(spl, K0, stack=stack, ref=K0 if self.regularize > 0 else None, lam_ref=self.regularize,
+                           outer=8, log=self._log('spline'), stop=self.stop)
+        self.report.update(spline=dict(z_range=list(spl.z_range), oversample=spl.S, dz_um=spl.hz,
+                                       change_vs_vectorial=float((r['knots'] - K0).norm() / K0.norm())))
+        self.report['seconds'] = time.time() - self._t0
+        return r['psf']
+
+    def _fit_astig(self, d, focus, w):
+        """Poisson fit of the astigmatic Gaussian curves (sx0, sy0, gamma, d) with per-bead xy and per-plane
+        photons / bg; z = -focus."""
+        from torch_psf.gaussian import AstigmaticGaussianPSF
+        from torch_psf.fit import poisson_nll
+        nb, nk, P = d.shape[0], d.shape[1], d.shape[-1]
+        o = Optics.from_dict(self.optics) if isinstance(self.optics, dict) else (self.optics or Optics())
+        s0 = 0.21 * o.wavelength_um / o.NA / o.pixel_um * 1.1
+        z = (-focus)[None].expand(nb, -1).reshape(-1)
+        lsx = torch.tensor([np.log(s0), np.log(s0)], device=self.dev, requires_grad=True)
+        gam = torch.tensor(0.15, device=self.dev, requires_grad=True)
+        ld = torch.tensor(np.log(0.4), device=self.dev, requires_grad=True)
+        xy = torch.zeros(nb, 2, device=self.dev, requires_grad=True)
+        bg0 = d.flatten(2).quantile(0.1, 2)
+        logI = torch.log((d.flatten(2).sum(2) - bg0 * P ** 2).clamp_min(100)).requires_grad_(True)
+        bg = bg0.clone().requires_grad_(True)
+        opt = torch.optim.Adam([dict(params=[lsx, gam, ld], lr=0.01), dict(params=[xy], lr=0.01),
+                                dict(params=[logI], lr=0.01), dict(params=[bg], lr=0.3)])
+        dd = d.reshape(-1, P, P)
+        wt = None if w is None else w.repeat_interleave(nk)
+        zr = (float(z.min()), float(z.max()))
+        log = self._log('astig_gauss')
+        for it in range(self.iters):
+            opt.zero_grad()
+            psf = AstigmaticGaussianPSF(P, (1.0, 1.0), 0.0, 1.0, zr, device=self.dev)
+            psf.sigma = (torch.exp(lsx[0]), torch.exp(lsx[1]))
+            psf.gamma, psf.d = gam, torch.exp(ld)
+            pos = torch.cat([xy[:, None].expand(-1, nk, -1).reshape(-1, 2), z[:, None]], 1)
+            mu = torch.exp(logI).reshape(-1, 1, 1) * psf.render(pos) + bg.reshape(-1, 1, 1)
+            l = poisson_nll(dd, mu)
+            l = (l * wt).sum() if wt is not None else l.sum()
+            l.backward()
+            opt.step()
+            log(it, float(l), time.time() - self._t0)
+            if self._stopped():
+                break
+        out = AstigmaticGaussianPSF(P, (float(torch.exp(lsx[0])), float(torch.exp(lsx[1]))), float(gam),
+                                    float(torch.exp(ld)), zr, device=self.dev)
+        self.report.update(sigma_px=list(out.sigma), gamma_um=out.gamma, d_um=out.d,
+                           nll_per_px=float(l.detach()) / dd.numel())
+        return out
+
+
+class InSituEstimator(Estimator):
+    """In-situ PSF from an SMLM movie: detection, spot ROIs, a checkerboard split into training / held-out spots, the
+    vectorial Zernike fit by the knot route (torch_psf.insitu.fit_zernike_knots; method 'pupil' adds free pupil
+    maps), rejection of spots the single-emitter model does not explain (overlapping emitters: Poisson deviance per
+    pixel above 1 + deviance_k sqrt(2 / P^2) after the first pass; refit on the rest), an optional cubic-spline
+    refinement (refine=True: free knots regularised towards the vectorial spline, kept only if the held-out NLL
+    improves), and the held-out comparison.
+
+    start (VectorialPSF or PSF file, e.g. a bead fit) or optics: the starting model; focus_um: the focal plane during
+    the acquisition (default: the start's focus_um). camera: Camera / calibration json / None (movie in photons).
+    roisize (px), z_range (um): emitter heights. nspots / nheldout: training / held-out spots (tile px checkerboard).
+    Spline grid: oversample, dz_um, xy_limit (>= 3 px recommended). Detection: threshold, isolation, detect_kw.
+
+    estimate(movie, frames=None) -> PSF (VectorialPSF, or the refined ConvCubicSplinePSF when refine=True and it
+    wins on the held-out spots). report: n_spots, n_train, n_test, n_rejected, at_limit, z_scale / z_offset_um (fit vs
+    start), heldout (NLL per pixel of start / vectorial / refined), chosen, warnings."""
+
+    def __init__(self, start=None, optics=None, camera=None, focus_um=None, roisize=15, z_range=(0.0, 0.8),
+                 nspots=8000, nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0,
+                 refine=False, refine_lam_ref=3000.0, refine_lam_s=1000.0, refine_outer=12, oversample=2, dz_um=0.04,
+                 xy_limit=3.0, threshold=6.0, isolation=None, tile=16, device=None, progress=None, stop=None,
+                 **detect_kw):
+        super().__init__(device, progress, stop)
+        self.start, self.optics, self.camera, self.focus_um = start, optics, _camera(camera), focus_um
+        self.roisize, self.z_range, self.nspots, self.nheldout = roisize, tuple(z_range), nspots, nheldout
+        self.method, self.iters, self.reject_overlap, self.deviance_k = method, iters, reject_overlap, deviance_k
+        self.refine, self.refine_lam_ref, self.refine_lam_s, self.refine_outer = (refine, refine_lam_ref,
+                                                                                   refine_lam_s, refine_outer)
+        self.grid = dict(oversample=oversample, dz_um=dz_um, zpad=5, xy_limit=xy_limit)
+        self.threshold, self.isolation, self.tile, self.detect_kw = threshold, isolation, tile, detect_kw
+
+    def _fit(self, spline, rois, vec, iters, stage):
+        from torch_psf.insitu import fit_zernike_knots, fit_pupil_knots
+        fn = fit_zernike_knots if self.method == 'zernike' else fit_pupil_knots
+        if self.method not in ('zernike', 'pupil'):
+            raise ValueError(self.method)
+        return fn(spline, rois, vec, iters=iters, log=self._log(stage), stop=self.stop)
+
+    def estimate(self, movie, frames=None):
+        from torch_psf.spline import ConvCubicSplinePSF
+        from torch_psf.spots import extract_spots
+        from torch_psf.insitu import (split_checkerboard, compare_heldout, spot_deviance, fit_free_knots, z_scale,
+                                      FREE_KNOT_WARNING, limit_fraction)
+        self._reset()
+        R, zr = self.roisize, self.z_range
+        vec0 = _start_vectorial(self.start, self.optics, R, self.dev)
+        if self.focus_um is not None:
+            vec0.focus_um = float(self.focus_um)
+        vec0.z_range = zr
+        sp = extract_spots(movie, R, self.camera, frames, device=self.dev,
+                           max_spots=2 * (self.nspots + self.nheldout), threshold=self.threshold,
+                           isolation=self.isolation, **self.detect_kw)
+        h = (R - 1) / 2
+        par = split_checkerboard(sp.corner[:, 0] + h, sp.corner[:, 1] + h, self.tile)
+        tr = np.flatnonzero(par == 0)[:self.nspots]
+        te = np.flatnonzero(par == 1)[:self.nheldout]
+        rois = sp.rois[torch.as_tensor(tr, device=self.dev)]
+        spline = ConvCubicSplinePSF(R, zr, device=self.dev, **self.grid)
+        r = self._fit(spline, rois, vec0, self.iters, 'vectorial')
+        vec = r['psf']
+        n_rej = 0
+        if self.reject_overlap and not self._stopped():
+            s1 = vec.to_spline(R, zr, **self.grid)
+            dv, _ = spot_deviance(s1, rois)
+            thr = 1 + self.deviance_k * np.sqrt(2.0 / R ** 2)
+            keep = dv < thr
+            n_rej = int((~keep).sum())
+            rois = rois[torch.as_tensor(keep, device=self.dev)]
+            r = self._fit(spline, rois, vec, max(self.iters * 3 // 4, 1), 'vectorial (overlaps rejected)')
+            vec = r['psf']
+            self.report['deviance_threshold'] = float(thr)
+        s0 = vec0.to_spline(R, zr, **self.grid)
+        s_vec = vec.to_spline(R, zr, **self.grid)
+        sc, off = z_scale(s_vec, s0)
+        self.report.update(method=self.method, n_spots=len(sp), n_train=len(tr), n_test=len(te), n_rejected=n_rej,
+                           frames_read=sp.frames_read, at_limit=r['report']['at_limit'], z_scale=sc, z_offset_um=off,
+                           warnings=[])
+        cands = {'start': s0, 'vectorial': s_vec}
+        result = vec
+        if self.refine and not self._stopped():
+            s_ref = vec.to_spline(R, zr, **self.grid)          # a separate grid object: the fit overwrites its knots
+            K_vec = s_ref.knots.clone()
+            rr = fit_free_knots(s_ref, K_vec, rois=rois, ref=K_vec, lam_ref=self.refine_lam_ref,
+                                lam_s=self.refine_lam_s, outer=self.refine_outer, log=self._log('refine'),
+                                stop=self.stop)
+            cands['refined'] = rr['psf']
+            sc_r, off_r = z_scale(rr['psf'], s_vec)
+            self.report['refine'] = dict(z_scale_vs_vectorial=sc_r, z_offset_um_vs_vectorial=off_r,
+                                         at_limit=rr['report']['at_limit'])
+            self.report['warnings'].append(FREE_KNOT_WARNING)
+        if len(te):
+            ho = compare_heldout(cands, sp.rois[torch.as_tensor(te, device=self.dev)])
+            self.report['heldout'] = ho
+            if 'refined' in cands:
+                better = ho['refined']['nll_per_px'] < ho['vectorial']['nll_per_px']
+                self.report['refine']['kept'] = bool(better)
+                if better:
+                    result = cands['refined']
+        self.report['chosen'] = type(result).__name__
+        self.report['seconds'] = time.time() - self._t0
+        self.data = dict(spots=sp, train=tr, test=te, spline=s_vec, vectorial=vec)
+        return result

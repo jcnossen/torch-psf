@@ -1,4 +1,4 @@
-"""In-situ PSF estimation from a (simulated) SMLM movie: torch_psf.estimate_psf_insitu (knot route).
+"""In-situ PSF estimation from a (simulated) SMLM movie: torch_psf.InSituEstimator (knot route).
 
 The movie is simulated with a known aberration set; the fit starts from a nominal astigmatic model (as a bead
 calibration made on another day would be) and recovers the aberrations from the blinking emitters themselves.
@@ -20,14 +20,17 @@ movie, events = simulate_movie(lambda p: true.forward_batched(p, f0.expand(len(p
 print(f'movie {tuple(movie.shape)}, {len(events)} emitter events')
 
 start = tp.VectorialPSF(15, pixel_um=0.108, NA=1.49, wavelength_um=0.68, focus_um=0.45).set_zernike({6: 0.08})
-est = tp.estimate_psf_insitu(movie, psf=start, roisize=15, z_range=(0.0, 0.8), nspots=6000, nheldout=3000,
-                             isolation=14, iters=60,
-                             log=lambda it, nll, sec, zc: it % 20 == 0 and print(f'  it {it}  nll {nll:.1f}  {sec:.1f} s'))
-print(est)
+est = tp.InSituEstimator(start=start, roisize=15, z_range=(0.0, 0.8), nspots=6000, nheldout=3000, isolation=14,
+                         iters=60, refine=True,
+                         progress=lambda st, it, v, sec: it % 20 == 0 and print(f'  {st}: it {it}  {v:.1f}  {sec:.1f} s'))
+psf = est.estimate(movie)
+print(psf)
+vec = psf if isinstance(psf, tp.VectorialPSF) else est.data['vectorial']
 for j in sorted(set(truth) | {9, 10, 12}):
-    i = est.psf.zidx.index(j)
-    print(f'  Noll {j:2d}: true {truth.get(j, 0.0):+.3f}  start {float(start.zcoef[i]):+.3f}  fitted {float(est.psf.zcoef[i].detach()):+.3f} waves')
+    i = vec.zidx.index(j)
+    print(f'  Noll {j:2d}: true {truth.get(j, 0.0):+.3f}  start {float(start.zcoef[i]):+.3f}  fitted {float(vec.zcoef[i].detach()):+.3f} waves')
 print('held-out NLL per pixel (lower is better):',
       {k: round(v['nll_per_px'], 5) for k, v in est.report['heldout'].items()})
 print(f"fits at the offset limit: {est.report['at_limit']:.4f}; z scale vs the start: {est.report['z_scale']:.3f}")
-est.save('insitu_psf.json')
+print('chosen:', est.report['chosen'], est.report.get('refine'), est.report['warnings'])
+psf.save('insitu_psf.json')

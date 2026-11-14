@@ -1,7 +1,7 @@
 import time, torch, sys
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 scn = sys.argv[1] if len(sys.argv) > 1 else 'A'
 spl = F.new_spline()
 Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)

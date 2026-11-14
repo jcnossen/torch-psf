@@ -10,9 +10,9 @@ from torch_psf.viewer import Engine, make_handler, unpack, API_VERSION, dump_fix
 
 
 def test_viewer_api(tmp_path):
-    from torch_psf import VectorialPSF, save_psf
+    from torch_psf import VectorialPSF
     v = VectorialPSF(15, npupil=32, oversample=2, device=DEV, focus_um=0.3).set_zernike({6: 0.1})
-    save_psf(tmp_path / 'p.json', v)
+    v.save(tmp_path / 'p.json')
     srv = ThreadingHTTPServer(('127.0.0.1', 0), make_handler(Engine(DEV)))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{srv.server_address[1]}'

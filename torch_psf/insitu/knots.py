@@ -1,8 +1,8 @@
 """In-situ PSF estimation on the spline knots (the "knot route").
 
-All emitters are evaluated on a ConvSplinePSF; the Poisson likelihood gradient is accumulated on the knots (autograd
+All emitters are evaluated on a ConvCubicSplinePSF; the Poisson likelihood gradient is accumulated on the knots (autograd
 through the spline) and, for a vectorial model, passed to its parameters with one vector-Jacobian product through
-the knot build (ConvSplinePSF.vjp_vectorial). The cost of the vectorial model is then independent of the number of
+the knot build (ConvCubicSplinePSF.vjp_vectorial). The cost of the vectorial model is then independent of the number of
 emitters.
 
   fit_zernike_knots   Zernike coefficients of a VectorialPSF from SMLM ROIs (route 'K'; route 'V' evaluates the
@@ -11,15 +11,20 @@ emitters.
   fit_free_knots      free knots (model-free PSF) from SMLM ROIs and / or a bead stack, with prior / smoothness terms
 
 Inner step: per-emitter theta = (x, y, z, photons, bg) by Levenberg-Marquardt on the current spline
-(torch_psf.fit.localize). Every result (PSFEstimate) reports the fraction of emitters at the lateral offset limit of
+(torch_psf.fit.localize). Every result (a dict) reports the fraction of emitters at the lateral offset limit of
 the spline (at_limit; should be ~0, raise xy_limit otherwise) and the z scale relative to the starting PSF.
 """
 import time
 import torch
+
+
+def _result(psf, report, history, data):
+    """Result of the low-level estimators: dict(psf, report, history, **data)."""
+    return dict(psf=psf, report=report, history=history, **data)
 from torch_psf.fit import localize, poisson_nll, at_limit
 from torch_psf.zernike import zernike
-from torch_psf.spline import ConvSplinePSF, emitter_height_pos_fn
-from torch_psf.estimate import PSFEstimate, z_scale, FREE_KNOT_WARNING
+from torch_psf.spline import ConvCubicSplinePSF, emitter_height_pos_fn
+from torch_psf.insitu.zscale import z_scale, FREE_KNOT_WARNING
 
 
 def limit_fraction(spline, theta):
@@ -28,7 +33,7 @@ def limit_fraction(spline, theta):
 
 
 def _copy(spline, knots):
-    s = ConvSplinePSF(spline.roisize, spline.z_range, oversample=spline.S, dz_um=spline.hz, zpad=spline.zpad,
+    s = ConvCubicSplinePSF(spline.roisize, spline.z_range, oversample=spline.S, dz_um=spline.hz, zpad=spline.zpad,
                       xy_limit=spline.xmax, device=spline.dev, dtype=spline.dtype)
     s.knots = knots.detach().clone()
     return s
@@ -99,7 +104,7 @@ def _sync(dev):
 def fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, route='K', loc_iters=3, log=None,
                       theta=None, localizer=None, stop=None):
     """Zernike coefficients of `vectorial` (a VectorialPSF of any roisize; copied to the sizes needed) from SMLM ROIs
-    [N, P, P] (photons; P = spline.roisize). The spline (ConvSplinePSF) defines the knot grid; its knots are
+    [N, P, P] (photons; P = spline.roisize). The spline (ConvCubicSplinePSF) defines the knot grid; its knots are
     overwritten. Per iteration:
       (1) emitter parameters by Levenberg-Marquardt on the spline built from the current Zernikes (30 iterations the
           first time, loc_iters afterwards; or localizer(spline, rois, theta) -> (theta, nll)),
@@ -108,7 +113,7 @@ def fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, r
       (3) an Adam step (lr, waves) on the Zernikes.
     pos_fn: knot z -> (emitter z, focus) (default: emitter height at vectorial.focus_um).
     log(it, nll, seconds, zcoef): progress callback; stop(): early stop ("use what we have").
-    Returns PSFEstimate: psf = copy of vectorial with the fitted Zernikes; data = dict(zcoef, theta (of the last
+    Returns dict(psf, report, history, ...): psf = copy of vectorial with the fitted Zernikes; data = dict(zcoef, theta (of the last
     localization), knots (the spline of the last localization step))."""
     spl, d, vec = spline, rois, vectorial
     pos_fn = emitter_height_pos_fn(vec.focus_um) if pos_fn is None else pos_fn
@@ -155,7 +160,7 @@ def fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, r
     if K0 is not None:
         rep.update(_zscale_report(spl, K0, spl.knots_from_vectorial(big, pos_fn, chunk=spl.nz)))
     spl.knots = last_knots
-    return PSFEstimate(out, rep, hist, dict(zcoef=zc, theta=th, knots=last_knots))
+    return _result(out, rep, hist, dict(zcoef=zc, theta=th, knots=last_knots))
 
 
 def fit_pupil_knots(spline, rois, vectorial, pos_fn=None, iters=200, lr_z=1e-3, lr_p=2e-3, lr_a=1e-2, lam=0.0,
@@ -164,7 +169,7 @@ def fit_pupil_knots(spline, rois, vectorial, pos_fn=None, iters=200, lr_z=1e-3, 
     (waves) and of log pupil amplitude. Piston, tilt and defocus are projected out of the phase map (global shifts of
     all emitters), the mean out of the log amplitude (global brightness). lam: Laplacian roughness penalty on both
     maps; lr_z / lr_p / lr_a: Adam step sizes of the Zernikes, phase and log amplitude. Other arguments as
-    fit_zernike_knots. Returns PSFEstimate: psf = copy of vectorial with the fitted Zernikes and maps; data =
+    fit_zernike_knots. Returns dict(psf, report, history, ...): psf = copy of vectorial with the fitted Zernikes and maps; data =
     dict(zcoef, phase, la, theta, knots (built from the final model))."""
     spl, d, vec = spline, rois, vectorial
     pos_fn = emitter_height_pos_fn(vec.focus_um) if pos_fn is None else pos_fn
@@ -222,7 +227,7 @@ def fit_pupil_knots(spline, rois, vectorial, pos_fn=None, iters=200, lr_z=1e-3, 
                nll=hist[-1]['nll'] if hist else float('nan'), at_limit=limit_fraction(spl, th))
     if K0 is not None:
         rep.update(_zscale_report(spl, K0, K))
-    return PSFEstimate(out, rep, hist, dict(prm, theta=th, knots=K))
+    return _result(out, rep, hist, dict(prm, theta=th, knots=K))
 
 
 @torch.no_grad()
@@ -254,12 +259,12 @@ def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0,
     """Free-knot PSF. Alternates (1) the emitter parameters at fixed knots (Levenberg-Marquardt per ROI) and (2) the
     knots at fixed emitter parameters (L-BFGS, `inner` iterations; the model is linear in the knots, so this
     subproblem is convex), `outer` times.
-    spline: ConvSplinePSF (knot grid; its knots are overwritten); knots0: starting knots [nz, nv, nu];
+    spline: ConvCubicSplinePSF (knot grid; its knots are overwritten); knots0: starting knots [nz, nv, nu];
     rois: SMLM ROIs [N, P, P] (photons); stack: dict(d=[nbeads, nk, P, P], z_nom=[nk]) bead stack with known plane
     heights; ref: reference knots for the prior.
     loss = NLL(SMLM ROIs) + w_stack NLL(bead stack) + lam_ref sum (K - ref)^2 / (|ref| + eps)
            + lam_s sum of squared second differences / (|knots0| + eps).
-    Returns PSFEstimate: psf = a ConvSplinePSF with the fitted knots; data = dict(knots, theta (of the SMLM ROIs));
+    Returns dict(psf, report, history, ...): psf = a ConvCubicSplinePSF with the fitted knots; data = dict(knots, theta (of the SMLM ROIs));
     report includes z_scale against knots0 and a warning (free knots can warp z)."""
     spl, insitu, K0, th_ins = spline, rois, knots0, theta
     K = K0.clone().requires_grad_(True)
@@ -313,4 +318,4 @@ def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0,
                at_limit=limit_fraction(spl, th_ins) if th_ins is not None else float('nan'),
                warnings=[FREE_KNOT_WARNING])
     rep.update(_zscale_report(spl, K0, K.detach()))
-    return PSFEstimate(_copy(spl, K.detach()), rep, hist, dict(knots=K.detach(), theta=th_ins))
+    return _result(_copy(spl, K.detach()), rep, hist, dict(knots=K.detach(), theta=th_ins))

@@ -83,7 +83,7 @@ def localize_w(spl, d, w, th0, iters=30, nb=4000, fixed=(), lam0=1.0):
 
 def crlb_w(spl, th, w):
     """Poisson CRLB (std of x, y, z, I, bg) with a pixel mask."""
-    from torch_psf import crlb
+    from torch_psf.fit import crlb
     return crlb(spl, th, weight=w, ridge=1e-9)
 
 

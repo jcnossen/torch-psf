@@ -6,7 +6,7 @@ Run from the repo root:  python study/insitu/critic/inverse_crime.py"""
 import sys, time, math, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 
 NTR, NTE = 8000, 4000
 zt = C.zc_insitu().to(C.DEV)

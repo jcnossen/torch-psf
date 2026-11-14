@@ -13,8 +13,12 @@ group g; their trainable tensors are passed in extra_params (fitted with lr_extr
 import math
 import time
 import torch
+
+
+def _result(psf, report, history, data):
+    """Result of the low-level estimators: dict(psf, report, history, **data)."""
+    return dict(psf=psf, report=report, history=history, **data)
 from torch_psf.varpro import solve_linear
-from torch_psf.estimate import PSFEstimate
 
 
 def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0, blur='none',
@@ -25,7 +29,7 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     focus (fitted). blur: 'none' or 'line' (image-plane line blur v v^T, px^2). groups [B, T] (long, values
     0..ngroups-1): background groups and PSF groups (default one group). group_psf_kwargs / extra_params: per-group
     PSF hook (module docstring).
-    Returns PSFEstimate: psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
+    Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
     (variance of the normalized residuals, 1 for a perfect model), nll_per_px, focus_um; data: xy [B, 2] px rel. to
     the ROI centre, z [B] um, I [B, T] photons, bg [B, ngroups]."""
     dev = tracks.rois.device
@@ -116,6 +120,6 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     rep = dict(method='tracks', n_samples=B, iterations=len(hist), resid_var=float(rs.var()), nll_per_px=tot,
                focus_um=float(focus.detach()), seconds=time.time() - t0,
                at_limit=float((xy.detach().abs().max(1).values > c - 1).float().mean()))
-    return PSFEstimate(out, rep, hist, dict(xy=xy.detach(), z=(zmax_um * torch.sigmoid(zr)).detach(),
+    return _result(out, rep, hist, dict(xy=xy.detach(), z=(zmax_um * torch.sigmoid(zr)).detach(),
                                             I=torch.cat(Is), bg=torch.cat(bgs),
                                             extra=[e.detach() for e in extra]))

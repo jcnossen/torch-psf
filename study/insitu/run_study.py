@@ -2,7 +2,7 @@
 import time, json, sys, torch, numpy as np
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 import matplotlib; matplotlib.use('Agg'); import matplotlib.pyplot as plt
 OUT = 'study/insitu/out/'
 res, curves, gal = {}, {}, {}

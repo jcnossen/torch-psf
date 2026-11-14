@@ -2,7 +2,7 @@
 import json
 import torch
 from conftest import DEV
-from torch_psf import VectorialPSF, ConvSplinePSF, GaussianPSF, save_psf, load_psf
+from torch_psf import VectorialPSF, ConvCubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF, PSF
 from torch_psf.io import load_camera, load_spline_source
 
 POS = torch.tensor([[0.1, -0.2, 0.3], [0.4, 0.1, 0.05]])
@@ -15,8 +15,8 @@ def test_vectorial_round_trip(tmp_path):
         v.pupil_phase.copy_(0.03 * v.mask * v.px)
     v.blur = torch.tensor([0.1, 0.05, 0.01], device=DEV)
     v.dipM = torch.diag(torch.tensor([0.3, 0.3, 0.4], device=DEV))
-    save_psf(tmp_path / 'v.json', v)
-    w = load_psf(tmp_path / 'v.json', device=DEV)
+    v.save(tmp_path / 'v.json')
+    w = PSF.load(tmp_path / 'v.json', device=DEV)
     p = POS.to(DEV)
     assert torch.allclose(v.render(p), w.render(p), atol=1e-7)
     d = json.load(open(tmp_path / 'v.json'))
@@ -26,19 +26,19 @@ def test_vectorial_round_trip(tmp_path):
 def test_spline_round_trip(tmp_path):
     v = VectorialPSF(13, npupil=48, oversample=2, device=DEV, focus_um=0.3, z_range=(0.0, 0.6))
     v.set_zernike({6: 0.1})
-    s = ConvSplinePSF.from_vectorial(v, 11)
-    save_psf(tmp_path / 's.json', s, source=v)
-    t = load_psf(tmp_path / 's.json', device=DEV)
+    s = v.to_spline(11)
+    s.save(tmp_path / 's.json', source=v)
+    t = PSF.load(tmp_path / 's.json', device=DEV)
     p = POS.to(DEV)
-    assert isinstance(t, ConvSplinePSF) and torch.equal(s.render(p), t.render(p))
+    assert isinstance(t, ConvCubicSplinePSF) and torch.equal(s.render(p), t.render(p))
     src = load_spline_source(tmp_path / 's.json', device=DEV)
     assert torch.allclose(src.zcoef, v.zcoef)
 
 
 def test_gaussian_round_trip(tmp_path):
-    g = GaussianPSF(11, sigma_px=(1.2, 1.4), gamma_um=0.2, d_um=0.4, device=DEV)
-    save_psf(tmp_path / 'g.json', g)
-    h = load_psf(tmp_path / 'g.json', device=DEV)
+    g = AstigmaticGaussianPSF(11, sigma_px=(1.2, 1.4), gamma_um=0.2, d_um=0.4, device=DEV)
+    g.save(tmp_path / 'g.json')
+    h = PSF.load(tmp_path / 'g.json', device=DEV)
     p = POS.to(DEV)
     assert torch.allclose(g.render(p), h.render(p))
 
@@ -59,12 +59,12 @@ def test_calibration_json(tmp_path):
     d = calibration_json(tmp_path / 'calib.json', psf_blur_px2=[0.2, 0.0, -0.01],
                          psf_dipole_M_angle=[[[0.3, 0, 0], [0, 0.38, 0], [0, 0, 0.32]],
                                              [[0.38, 0, 0], [0, 0.3, 0], [0, 0, 0.32]]])
-    v = load_psf(tmp_path / 'calib.json', roisize=11, device=DEV)
+    v = PSF.load(tmp_path / 'calib.json', roisize=11, device=DEV)
     assert abs(v.focus_um - 0.11) < 1e-9 and v.pixel_um == 0.10833 and v.blur is not None
     assert torch.allclose(v.dipM, torch.diag(torch.tensor([0.34, 0.34, 0.32], device=DEV)))
-    v1 = load_psf(tmp_path / 'calib.json', roisize=11, device=DEV, angle=1)
+    v1 = PSF.load(tmp_path / 'calib.json', roisize=11, device=DEV, angle=1)
     assert float(v1.dipM[0, 0]) == float(torch.tensor(0.38))
     cam = load_camera(tmp_path / 'calib.json')
     assert cam.offset_adu.shape == (64, 64) and cam.gain_e_per_adu == 0.56
     json.dump(dict(d, psf_gauss_sigma_um=0.14), open(tmp_path / 'g.json', 'w'))
-    assert isinstance(load_psf(tmp_path / 'g.json', device=DEV), GaussianPSF)
+    assert isinstance(PSF.load(tmp_path / 'g.json', device=DEV), GaussianPSF)

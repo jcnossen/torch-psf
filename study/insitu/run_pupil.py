@@ -2,7 +2,7 @@
 import time, json, sys, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 OUT = 'study/insitu/out/'
 lam = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
 iters = int(sys.argv[2]) if len(sys.argv) > 2 else 200

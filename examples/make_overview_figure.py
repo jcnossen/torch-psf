@@ -19,6 +19,7 @@ from scipy.ndimage import gaussian_filter
 import torch_psf as tp
 from torch_psf.simulate import simulate_movie, filament_sites
 from torch_psf.insitu import fit_zernike_knots
+from torch_psf.fit import localize
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--out', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'docs', 'overview'))
@@ -46,12 +47,12 @@ movie, events = simulate_movie(render_true, 23, T=4000, H=H, W=W, p_on=0.0006, m
                                photons_logsd=0.3, generator=g, device=dev, sites=sites)
 spots = tp.extract_spots(movie, 15, device=dev, threshold=6.0, isolation=16)
 start = tp.VectorialPSF(15, focus_um=0.4, **opt).set_zernike({6: 0.08})
-spline = tp.ConvSplinePSF(15, (0.0, 0.8), dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
+spline = tp.ConvCubicSplinePSF(15, (0.0, 0.8), dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 est = fit_zernike_knots(spline, spots.rois, start, iters=200)
-fitted = tp.ConvSplinePSF.from_vectorial(est.psf, 15, (0.0, 0.8))
-locs = tp.localize_movie(movie.numpy(), fitted, device=dev)
+fitted = est['psf'].to_spline(15, (0.0, 0.8))
+locs = fitted.localize(movie.numpy())
 locs = locs[~locs['at_limit'] & (locs['crlb_x'] < 0.25) & (locs['z'] > 0.0) & (locs['z'] < 0.8)]
-theta, _ = tp.localize(fitted, spots.rois[:2000])
+theta, _ = localize(fitted, spots.rois[:2000])
 theta = theta.cpu()
 
 
@@ -244,7 +245,7 @@ ax = fig.add_subplot(r3[0])
 nl = list(range(5, 22))
 tv = np.array([truth.get(j, 0.0) for j in nl])
 sv = start.zcoef.detach().cpu().numpy()
-ev = est.psf.zcoef.detach().cpu().numpy()
+ev = est['psf'].zcoef.detach().cpu().numpy()
 x = np.arange(len(nl))
 ax.bar(x - 0.28, 1000 * sv, 0.28, color='0.72', label='start')
 ax.bar(x, 1000 * tv, 0.28, color='#3b6fd8', label='truth')
@@ -261,7 +262,7 @@ ax = fig.add_subplot(r3[1])
 zz = torch.linspace(0.02, 0.78, 39, device=dev)
 th = torch.stack([torch.zeros_like(zz), torch.zeros_like(zz), zz, torch.full_like(zz, 4000.0),
                   torch.full_like(zz, 30.0)], 1)
-cr = tp.crlb(fitted, th).cpu().numpy()
+cr = fitted.crlb(th).cpu().numpy()
 z_ = zz.cpu().numpy() * 1000
 ax.plot(z_, cr[:, 0] * PX * 1000, color='#e8a000', label='x')
 ax.plot(z_, cr[:, 1] * PX * 1000, color='#3b6fd8', label='y')

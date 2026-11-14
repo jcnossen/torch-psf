@@ -28,6 +28,7 @@ import math
 import torch
 from torch_psf.zernike import zernike
 from torch_psf.config import default_device, Optics
+from torch_psf.psf import PSF
 
 
 def gauss_blur_os(I, cov, os_, pad):
@@ -73,7 +74,7 @@ def photosel_tensor(gamma, e_inplane, eps=0.0, k_dir=None, ck=0.153):
     return (1 - gamma) * torch.eye(3, device=dev) / 3 + gamma * K
 
 
-class VectorialPSF(torch.nn.Module):
+class VectorialPSF(torch.nn.Module, PSF):
     """Vectorial PSF on a roisize x roisize patch (see the module docstring for the physics).
 
     Constructor: roisize (px), pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices (Noll), npupil (pupil
@@ -264,6 +265,23 @@ class VectorialPSF(torch.nn.Module):
             val = v if val is None else val
             out.append(d)
         return val, out[0], out[1], out[2]
+
+    def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8,
+                  pos_fn=None):
+        """ConvCubicSplinePSF of this model (see PSF.to_spline). pos_fn: knot z -> (emitter z, focus) (default: the
+        emitter height at self.focus_um; e.g. spline.stage_scan_pos_fn for a bead-stack geometry)."""
+        from torch_psf.spline import ConvCubicSplinePSF
+        zr = self.z_range if z_range is None else z_range
+        spl = ConvCubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
+                                 xy_limit=xy_limit, device=self.dev)
+        big = self if self.roisize == spl.Pl else self.resized(spl.Pl)
+        spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
+        return spl
+
+    def to(self, device):
+        """A copy on another device (torch.nn.Module.to semantics are not used: buffers and the cached geometry
+        are rebuilt)."""
+        return self.resized(self.roisize, device=device)
 
     def __repr__(self):
         return (f'VectorialPSF(roisize={self.roisize}, pixel_um={self.pixel_um}, NA={float(self.NA):.3f}, '

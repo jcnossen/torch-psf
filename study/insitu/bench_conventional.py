@@ -9,7 +9,7 @@ Writes study/insitu/out/conventional.json."""
 import sys, time, json, numpy as np, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 try:
     from fastpsf import Context, CSplineMethods
     from fastpsf.estim_queue import EstimQueue

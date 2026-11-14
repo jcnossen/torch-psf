@@ -1,15 +1,17 @@
 """PSF files: one JSON description (parameters; optics; optional camera) plus an optional sidecar .npz for arrays
 (pupil maps, spline knots). The vectorial PSF keys are those of the plain calibration json (pixelsize_um,
-wavelength_um, NA, n_imm, n_med, zernike_noll, zernike_waves, focus_um, psf_blur_px2, ...), which load_psf also reads.
+wavelength_um, NA, n_imm, n_med, zernike_noll, zernike_waves, focus_um, psf_blur_px2, ...), which load also reads.
+Use PSF.load(path) / psf.save(path); this module holds the implementation.
 
 Schema (format 'torch-psf', version '0.1.0'):
-  type            'vectorial' | 'spline' | 'gaussian'
+  type            'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian'
   optics          {pixel_um, NA, wavelength_um, n_imm, n_med}   (also at the top level as pixelsize_um, wavelength_um, ...)
   zernike_noll, zernike_waves, apod, saf, focus_um, psf_blur_px2, psf_dipole_M, diattenuation, npupil, oversample,
   roisize, z_range_um
   spline          (type spline) {roisize, z_range, oversample, dz_um, zpad, xy_limit, c, z0_um, nz}; knots in the
                   npz ('knots')
-  gaussian        (type gaussian) {sigma_px, gamma_um, d_um, z_range_um}; calibration key psf_gauss_sigma_um
+  gaussian        (types gaussian / astig_gaussian) {sigma_px, gamma_um, d_um, z_range_um}; calibration key
+                  psf_gauss_sigma_um (2D)
   arrays          name of the sidecar npz (pupil_phase, pupil_amp, knots), relative to the json
   camera          optional Camera dict; provenance: free-form
 """
@@ -19,8 +21,8 @@ import numpy as np
 import torch
 from torch_psf.config import Optics, Camera
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import ConvSplinePSF
-from torch_psf.gaussian import GaussianPSF
+from torch_psf.spline import ConvCubicSplinePSF
+from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
 
 FORMAT, VERSION = 'torch-psf', '0.1.0'
 
@@ -50,15 +52,15 @@ def _vectorial_dict(vec):
     return d, arrays
 
 
-def save_psf(path, psf, source=None, camera=None, provenance=None):
-    """Write a PSF model (VectorialPSF, ConvSplinePSF or GaussianPSF) to path (.json) plus path minus .json + '.npz'
+def save(path, psf, source=None, camera=None, provenance=None):
+    """Write a PSF model (VectorialPSF, ConvCubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF) to path (.json) plus path minus .json + '.npz'
     when there are arrays. source: for a spline, the vectorial model it was built from (its parameters are stored
     too, so the spline can be rebuilt). camera: optional Camera. Returns the json dict."""
     arrays = {}
     if isinstance(psf, VectorialPSF):
         d, arrays = _vectorial_dict(psf)
         d = dict(format=FORMAT, version=VERSION, type='vectorial', **d)
-    elif isinstance(psf, ConvSplinePSF):
+    elif isinstance(psf, ConvCubicSplinePSF):
         d = dict(format=FORMAT, version=VERSION, type='spline', spline=psf.to_dict())
         if source is not None:
             v, a = _vectorial_dict(source)
@@ -66,9 +68,12 @@ def save_psf(path, psf, source=None, camera=None, provenance=None):
             arrays.update(a)
         arrays['knots'] = psf.knots.detach().cpu().numpy()
     elif isinstance(psf, GaussianPSF):
-        d = dict(format=FORMAT, version=VERSION, type='gaussian',
-                 gaussian=dict(sigma_px=list(psf.sigma), gamma_um=psf.gamma, d_um=psf.d,
-                               z_range_um=None if psf.z_range is None else list(psf.z_range)), roisize=psf.roisize)
+        d = dict(format=FORMAT, version=VERSION, type='gaussian', gaussian=dict(sigma_px=list(psf.sigma)),
+                 roisize=psf.roisize)
+    elif isinstance(psf, AstigmaticGaussianPSF):
+        d = dict(format=FORMAT, version=VERSION, type='astig_gaussian',
+                 gaussian=dict(sigma_px=list(psf.sigma), gamma_um=psf.gamma, d_um=psf.d, z_range_um=list(psf.z_range)),
+                 roisize=psf.roisize)
     else:
         raise TypeError(type(psf))
     if camera is not None:
@@ -122,7 +127,7 @@ def _vectorial_from(d, roisize, device, angle, arrays, npupil=None, oversample=N
     return vec
 
 
-def load_psf(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
+def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
     """Read a torch-psf file or a plain calibration json and return the PSF model.
 
     roisize: ROI size for vectorial / Gaussian models (default: the stored one, or 15 for a calibration json).
@@ -142,14 +147,17 @@ def load_psf(path, roisize=None, device=None, angle=None, npupil=None, oversampl
         return _vectorial_from(d, roisize or d.get('roisize', 15), device, angle, arrays, npupil, oversample)
     if typ == 'spline':
         g = d['spline']
-        spl = ConvSplinePSF(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'],
+        spl = ConvCubicSplinePSF(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'],
                             zpad=g['zpad'], xy_limit=g['xy_limit'], device=device)
         spl.knots = torch.as_tensor(arrays['knots'], device=spl.dev, dtype=spl.dtype)
         return spl
     if typ == 'gaussian':
+        return GaussianPSF(roisize or d.get('roisize', 15), sigma_px=tuple(d['gaussian']['sigma_px']), device=device)
+    if typ == 'astig_gaussian':
         g = d['gaussian']
-        return GaussianPSF(roisize or d.get('roisize', 15), sigma_px=tuple(g['sigma_px']), gamma_um=g.get('gamma_um'),
-                           d_um=g.get('d_um', 0.4), z_range=g.get('z_range_um') or (-0.5, 0.5), device=device)
+        return AstigmaticGaussianPSF(roisize or d.get('roisize', 15), sigma_px=tuple(g['sigma_px']),
+                                     gamma_um=g['gamma_um'], d_um=g['d_um'], z_range=tuple(g['z_range_um']),
+                                     device=device)
     raise ValueError(f'unknown PSF type {typ!r}')
 
 

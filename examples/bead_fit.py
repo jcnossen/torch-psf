@@ -1,4 +1,4 @@
-"""Bead z-stacks -> vectorial PSF (torch_psf.estimate_psf_beads), on simulated stacks with a known aberration set.
+"""Bead z-stacks -> PSF (torch_psf.ZStackEstimator), on simulated stacks with a known aberration set.
 
     python examples/bead_fit.py [--out bead_psf.json]
     python examples/bead_fit.py --epfl       # the one-bead crop of the public EPFL SMLM challenge 2016 bead stack
@@ -19,8 +19,8 @@ if a.epfl:   # real data: one bead, astigmatic (cylindrical lens); acquisition s
     meta = json.load(open(crop.replace('.tif', '.json')))
     optics = tp.Optics(pixel_um=meta['pixel_um'], NA=meta['NA'], wavelength_um=meta['wavelength_um'])
     camera = tp.Camera(gain_e_per_adu=meta['gain'], offset_adu=meta['offset'])
-    est = tp.estimate_psf_beads([crop], dz_um=meta['dz_um'], optics=optics, camera=camera, roisize=25, nbeads=1,
-                                drift=False)
+    est = tp.ZStackEstimator('vectorial', optics=optics, camera=camera, roisize=25, nbeads=1, drift=False)
+    psf = est.estimate([crop], dz_um=meta['dz_um'])
 else:        # simulated: 3 stacks with 4 beads each, astigmatism + coma + spherical, Poisson noise
     truth = {5: 0.02, 6: 0.10, 7: -0.03, 8: 0.015, 11: 0.04}
     vec = tp.VectorialPSF(21, pixel_um=0.108, NA=1.49, wavelength_um=0.68).set_zernike(truth)
@@ -38,13 +38,14 @@ else:        # simulated: 3 stacks with 4 beads each, astigmatism + coma + spher
         adu = torch.poisson(mov, generator=g) / 0.5 + 100          # camera: 0.5 e-/ADU, offset 100 ADU
         files.append(os.path.join(tmp, f'stack{s}.tif'))
         tifffile.imwrite(files[-1], adu.cpu().numpy().astype(np.uint16))
-    est = tp.estimate_psf_beads(files, dz_um=dz, optics=tp.Optics(pixel_um=0.108, NA=1.49, wavelength_um=0.68),
-                                camera=tp.Camera(gain_e_per_adu=0.5, offset_adu=100.0), roisize=21, holdout=2,
-                                log=lambda it, nll, sec, zc: it % 50 == 0 and print(f'  it {it}  nll {nll:.1f}'))
-    err = (est.psf.zcoef.detach() - vec.zcoef.detach()).pow(2).mean().sqrt()
+    est = tp.ZStackEstimator('vectorial', optics=tp.Optics(pixel_um=0.108, NA=1.49, wavelength_um=0.68),
+                             camera=tp.Camera(gain_e_per_adu=0.5, offset_adu=100.0), roisize=21, holdout=2,
+                             progress=lambda st, it, v, sec: it % 50 == 0 and print(f'  it {it}  nll {v:.1f}'))
+    psf = est.estimate(files, dz_um=dz)
+    err = (psf.zcoef.detach() - vec.zcoef.detach()).pow(2).mean().sqrt()
     print(f'Zernike error (rms over Noll 5-21): {float(err):.4f} waves')
 
-print(est)
-print('fitted Zernikes (waves):', {j: round(float(c), 3) for j, c in zip(est.psf.zidx, est.psf.zcoef.detach()) if abs(c) > 0.005})
-est.save(a.out)
+print(psf, est.report)
+print('fitted Zernikes (waves):', {j: round(float(c), 3) for j, c in zip(psf.zidx, psf.zcoef.detach()) if abs(c) > 0.005})
+psf.save(a.out)
 print('saved', a.out, '(view it with: python -m torch_psf view', a.out + ')')

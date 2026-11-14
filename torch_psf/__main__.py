@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 import numpy as np
+import torch
 
 
 def _optics_args(p):
@@ -57,14 +58,25 @@ def _frames(s):
     return int(a), int(b)
 
 
-def _progress(it, nll, sec, *rest):
+def _progress(stage, it, value, sec):
     if it % 10 == 0:
-        print(f'  iteration {it:4d}  nll {nll:.6g}  {sec:6.1f} s', flush=True)
+        print(f'  {stage}: iteration {it:4d}  {value:.6g}  {sec:6.1f} s', flush=True)
+
+
+def _jsonable(v):
+    if torch.is_tensor(v):
+        return v.detach().cpu().tolist() if v.numel() <= 64 else f'<tensor {tuple(v.shape)}>'
+    if isinstance(v, (np.floating, np.integer)):
+        return v.item()
+    if isinstance(v, dict):
+        return {str(k): _jsonable(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_jsonable(x) for x in v]
+    return v
 
 
 def _print_report(est):
-    rep = {k: v for k, v in est.report.items() if not isinstance(v, (dict, list)) or k == 'warnings'}
-    print(json.dumps(rep, indent=1, default=str))
+    print(json.dumps(_jsonable(est.report), indent=1, default=str))
 
 
 def main(argv=None):
@@ -72,7 +84,7 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='cmd', required=True)
 
-    p = sub.add_parser('beads', help='bead z-stacks -> vectorial PSF')
+    p = sub.add_parser('beads', help='bead z-stacks -> PSF')
     p.add_argument('stacks', nargs='+', help='TIFF z-stacks (one bead field each)')
     p.add_argument('--dz-um', type=float, required=True, help='z step of the stage scan (um)')
     p.add_argument('--sign', type=float, default=1.0, help='direction of the scan (+1 / -1)')
@@ -80,6 +92,7 @@ def main(argv=None):
     p.add_argument('--nbeads', type=int, default=8, help='beads per stack')
     p.add_argument('--iters', type=int, default=300)
     p.add_argument('--holdout', type=int, default=None, help='index of a stack kept out of the fit')
+    p.add_argument('--model', default='vectorial', choices=['vectorial', 'spline', 'astig_gauss'])
     p.add_argument('--psf', default=None, help='starting PSF file (else the optics options)')
     p.add_argument('-o', '--out', required=True, help='PSF json to write')
     _optics_args(p); _camera_args(p); _common(p)
@@ -96,6 +109,7 @@ def main(argv=None):
     p.add_argument('--iters', type=int, default=80)
     p.add_argument('--threshold', type=float, default=6.0)
     p.add_argument('--isolation', type=float, default=None, help='px: drop spots with a neighbour this close')
+    p.add_argument('--refine', action='store_true', help='cubic-spline refinement (kept if the held-out NLL improves)')
     p.add_argument('-o', '--out', required=True)
     _optics_args(p); _camera_args(p); _common(p)
 
@@ -118,36 +132,36 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
     if a.cmd == 'beads':
-        from torch_psf.pipeline import estimate_psf_beads
-        est = estimate_psf_beads(a.stacks, a.dz_um, psf=a.psf, optics=_optics(a), camera=_camera(a), roisize=a.roisize,
-                                 sign=a.sign, nbeads=a.nbeads, iters=a.iters, holdout=a.holdout, device=a.device,
-                                 log=_progress)
-        est.save(a.out, camera=_camera(a))
+        from torch_psf.estimators import ZStackEstimator
+        est = ZStackEstimator(a.model, start=a.psf, optics=_optics(a), camera=_camera(a), roisize=a.roisize,
+                              sign=a.sign, nbeads=a.nbeads, iters=a.iters, holdout=a.holdout, device=a.device,
+                              progress=_progress)
+        psf = est.estimate(a.stacks, a.dz_um)
+        psf.save(a.out, camera=_camera(a), provenance=dict(report=_jsonable(est.report)))
         _print_report(est)
     elif a.cmd == 'insitu':
-        from torch_psf.pipeline import estimate_psf_insitu
-        est = estimate_psf_insitu(a.movie, psf=a.psf, optics=_optics(a), camera=_camera(a), focus_um=a.focus_um,
-                                  roisize=a.roisize, z_range=tuple(a.z_range), frames=_frames(a.frames),
-                                  nspots=a.nspots, method=a.method, iters=a.iters, threshold=a.threshold,
-                                  isolation=a.isolation, device=a.device, log=_progress)
-        est.save(a.out, camera=_camera(a))
+        from torch_psf.estimators import InSituEstimator
+        est = InSituEstimator(start=a.psf, optics=_optics(a), camera=_camera(a), focus_um=a.focus_um,
+                              roisize=a.roisize, z_range=tuple(a.z_range), nspots=a.nspots, method=a.method,
+                              iters=a.iters, threshold=a.threshold, isolation=a.isolation, refine=a.refine,
+                              device=a.device, progress=_progress)
+        psf = est.estimate(a.movie, frames=_frames(a.frames))
+        psf.save(a.out, camera=_camera(a), provenance=dict(report=_jsonable(est.report)))
         _print_report(est)
     elif a.cmd == 'localize':
-        from torch_psf.io import load_psf
+        from torch_psf.psf import PSF
         from torch_psf.vectorial import VectorialPSF
-        from torch_psf.spline import ConvSplinePSF
-        from torch_psf.pipeline import localize_movie
-        psf = load_psf(a.psf, roisize=a.roisize, device=a.device)
+        from torch_psf.table import to_csv
+        psf = PSF.load(a.psf, roisize=a.roisize, device=a.device)
         if isinstance(psf, VectorialPSF):
-            psf = ConvSplinePSF.from_vectorial(psf, psf.roisize, tuple(a.z_range) if a.z_range else None)
-        L = localize_movie(a.movie, psf, _camera(a), frames=_frames(a.frames), threshold=a.threshold,
-                           isolation=a.isolation, device=a.device,
-                           progress=lambda d, t, n: print(f'  {d}/{t} frames, {n} localizations', flush=True))
+            psf = psf.to_spline(psf.roisize, tuple(a.z_range) if a.z_range else None)
+        L = psf.localize(a.movie, _camera(a), frames=_frames(a.frames), threshold=a.threshold,
+                         isolation=a.isolation,
+                         progress=lambda d, t, n: print(f'  {d}/{t} frames, {n} localizations', flush=True))
         if a.out.endswith('.npy'):
             np.save(a.out, L)
         else:
-            np.savetxt(a.out, np.array(L.tolist(), dtype=np.float64), delimiter=',', header=','.join(L.dtype.names),
-                       comments='', fmt='%.6g')
+            to_csv(L, a.out)
         print(f'{len(L)} localizations -> {a.out}')
     elif a.cmd == 'view':
         from torch_psf.viewer import serve

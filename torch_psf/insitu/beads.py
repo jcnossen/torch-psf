@@ -3,8 +3,12 @@ n_med / apodization) of a VectorialPSF, with per bead x, y (shared by its planes
 an optional finite bead size and an optional linear lateral drift of each stack over the planes."""
 import time
 import torch
+
+
+def _result(psf, report, history, data):
+    """Result of the low-level estimators: dict(psf, report, history, **data)."""
+    return dict(psf=psf, report=report, history=history, **data)
 from torch_psf.fit import poisson_nll
-from torch_psf.estimate import PSFEstimate
 
 
 def sphere_points(diameter_um, n=32, seed=0):
@@ -25,7 +29,7 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
     drift=True: per stack a linear xy drift (px per plane). bead_diameter_um: the bead is modelled as nball points on
     a sphere (else a point). chunk: beads per backward pass (memory; None = all at once). weights [nbeads]: e.g. 0
     for held-out beads. log(it, nll, seconds, zcoef), stop(): progress / early stop.
-    Returns PSFEstimate: psf = the fitted VectorialPSF; data = dict(xy [nbeads, 2] px rel. to the ROI centre,
+    Returns dict(psf, report, history, ...): psf = the fitted VectorialPSF; data = dict(xy [nbeads, 2] px rel. to the ROI centre,
     photons [nbeads, nk], bg [nbeads, nk], drift [nstacks, 2] px per plane or None)."""
     d, focus, vec, emitter_z = stack, focus_um, vectorial, emitter_z_um
     nb, nk, P = d.shape[0], d.shape[1], d.shape[-1]
@@ -88,7 +92,7 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
     psf.zcoef.requires_grad_(True)
     rep = dict(method='beads', n_beads=nb, n_planes=nk, iterations=len(hist), nll_per_px=tot / d.numel(),
                seconds=time.time() - t0, at_limit=0.0)
-    return PSFEstimate(psf, rep, hist, dict(xy=xy.detach(), photons=torch.exp(logI.detach()), bg=bg.detach(),
+    return _result(psf, rep, hist, dict(xy=xy.detach(), photons=torch.exp(logI.detach()), bg=bg.detach(),
                                             drift=None if dr is None else dr.detach()))
 
 

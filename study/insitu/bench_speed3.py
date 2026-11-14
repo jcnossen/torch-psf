@@ -9,7 +9,7 @@ Self-contained (simulates its own patches). Writes study/insitu/out/speed3.json.
 import time, json, sys, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 from torch_psf.fit import poisson_nll
 from torch_psf import VectorialPSF
 NREF = 16000

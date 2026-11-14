@@ -7,6 +7,62 @@ before it is merged. Units: px for lateral positions (x = column, y = row, pixel
 relative to its centre pixel), um for z, focus, wavelengths and pixel sizes, photons (e-) for intensities, photons / px
 for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 
+## Changes
+
+### 2026-11-14: class design (breaking; no aliases)
+
+| old | new |
+|---|---|
+| `ConvSplinePSF` | `ConvCubicSplinePSF` (same knot layout and math) |
+| `ConvSplinePSF.from_vectorial(vec, roisize, z_range, ...)` | `vec.to_spline(roisize, z_range, ...)` (any 3D model: `PSF.to_spline`) |
+| `GaussianPSF(..., gamma_um=, d_um=, z_range=)` (astigmatic) | `AstigmaticGaussianPSF(roisize, sigma_px, gamma_um, d_um, z_range)`; `GaussianPSF(roisize, sigma_px)` is 2D only |
+| `torch_psf.localize(psf, rois)` (top level) | `psf.fit(rois)` -> localization table; the low-level `torch_psf.fit.localize` (theta, nll) stays |
+| `torch_psf.crlb(psf, theta)` (top level) | `psf.crlb(theta)`; `torch_psf.fit.crlb` stays |
+| `localize_movie(movie, psf, camera)` | `psf.localize(movie, camera)` |
+| `load_psf(path)` / `save_psf(path, psf)` | `PSF.load(path)` / `psf.save(path)` (implementation: `torch_psf.io.load` / `save`) |
+| `estimate_psf_beads(stacks, dz_um, ...)` | `ZStackEstimator(model, start / optics, camera, ...).estimate(stacks, dz_um)` -> PSF |
+| `estimate_psf_insitu(movie, ...)` | `InSituEstimator(start / optics, camera, ..., refine=False).estimate(movie)` -> PSF |
+| `PSFEstimate` (.psf, .report, .history, .data, .save) | removed: estimators return the PSF; `estimator.report`, `.history`, `.data` |
+| `fit_beads`, `fit_zernike_knots`, `fit_pupil_knots`, `fit_free_knots`, `fit_tracks` return PSFEstimate | they return `dict(psf, report, history, ...)` (same fields as the former `.data`) |
+| `torch_psf.estimate.z_scale` | `torch_psf.insitu.z_scale` |
+| psf.json type `gaussian` with gamma (3D) | type `astig_gaussian`; `gaussian` is 2D |
+| in-situ default pipeline | now rejects spots the single-emitter model does not explain (Poisson deviance per pixel > 1 + 3 sqrt(2 / P^2) after a first pass; refit on the rest; `reject_overlap=True`, `deviance_k=3`) |
+| (new) | `simulate.filament_sites`, `simulate_movie(sites=...)`, `table.to_csv`, `insitu.spot_deviance`, `PSF.expected`, `PSF.fisher`, `n_dims` |
+
+## Classes
+
+```
+PSF (abstract; torch_psf.psf)                 render(pos, grad=False)            [the only abstract method]
+  roisize, z_range (None = 2D), n_dims,       expected(theta) -> mu [N, P, P]
+  xy_limit, z_limits, dev, to(device),        fisher(theta, var=None), crlb(theta, var=None) -> [N, 5]
+  resized(roisize)                            fit(rois | Spots, camera=None, theta0=None, corners=None, frames=None)
+                                                  -> localization table (LOC_DTYPE)
+                                              localize(movie, camera=None, frames=None, ...) -> table
+                                              save(path) / PSF.load(path) (type dispatch; plain calibration json too)
+                                              to_spline(roisize, z_range, oversample, dz_um, zpad, xy_limit)
+├── GaussianPSF(roisize, sigma_px)                                   2D
+├── AstigmaticGaussianPSF(roisize, sigma_px, gamma_um, d_um, z_range)  3D
+├── VectorialPSF(roisize, pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices, npupil, oversample,
+│                focus_um, z_range)  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
+│                from_optics, optics, to_spline(..., pos_fn))
+└── ConvCubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
+                 knots_from_model, knots_from_vectorial, vjp_vectorial, from_zstack
+
+Estimator (torch_psf.estimators)             report (dict), history (list), data (dict), progress / stop hooks
+├── ZStackEstimator(model='vectorial' | 'spline' | 'astig_gauss', start=None, optics=None, camera=None, roisize=21,
+│                   nbeads=8, sign=1.0, iters=300, holdout=None, drift=True, regularize=3000.0, ...)
+│     .estimate(stacks, dz_um) -> VectorialPSF | ConvCubicSplinePSF | AstigmaticGaussianPSF
+└── InSituEstimator(start=None, optics=None, camera=None, focus_um=None, roisize=15, z_range=(0, 0.8), nspots=8000,
+                    nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0, refine=False, ...)
+      .estimate(movie, frames=None) -> VectorialPSF (or the refined ConvCubicSplinePSF if it wins on held-out spots)
+```
+ZStackEstimator conventions: plane k at focus `sign dz_um (k - (nk - 1) / 2)`; the vectorial result has `focus_um = 0`;
+the spline and astigmatic-Gaussian results have z = -focus (bead defocus in stage um). InSituEstimator steps:
+detection (`extract_spots`), checkerboard split (training / held-out), `fit_zernike_knots` (or `fit_pupil_knots`),
+overlap rejection and a second pass, optional refinement (`fit_free_knots` with ref = the vectorial knots, lam_ref
+3000, lam_s 1000; kept only if the held-out NLL per pixel improves; a z-warping warning is added), held-out
+comparison (`compare_heldout` of start / vectorial / refined), `z_scale` of the result against the start.
+
 ## Detection and spots (`torch_psf.detect`, `torch_psf.spots`)
 
 `detect_spots(frames, threshold=6.0, sigma=(2.0, 6.0), nms=9, noise='mad', border=0, isolation=None, median=False)`
@@ -29,7 +85,7 @@ progress=None, **detect_kw)`
   to `(roisize - 1) / 2 + 2`, and cuts ROIs centred on the peak pixel: corner `(x0, y0) = (x - h, y - h)`,
   h = (roisize - 1) / 2. Returns `Spots(rois [n, P, P], frame, corner [n, 2] (x0, y0), score, var, frames_read)`.
 
-## Fitting (`torch_psf.fit`)
+## Fitting (`torch_psf.fit`; used by `PSF.fit`, `PSF.crlb`)
 
 `localize(psf, rois, theta0=None, var=None, iters=30, zstarts=5, batch=3000, fixed=(), weight=None)`
 - theta = (x, y, z, photons, bg); model `mu = photons * psf.render(x, y, z) + bg`.
@@ -48,9 +104,9 @@ progress=None, **detect_kw)`
 
 `at_limit(theta, psf, margin=0.06)`: `max(|x|, |y|) > xy_limit - margin`.
 
-## The convolutional spline (`torch_psf.spline.ConvSplinePSF`)
+## The convolutional cubic spline (`torch_psf.spline.ConvCubicSplinePSF`)
 
-`ConvSplinePSF(roisize, z_range, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, device=None)`: knots
+`ConvCubicSplinePSF(roisize, z_range, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, device=None)`: knots
 `[nz, nv, nu]`, nz = round((hi - lo) / dz) + 1 + 2 zpad, plane k at z0 + k dz, z0 = lo - zpad dz;
 c = ceil(h + xy_limit) + 2 (h = (roisize - 1) / 2), Pl = 2c + 1, nv = nu = Pl * oversample; knot index j of u is at
 u = u0 + j / S, u0 = -(c S + S - 1) / S.
@@ -62,14 +118,14 @@ u = u0 + j / S, u0 = -(c S + S - 1) / S.
   sub-pixel shifts (a / S, b / S) for every knot plane and interleaves them (knot j S + (S - 1 - a) <- pixel j, shift
   a). `pos_fn(z_knot) -> (emitter z, focus)`, default emitter height at `vectorial.focus_um`.
 - `vjp_vectorial(vectorial, pos_fn, grad_knots, names=('zcoef',), chunk=4)`: (d knots / d parameters)^T grad_knots.
-- `from_vectorial(vectorial, roisize, z_range=None, ...)`, `from_zstack(zstack, z0_um, dz_um, roisize)`.
+- `vectorial.to_spline(roisize, z_range=None, ...)` (any model: `PSF.to_spline`), `from_zstack(zstack, z0_um, dz_um, roisize)`.
 
 ## In-situ estimation (`torch_psf.insitu`, `torch_psf.estimate`)
 
 `fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, route='K', loc_iters=3, ...)`: per
 iteration: build the knots from the current Zernikes; localize (30 LM iterations the first time, then `loc_iters`,
 warm-started); the knot gradient of the total NLL (autograd through `render`) and one VJP to the Zernikes; an Adam step
-(beta 0.9 / 0.999, eps 1e-12, bias-corrected) of size `lr` waves. Returns `PSFEstimate` (report: at_limit, z_scale,
+(beta 0.9 / 0.999, eps 1e-12, bias-corrected) of size `lr` waves. Returns dict(psf, report, history, zcoef, theta, knots) (report: at_limit, z_scale,
 z_offset_um, nll, seconds).
 
 `fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0, lam_s=0, w_stack=1, outer=12, inner=8, ...)`:

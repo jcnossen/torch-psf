@@ -10,7 +10,8 @@ study's scoring.
 import math, time
 import torch
 import common as C
-from torch_psf import ConvSplinePSF, localize
+from torch_psf import ConvCubicSplinePSF
+from torch_psf.fit import localize
 from torch_psf.insitu import (fit_beads, fit_free_knots, fit_zernike_knots, fit_pupil_knots, bead_theta,
                               knot_gradient, vectorial_gradient, limit_fraction)
 
@@ -18,7 +19,7 @@ from torch_psf.insitu import (fit_beads, fit_free_knots, fit_zernike_knots, fit_
 def new_spline(S=2, hz=0.04, xmax=3.0):
     # zpad 5: knots cover the bead stack range. xmax 3 px: the detection peak of a defocused, aberrated spot lies up
     # to 3 px from the emitter; with the old default (1.5 px) the offset clamp biased flexible PSF fits (CRITIC C-01).
-    return ConvSplinePSF(C.P, C.ZR, oversample=S, dz_um=hz, zpad=5, xy_limit=xmax, device=C.DEV)
+    return ConvCubicSplinePSF(C.P, C.ZR, oversample=S, dz_um=hz, zpad=5, xy_limit=xmax, device=C.DEV)
 
 
 def clamp_fraction(spl, th):
@@ -33,7 +34,7 @@ def knots_from(spl, zc, cond='insitu'):
 
 def fit_vec_stack(stack, iters=300, lr=3e-3):
     focus = C.F0 - stack['z_nom'] / C.ALPHA
-    return fit_beads(stack['d'], focus, C.model_vec(C.P), iters=iters, lr=lr).psf.zcoef.detach().clone()
+    return fit_beads(stack['d'], focus, C.model_vec(C.P), iters=iters, lr=lr)['psf'].zcoef.detach().clone()
 
 
 def bead_params(spl, stack, th=None):
@@ -46,7 +47,7 @@ def fit_knots(spl, K0, insitu=None, stack=None, ref=None, lam_ref=0.0, lam_s=0.0
               th_ins=None, log=None, loc=None):
     r = fit_free_knots(spl, K0, insitu, stack, ref, lam_ref, lam_s, w_stack, outer, inner, th_ins, log, loc,
                        xy_zrange=(0.1, 0.7))
-    return r.data['knots'], r.data['theta']
+    return r['knots'], r['theta']
 
 
 def knot_grad(spl, d, th, nb=4000):
@@ -61,12 +62,12 @@ def vec_grad_direct(psf, d, th, nb=1000):
 
 def fit_vec_insitu(spl, d, zc0, iters=80, lr=2e-3, route='K', loc_iters=3, log=None, th=None, loc=None):
     r = fit_zernike_knots(spl, d, C.model_vec(C.P, zc0), C.insitu_pos, iters, lr, route, loc_iters, log, th, loc)
-    return r.data['zcoef'], r.data['theta']
+    return r['zcoef'], r['theta']
 
 
 def fit_pupil_insitu(spl, d, zc0, iters=200, lr_z=1e-3, lr_p=2e-3, lr_a=1e-2, lam=0.0, th=None, log=None, loc=None):
     r = fit_pupil_knots(spl, d, C.model_vec(C.P, zc0), C.insitu_pos, iters, lr_z, lr_p, lr_a, lam, th, log, loc)
-    return r.data['knots'], r.data, r.data['theta']
+    return r['knots'], r, r['theta']
 
 
 # ------------------------------------------------------------------------------------------- evaluation

@@ -1,14 +1,14 @@
-"""ConvSplinePSF: legacy reproduction, accuracy against the vectorial model, derivatives, knot gradient, z-stacks."""
+"""ConvCubicSplinePSF: legacy reproduction, accuracy against the vectorial model, derivatives, knot gradient, z-stacks."""
 import os
 import numpy as np
 import torch
 from conftest import DEV, legacy_reference
-from torch_psf import VectorialPSF, ConvSplinePSF, GaussianPSF
+from torch_psf import VectorialPSF, ConvCubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF
 
 
 def test_reproduces_legacy_spline():
     r = {k: torch.tensor(v) for k, v in np.load(legacy_reference()).items()}
-    s = ConvSplinePSF(13, (0.0, 0.8), oversample=2, dz_um=0.05, zpad=2, xy_limit=3.0, device='cpu')
+    s = ConvCubicSplinePSF(13, (0.0, 0.8), oversample=2, dz_um=0.05, zpad=2, xy_limit=3.0, device='cpu')
     big = VectorialPSF(s.Pl, pixel_um=0.108, wavelength_um=0.68, npupil=48, oversample=2, device='cpu', focus_um=0.4)
     with torch.no_grad():
         big.zcoef.copy_(r['zcoef'])
@@ -21,7 +21,7 @@ def test_reproduces_legacy_spline():
 def test_spline_matches_vectorial():
     vec = VectorialPSF(15, npupil=64, oversample=3, device=DEV, focus_um=0.4, z_range=(0.0, 0.8))
     vec.set_zernike({6: 0.1, 11: 0.03})
-    spl = ConvSplinePSF.from_vectorial(vec, 15, oversample=3, dz_um=0.02)
+    spl = vec.to_spline(15, oversample=3, dz_um=0.02)
     g = torch.Generator(device=DEV).manual_seed(1)
     pos = torch.stack([torch.rand(50, generator=g, device=DEV) - 0.5, torch.rand(50, generator=g, device=DEV) - 0.5,
                        0.05 + 0.7 * torch.rand(50, generator=g, device=DEV)], 1)
@@ -34,7 +34,7 @@ def test_spline_matches_vectorial():
 def test_spline_derivatives():
     vec = VectorialPSF(13, npupil=48, oversample=2, device=DEV, focus_um=0.3, z_range=(0.0, 0.6))
     vec.set_zernike({6: 0.1})
-    spl = ConvSplinePSF.from_vectorial(vec, 13, dz_um=0.03)
+    spl = vec.to_spline(13, dz_um=0.03)
     pos = torch.tensor([[0.13, -0.27, 0.31], [-0.4, 0.2, 0.12]], device=DEV)
     out = spl.render(pos, grad=True)
     for k in range(3):
@@ -46,7 +46,7 @@ def test_spline_derivatives():
 
 
 def test_knot_gradient_matches_reference_indexing():
-    spl = ConvSplinePSF(11, (0.0, 0.5), device=DEV)
+    spl = ConvCubicSplinePSF(11, (0.0, 0.5), device=DEV)
     spl.knots = torch.rand_like(spl.knots)
     pos = torch.rand(20, 3, device=DEV) * torch.tensor([1.0, 1.0, 0.5], device=DEV) - torch.tensor([0.5, 0.5, 0], device=DEV)
     w = torch.randn(20, 11, 11, device=DEV)
@@ -64,10 +64,10 @@ def test_knot_gradient_matches_reference_indexing():
 
 
 def test_from_zstack_reproduces_the_stack_at_grid_points():
-    g = GaussianPSF(21, sigma_px=1.5, gamma_um=0.2, d_um=0.4, z_range=(-0.5, 0.5), device='cpu')
+    g = AstigmaticGaussianPSF(21, sigma_px=1.5, gamma_um=0.2, d_um=0.4, z_range=(-0.5, 0.5), device='cpu')
     zs = torch.linspace(-0.5, 0.5, 21)
     stack = g.render(torch.stack([torch.zeros(21), torch.zeros(21), zs], 1))
-    spl = ConvSplinePSF.from_zstack(stack, z0_um=-0.5, dz_um=0.05, roisize=11)
+    spl = ConvCubicSplinePSF.from_zstack(stack, z0_um=-0.5, dz_um=0.05, roisize=11)
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, -1.0, 0.1]])
     a = spl.render(pos)
     c = (21 - 11) // 2

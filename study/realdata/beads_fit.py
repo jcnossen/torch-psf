@@ -17,7 +17,8 @@ usage: python beads_fit.py stack.tif beads_found.json outdir [--maxdist 100] [--
 import sys, json, time, argparse, math
 import numpy as np, torch, tifffile
 sys.path.insert(0, '.')
-from torch_psf import ConvSplinePSF, localize
+from torch_psf import ConvCubicSplinePSF
+from torch_psf.fit import localize
 from torch_psf.fit import poisson_nll
 from rdcommon import gauss_knots, spline_widths, DEV
 
@@ -62,7 +63,7 @@ def crop(beads):
 
 
 def new_spline():
-    return ConvSplinePSF(PB, (-A.zr, A.zr), oversample=A.S, dz_um=A.hz, zpad=4, xy_limit=1.0, device=DEV)
+    return ConvCubicSplinePSF(PB, (-A.zr, A.zr), oversample=A.S, dz_um=A.hz, zpad=4, xy_limit=1.0, device=DEV)
 
 
 def init_knots(spl):

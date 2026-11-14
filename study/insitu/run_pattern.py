@@ -9,7 +9,7 @@ Control: M = 0 (same frames and photons, uniform illumination, so no pattern inf
 import sys, time, json, math, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_psf import localize
+from torch_psf.fit import localize
 from torch_psf.fit import poisson_nll, clamp_theta as _clamp
 M = float(sys.argv[1]) if len(sys.argv) > 1 else 0.9
 scns = sys.argv[2] if len(sys.argv) > 2 else 'AB'

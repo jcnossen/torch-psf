@@ -22,3 +22,9 @@ def make_table(frame, xy, th, crlb, nll, chi2, at_limit):
         L['crlb_' + name] = c(crlb[:, k])
     L['loglik'] = -c(nll); L['chi2'] = c(chi2); L['at_limit'] = c(at_limit)
     return L
+
+
+def to_csv(table, path):
+    """Write a localization table as CSV (one header line with the column names)."""
+    np.savetxt(path, np.array(table.tolist(), dtype=np.float64).reshape(-1, len(table.dtype.names)), delimiter=',',
+               header=','.join(table.dtype.names), comments='', fmt='%.6g')
