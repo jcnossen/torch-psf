@@ -152,8 +152,10 @@ def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=No
     if typ == 'spline':
         g = d['spline']
         spl = ConvCubicSplinePSF(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'],
-                            zpad=g['zpad'], xy_limit=g['xy_limit'], device=device)
-        spl.knots = torch.as_tensor(arrays['knots'], device=spl.dev, dtype=spl.dtype)
+                                 zpad=g['zpad'], xy_limit=g['xy_limit'], device=device,
+                                 knots=torch.as_tensor(arrays['knots']), knot_u0_px=g.get('u0_px'),
+                                 knot_z0_um=g.get('z0_um'))
+        spl.pixel_um = g.get('pixel_um') or (Optics.from_dict(d['optics']).pixel_um if 'optics' in d else None)
         return spl
     if typ == 'gaussian':
         return GaussianPSF(roisize or d.get('roisize', 15), sigma_px=tuple(d['gaussian']['sigma_px']), device=device)

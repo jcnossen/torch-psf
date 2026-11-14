@@ -36,6 +36,7 @@ def _copy(spline, knots):
     s = ConvCubicSplinePSF(spline.roisize, spline.z_range, oversample=spline.S, dz_um=spline.hz, zpad=spline.zpad,
                       xy_limit=spline.xmax, device=spline.dev, dtype=spline.dtype)
     s.knots = knots.detach().clone()
+    s.pixel_um = spline.pixel_um
     return s
 
 

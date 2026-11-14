@@ -276,6 +276,7 @@ class VectorialPSF(torch.nn.Module, PSF):
                                  xy_limit=xy_limit, device=self.dev)
         big = self if self.roisize == spl.Pl else self.resized(spl.Pl)
         spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
+        spl.pixel_um = self.pixel_um
         return spl
 
     def to(self, device):

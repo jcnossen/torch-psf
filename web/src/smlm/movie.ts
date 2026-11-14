@@ -81,16 +81,22 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
   return { n_locs: n, frames_read: done, frames_total: mv.n, partial, seconds, H: mv.H, W: mv.W, spots_per_s: n / Math.max(seconds, 1e-9), at_limit_fraction: n ? nLimit / n : 0 };
 }
 
-/** CSV of the localization rows (header = torch_psf.table.LOC_DTYPE names; x, y in px, z in um). */
-export function locsToCsv(rows: Float32Array): string {
+/** ThunderSTORM csv as torch_psf Dataset.save_csv (extra=True): "id","frame","x [nm]","y [nm]","z [nm]",
+ *  "intensity [photon]","offset [photon]","uncertainty [nm]","uncertainty_x [nm]","uncertainty_y [nm]",
+ *  "uncertainty_z [nm]", then crlb_photons, crlb_bg, loglik, chi2, at_limit. x [nm] = (x px + 0.5) pixel_nm, frames from
+ *  1, z [nm] = the PSF model's z (emitter height above the coverslip) in nm. */
+export function locsToCsv(rows: Float32Array, pixel_nm: number): string {
   const n = rows.length / NCOL;
-  const out: string[] = [LOC_COLUMNS.join(',')];
+  const f = (v: number, d: number) => v.toFixed(d);
+  const g = (v: number, p: number) => (Number.isFinite(v) ? String(Number(v.toPrecision(p))) : String(v));
+  const out: string[] = ['"id","frame","x [nm]","y [nm]","z [nm]","intensity [photon]","offset [photon]","uncertainty [nm]",' +
+    '"uncertainty_x [nm]","uncertainty_y [nm]","uncertainty_z [nm]","crlb_photons","crlb_bg","loglik","chi2","at_limit"'];
   for (let i = 0; i < n; i++) {
-    const o = i * NCOL;
-    const v: string[] = [String(rows[o])];
-    for (let q = 1; q < NCOL - 1; q++) v.push(Number(rows[o + q]).toPrecision(7));
-    v.push(rows[o + NCOL - 1] ? 'True' : 'False');
-    out.push(v.join(','));
+    const o = i * NCOL, r = (k: number) => rows[o + k];
+    const ux = r(6) * pixel_nm, uy = r(7) * pixel_nm;
+    out.push([i, r(0) + 1, f((r(1) + 0.5) * pixel_nm, 4), f((r(2) + 0.5) * pixel_nm, 4), f(r(3) * 1000, 4), g(r(4), 8), g(r(5), 8),
+      f(Math.sqrt(0.5 * (ux * ux + uy * uy)), 5), f(ux, 5), f(uy, 5), f(r(8) * 1000, 5), g(r(9), 9), g(r(10), 9), g(r(11), 9), g(r(12), 9),
+      r(13) ? 1 : 0].join(','));
   }
   return out.join('\n') + '\n';
 }

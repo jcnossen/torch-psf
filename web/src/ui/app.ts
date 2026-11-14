@@ -280,7 +280,7 @@ export function startApp(root: HTMLElement) {
     for (let o = 0; o < rows.length; o += NCOL) { const f = rows[o]; const L = locsByFrame.get(f) ?? []; L.push(rows[o + 1], rows[o + 2]); locsByFrame.set(f, L); }
     if (performance.now() - lastDraw > 700) drawRecon(); else { clearTimeout(drawTimer); drawTimer = window.setTimeout(drawRecon, 700); }
   };
-  $('r-csv').onclick = () => { if (recon) download(locsToCsv(recon.rows()), 'localizations.csv', 'text/csv'); };
+  $('r-csv').onclick = () => { if (recon) download(locsToCsv(recon.rows(), 1000 * n('o-px')), 'localizations.csv', 'text/csv'); };
 
   // --- the one button: Estimate PSF (then localize the movie with it)
   let startZ: number[] | null = null;
@@ -548,7 +548,7 @@ const TEMPLATE = `
     <div class="bar">
       ${num('r-px', 'pixel (nm)', 20)}${num('r-blur', 'blur (pixels)', 0.7)}${num('r-crlb', 'max CRLB x (nm, 0 = all)', 0)}
       <label><input id="r-colorz" type="checkbox" checked> colour by z</label>
-      <button id="r-csv">localizations .csv</button>
+      <button id="r-csv" title="ThunderSTORM csv (nm, frames from 1), as torch_psf Dataset.save_csv">localizations .csv</button>
     </div>
     <div class="recon-wrap"><canvas id="recon" width="10" height="10"></canvas></div>
     <p id="r-label" class="note"></p>

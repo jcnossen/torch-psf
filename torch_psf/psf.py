@@ -18,6 +18,7 @@ class PSF:
     to."""
     roisize: int
     z_range = None
+    pixel_um = None          # lateral pixel size (um) when the model knows it (vectorial; splines built from one)
     dev = torch.device('cpu')
 
     # ------------------------------------------------------------------ the model
@@ -83,19 +84,21 @@ class PSF:
 
     # ------------------------------------------------------------------ fitting
     def fit(self, rois, camera=None, theta0=None, corners=None, frames=None, var=None, iters=30, zstarts=5,
-            batch=4000):
-        """Maximum-likelihood fit of ROIs -> localization table (numpy structured array, torch_psf.table.LOC_DTYPE).
+            batch=4000, pixel_um=None):
+        """Maximum-likelihood fit of ROIs -> Dataset (torch_psf.dataset).
 
         rois: [N, P, P] in photons, or Spots (torch_psf.spots; then corners, frames and the read-noise variance come
         with it). camera: Camera (only its read noise is used here: ROIs are already in photons; with per-pixel maps
         the corners are needed). theta0: [N, 5] starting values (default: multi-start in z, see
-        torch_psf.fit.localize). corners [N, 2] = (x0, y0) of the ROIs in the image: positions in the table are then
-        image coordinates (else ROI-centre relative). frames [N]: frame numbers for the table.
-        Columns: frame, x, y (px), z (um), photons, bg, crlb_* (std), loglik (= -NLL, Poisson, constant dropped),
+        torch_psf.fit.localize). corners [N, 2] = (x0, y0) of the ROIs in the image: positions are then image
+        coordinates (else relative to the ROI centre). frames [N]: frame numbers.
+        Dataset fields: id, frame, n_frames (1), pos [N, D] px (z converted from um to px with the lateral pixel size:
+        pixel_um, default the model's pixel_um; without a pixel size z stays in um and meta['z_unit'] = 'um'),
+        crlb [N, D] (same units), photons, bg, crlb_photons, crlb_bg, loglik (= -NLL, Poisson, constant dropped),
         chi2 (mean of (d - mu)^2 / (mu + var) per pixel), at_limit (x or y at the offset limit)."""
         from torch_psf.fit import localize, crlb, at_limit
-        from torch_psf.table import make_table
         from torch_psf.spots import Spots
+        from torch_psf.dataset import Dataset
         if isinstance(rois, Spots):
             corners = rois.corner if corners is None else corners
             frames = rois.frame if frames is None else frames
@@ -108,37 +111,52 @@ class PSF:
         if torch.is_tensor(var) and var.dim() == 0:
             var = None if float(var) == 0 else var
         h = (P - 1) / 2
-        rows = []
+        out = {k: [] for k in ('theta', 'crlb', 'nll', 'chi2', 'lim', 'xy')}
         for s in range(0, N, batch):
             d = rois[s:s + batch]
             v = var[s:s + batch] if (torch.is_tensor(var) and var.dim() > 0) else var
             t0 = None if theta0 is None else torch.as_tensor(theta0[s:s + batch], dtype=torch.float32, device=self.dev)
             th, nll = localize(self, d, t0, var=v, iters=iters, zstarts=zstarts)
-            cr = crlb(self, th, var=v)
             mu = self.expected(th)
             vv = 0.0 if v is None else v
-            chi2 = ((d - mu) ** 2 / (mu + vv).clamp_min(1e-6)).flatten(1).mean(1)
-            xy = th[:, :2].clone()
+            out['chi2'].append(((d - mu) ** 2 / (mu + vv).clamp_min(1e-6)).flatten(1).mean(1))
+            xy = th[:, :2].double()
             if corners is not None:
-                xy = xy + torch.as_tensor(corners[s:s + batch], device=self.dev).to(xy.dtype) + h
-            fr = (torch.as_tensor(frames[s:s + batch], device=self.dev) if frames is not None
-                  else torch.full((len(d),), -1, device=self.dev))
-            rows.append(make_table(fr, xy, th, cr, nll, chi2, at_limit(th, self)))
-        from torch_psf.table import LOC_DTYPE
-        return np.concatenate(rows) if rows else np.zeros(0, LOC_DTYPE)
+                xy = xy + torch.as_tensor(corners[s:s + batch], device=self.dev).double() + h
+            out['theta'].append(th); out['crlb'].append(crlb(self, th, var=v)); out['nll'].append(nll)
+            out['lim'].append(at_limit(th, self)); out['xy'].append(xy)
+        cat = lambda k, shape: torch.cat(out[k]).cpu() if out[k] else torch.zeros(shape)
+        th, cr = cat('theta', (0, 5)), cat('crlb', (0, 5))
+        px = pixel_um if pixel_um is not None else getattr(self, 'pixel_um', None)
+        meta = dict(method=f'torch_psf {type(self).__name__}.fit', n_dims=self.n_dims)
+        if px:
+            meta['pixel_nm'] = 1000.0 * float(px)
+        pos = [cat('xy', (0, 2))]
+        crp = [cr[:, :2]]
+        if self.n_dims == 3:
+            zs = 1.0 / px if px else 1.0
+            pos.append(th[:, 2:3].double() * zs)
+            crp.append(cr[:, 2:3] * zs)
+            if not px:
+                meta['z_unit'] = 'um'
+        fr = (torch.as_tensor(frames).cpu() if frames is not None else torch.zeros(len(th), dtype=torch.int32))
+        return Dataset(dict(frame=fr, pos=torch.cat(pos, 1), crlb=torch.cat(crp, 1), photons=th[:, 3], bg=th[:, 4],
+                            crlb_photons=cr[:, 3], crlb_bg=cr[:, 4], loglik=-cat('nll', (0,)), chi2=cat('chi2', (0,)),
+                            at_limit=cat('lim', (0,)).bool()), meta)
 
     def localize(self, movie, camera=None, frames=None, threshold=6.0, chunk=500, block=5000, progress=None,
-                 stop=None, **detect_kw):
+                 stop=None, pixel_um=None, **detect_kw):
         """Localize a movie: detection -> spot ROIs (roisize = self.roisize) -> fit, in blocks of `block` frames.
 
         movie: path (.tif / .npy), array [T, H, W] or reader (torch_psf.movie). camera: Camera or calibration json path
         (None: the movie is in photons). frames: (f0, f1). threshold: x noise of the band-pass filtered frame.
         progress(frames_done, frames_total, n_locs), stop() -> bool: callbacks. detect_kw: detect_spots options
-        (sigma, nms, noise, isolation, median). Returns the localization table (image coordinates)."""
+        (sigma, nms, noise, isolation, median). Returns a Dataset (image coordinates; ids 0..n-1; meta image_size,
+        n_frames)."""
         from torch_psf.movie import open_movie
         from torch_psf.spots import extract_spots
-        from torch_psf.table import LOC_DTYPE
         from torch_psf.config import Camera
+        from torch_psf.dataset import Dataset
         if camera is not None and not isinstance(camera, Camera):
             from torch_psf.io import load_camera
             camera = load_camera(camera)
@@ -149,12 +167,19 @@ class PSF:
             b1 = min(b0 + block, f1)
             sp = extract_spots(mv, self.roisize, camera, (b0, b1), chunk, self.dev, threshold=threshold, **detect_kw)
             if len(sp):
-                out.append(self.fit(sp))
+                out.append(self.fit(sp, pixel_um=pixel_um))
             if progress is not None:
                 progress(b1 - f0, f1 - f0, sum(len(o) for o in out))
             if stop is not None and stop():
                 break
-        return np.concatenate(out) if out else np.zeros(0, LOC_DTYPE)
+        if out:
+            ds = Dataset.concatenate(out)
+            ds['id'] = torch.arange(len(ds), dtype=torch.int64)
+        else:
+            ds = self.fit(torch.zeros(0, self.roisize, self.roisize), pixel_um=pixel_um)
+        ds.meta.update(image_size=[int(v) for v in mv.shape[-2:]], n_frames=int(f1),
+                       method=f'torch_psf {type(self).__name__}.localize')
+        return ds
 
     # ------------------------------------------------------------------ files
     def save(self, path, camera=None, provenance=None, source=None):

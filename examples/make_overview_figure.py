@@ -51,7 +51,8 @@ spline = tp.ConvCubicSplinePSF(15, (0.0, 0.8), dz_um=0.04, zpad=5, xy_limit=3.0,
 est = fit_zernike_knots(spline, spots.rois, start, iters=200)
 fitted = est['psf'].to_spline(15, (0.0, 0.8))
 locs = fitted.localize(movie.numpy())
-locs = locs[~locs['at_limit'] & (locs['crlb_x'] < 0.25) & (locs['z'] > 0.0) & (locs['z'] < 0.8)]
+locs = locs[~locs['at_limit'] & (locs.crlb[:, 0] < 0.25) & (locs.pos[:, 2] > 0.0) & (locs.pos[:, 2] < 0.8 / PX)]
+locs = dict(x=locs.pos[:, 0].numpy(), y=locs.pos[:, 1].numpy(), z=locs.pos[:, 2].numpy() * PX)
 theta, _ = localize(fitted, spots.rois[:2000])
 theta = theta.cpu()
 
@@ -173,7 +174,7 @@ for k in range(16):
 img = np.clip(img / np.percentile(img.sum(-1), 99.5) * 1.3, 0, 1) ** 0.7
 ax_e.imshow(img, interpolation='bilinear')
 clean(ax_e); scalebar(ax_e, 2 / sr_px, '2 µm', img.shape[:2])
-ax_e.set_title(f'output: {len(locs)}\nlocalizations')
+ax_e.set_title(f'output: {len(locs["x"])}\nlocalizations')
 cax = ax_e.inset_axes([0.05, -0.13, 0.9, 0.06])
 plt.colorbar(plt.cm.ScalarMappable(Normalize(0, 800), ZCM), cax=cax, orientation='horizontal')
 cax.set_xticks([0, 400, 800]); cax.set_xlabel('z (nm)', labelpad=1)
@@ -280,7 +281,7 @@ stages = [('Movie', 'raw frames,\ncamera gain / offset'),
           ('Vectorial PSF\nestimation', 'pupil model fitted\nto the blinking spots'),
           ('Spline\nrefinement', 'flexible model\nwhere data allow'),
           ('3D fitting', 'x, y, z, photons\n+ CRLB'),
-          ('SMLM\nreconstruction', 'localization table,\nrendering')]
+          ('SMLM\nreconstruction', 'localizations,\nrendering')]
 bw, by, bh = 0.8, 0.22, 0.78
 for k, (name, benefit) in enumerate(stages):
     x0 = k + (1 - bw) / 2

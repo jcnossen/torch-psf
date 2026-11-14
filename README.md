@@ -9,7 +9,8 @@ a cubic spline.
   spline evaluated with one strided, grouped `conv2d` per batch of spots), `GaussianPSF` (2D) and
   `AstigmaticGaussianPSF` (3D calibration curves);
 - **fitting**: Poisson maximum likelihood (Levenberg-Marquardt, optional sCMOS read noise) and the Cramer-Rao bound;
-- **pipeline**: spot detection on movies, ROI extraction, localization tables;
+- **pipeline**: spot detection on movies, ROI extraction, and the localizations as a `Dataset` (filters, drift, rendering,
+  FRC, HDF5 / Picasso / ThunderSTORM files);
 - **PSF estimation**: from bead z-stacks and *in situ* from the blinking emitters themselves. The in-situ fit evaluates
   every emitter on the spline and passes the likelihood gradient from the spline knots to the pupil parameters with one
   vector-Jacobian product, so its cost does not grow with the number of emitters.
@@ -28,8 +29,9 @@ import torch, torch_psf as tp
 camera = tp.Camera(gain_e_per_adu=0.5, offset_adu=100.0, readnoise_e=1.5)
 psf = tp.InSituEstimator(start=tp.PSF.load('beads.json'), camera=camera).estimate('movie.tif')   # PSF from the data
 spline = psf.to_spline(roisize=13, z_range=(0.0, 0.8))                         # fast form of the same PSF
-locs = spline.localize('movie.tif', camera, frames=(0, 1000))                   # frame, x, y, z, photons, bg, crlb_*, ...
-print(len(locs), locs['crlb_x'].mean())
+locs = spline.localize('movie.tif', camera, frames=(0, 1000))                   # Dataset: pos, crlb, photons, bg, ...
+print(locs, locs.crlb[:, 0].mean())
+locs.save('locs.hdf5')                                                           # or .csv (ThunderSTORM), save_picasso
 
 pos = torch.tensor([[0.2, -0.1, 0.3]], device=spline.dev)                       # x, y (px from the ROI centre), z (um)
 img, dx, dy, dz = spline.render(pos, grad=True)                                  # [1, 13, 13] each
@@ -52,7 +54,7 @@ A GPU is optional: every function takes `device=` and defaults to `cuda` when av
 - Lengths carry their unit in the name (`pixel_um`, `wavelength_um`, `dz_um`, `focus_um`); intensities and background
   in photons (photons / px for the background); aberrations in waves rms (Noll-indexed Zernikes).
 - `PSF` (base class): `render(pos [N, 3], grad=False)` -> `[N, P, P]` (or `(psf, d/dx, d/dy, d/dz)`), `expected`,
-  `fisher`, `crlb`, `fit(rois)` and `localize(movie)` (-> localization table), `save` / `PSF.load`, `to_spline`;
+  `fisher`, `crlb`, `fit(rois)` and `localize(movie)` (-> `Dataset`), `save` / `PSF.load`, `to_spline`;
   `roisize`, `z_range` (None for 2D), `n_dims`, `xy_limit`. A new model only implements `render`.
 - Estimators (`ZStackEstimator`, `InSituEstimator`) return the PSF; their numbers are in `estimator.report` (dict) and
   `estimator.history`. The class diagram and the change notes are in [docs/API.md](docs/API.md).
@@ -94,8 +96,9 @@ python -m torch_psf insitu movie.tif --psf beads.json --focus-um 0.45 --isolatio
 ```
 
 **Localize a movie with a given PSF** ([examples/localize_movie.py](examples/localize_movie.py)): `psf.localize`
-returns a numpy structured array (`frame, x, y, z, photons, bg, crlb_x, crlb_y, crlb_z, crlb_photons, crlb_bg,
-loglik, chi2, at_limit`); `psf.fit(rois)` does the same for ROIs you cut yourself.
+returns a `Dataset`: fields `pos` [n, 3] and `crlb` [n, 3] in px (z in px of the lateral pixel size), `frame`,
+`photons`, `bg`, `chi2`, `loglik`, `at_limit`, ... with filters, drift correction, rendering, FRC and files
+([docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)); `psf.fit(rois)` does the same for ROIs you cut yourself.
 
 ```python
 locs = tp.PSF.load('insitu.json').to_spline(13).localize('movie.tif', camera)
@@ -128,7 +131,8 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `link_tracks`, `Tracks` / `extract_tracks`. |
 | `estimators.py` | `ZStackEstimator`, `InSituEstimator`. |
 | `insitu/` | the estimation steps (bead fit, knot-route fits, free knots, tracks), held-out checks. |
-| `config.py`, `movie.py`, `io.py`, `table.py` | `Optics`, `Camera` (scalars or per-pixel maps), movie readers, PSF files, the localization table. |
+| `dataset.py` | `Dataset`: the localizations (dict of tensors; format in [docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)). |
+| `config.py`, `movie.py`, `io.py` | `Optics`, `Camera` (scalars or per-pixel maps), movie readers, PSF files. |
 | `__main__.py`, `viewer.py` | the command line, the viewer server. |
 
 **PSF file**: one JSON (`format: "torch-psf"`, `type`, `optics`, `zernike_noll`, `zernike_waves`, `focus_um`, optional
@@ -152,7 +156,7 @@ same schema. `PSF.load` also reads a plain calibration json with the keys at the
 
 - **Offset limit.** A spline supports emitter offsets up to `xy_limit` px from the ROI centre (default 3); the fitter
   clamps there. For ROIs centred on detections of defocused spots use 3 px or more, and check `at_limit` in the
-  reports and the localization table.
+  reports and the `at_limit` field of the localizations.
 - **What blinking data cannot determine.** A lateral shift of the PSF with z, the z scale and the absolute brightness
   are not fixed by blinking data alone. A pupil model ties them to the PSF shape; free knots keep whatever their
   starting model had and can improve the held-out likelihood and the repeat precision while warping z (paper draft,

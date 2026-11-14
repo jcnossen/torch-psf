@@ -173,6 +173,7 @@ class ConvCubicSplinePSF(PSF):
         s = ConvCubicSplinePSF(self.roisize, self.z_range, oversample=self.S, dz_um=self.hz, zpad=self.zpad,
                                xy_limit=self.xmax, device=device, dtype=self.dtype)
         s.knots = self.knots.to(s.dev)
+        s.pixel_um = self.pixel_um
         return s
 
     def to_spline(self, roisize=None, z_range=None, **kw):
@@ -271,4 +272,5 @@ class ConvCubicSplinePSF(PSF):
     def to_dict(self):
         """Grid description (without the knots) for the PSF file."""
         return dict(roisize=self.roisize, z_range=[self.zlo, self.zhi], oversample=self.S, dz_um=self.hz,
-                    zpad=self.zpad, xy_limit=self.xmax, c=self.c, z0_um=self.z0, nz=self.nz)
+                    zpad=self.zpad, xy_limit=self.xmax, c=self.c, z0_um=self.z0, nz=self.nz, u0_px=self.u0,
+                    pixel_um=self.pixel_um)
