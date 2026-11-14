@@ -265,8 +265,7 @@ test('viewer: localization files written by torch_psf (Dataset HDF5, Picasso HDF
       df = Math.max(df, Math.abs(L.rows[o] - fr[i]));
     }
     out.push(`${label} (${L.format}, ${L.W} x ${L.H} px, ${L.pixel_nm} nm): |dxy| ${dxy.toExponential(1)} px, |dz| ${dz.toExponential(1)} um, |dcrlb| ${dc.toExponential(1)} px, |dframe| ${df}`);
-    // Picasso z: the web reads it in nm (Picasso's convention); torch_psf's save_picasso writes px (reported) - not compared
-    check(dxy < 1e-3 && (label === 'picasso' || dz < zTol) && dc < 1e-3 && df === 0 && L.pixel_nm === 108, out[out.length - 1]);
+    check(dxy < 1e-3 && dz < zTol && dc < 1e-3 && df === 0 && L.pixel_nm === 108, out[out.length - 1]);
   }
   return out.join('; ');
 });
