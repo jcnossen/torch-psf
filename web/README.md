@@ -1,8 +1,9 @@
 # torch-psf web (v1)
 
-A static web page that fits a vectorial PSF to a bead z-stack, entirely in the browser: TypeScript + WebGPU (WGSL
-compute shaders), no server and no installation. The Python implementation of the same physics (torch-psf; until it exists, SIMCODE's
-`VectorialPSF` code) is the reference; the web results are tested against it (see "Validation").
+A static web page that fits a vectorial PSF to a bead z-stack, and detects and localizes the spots of an SMLM movie,
+entirely in the browser: TypeScript + WebGPU (WGSL compute shaders), no server and no installation. The Python package
+torch-psf (`torch_psf`, in this repository) is the reference: every step is a port of a torch_psf function, and the
+browser tests compare the web results with torch_psf outputs (see "Validation").
 
 ![landing view](docs/landing.png)
 
@@ -34,8 +35,8 @@ python test/run_tests.py --screenshot    # also drives the app with the generate
 
 The test references are generated, not stored: `run_tests.py` runs `../tests/make_web_reference.py` into
 `test/.cache/` (ignored by git) when that folder is missing or the generator has changed (about 2 min on a GPU; needs
-torch, tifffile, imagecodecs and SIMCODE's `simcode/psf/vectorial.py` / `conv_spline.py` code, found via `SIMCODE_DIR` or
-`~/simcode2`). All test PSFs are generated from known parameters (the astigmatic and tetrapod-like presets); no fitted
+torch, tifffile, imagecodecs and `torch_psf` from this repository), and `../tests/make_web_smlm_reference.py` into
+`test/.cache/smlm/` (a seeded simulated movie and the torch_psf detections / localizations of it). All test PSFs are generated from known parameters (the astigmatic and tetrapod-like presets); no fitted
 calibration is used. The only tracked data file is a one-bead real crop of public data,
 `../tests/data/web/epfl_npc_bead.tif` (30 x 30 px x 41 planes, 81 kB, from the bead stack of the EPFL SMLM challenge
 2016 real 3D data set NPC-A647-3D; source, citation and the assumed acquisition settings in `epfl_npc_bead.json`).
@@ -53,9 +54,9 @@ calibration is used. The only tracked data file is a one-bead real crop of publi
 4. Results: 3D view of the fitted PSF, the Zernike coefficients, NLL per pixel of the fitted beads and of the held-out
    bead (refitted with the PSF frozen), and data / model / residual images (xy at a plane, xz) per bead.
 5. Exports: `psf.json` (torch-psf schema: `format`, `optics`, `zernike_noll`, `zernike_waves`, `focus_um`, ...; also
-   SIMCODE's calib keys `pixelsize_um`, `wavelength_um`, `NA`, `n_imm`, `n_med`; `provenance` records the fit, including
+   the calib keys `pixelsize_um`, `wavelength_um`, `NA`, `n_imm`, `n_med`; `provenance` records the fit, including
    `partial`), `psf_spline.npz` (knots of the convolutional Catmull-Rom spline, S = 2, hz = 0.04 um, the same grid as
-   SIMCODE's `ConvSplinePSF`: `knots [nz, nv, nu]`, `z0`, `hz`, `S`, `u0`, `roisize`, `xmax`, `focus_um`, Zernikes) and
+   torch_psf's `ConvSplinePSF`: `knots [nz, nv, nu]`, `z0`, `hz`, `S`, `u0`, `roisize`, `xmax`, `focus_um`, Zernikes) and
    `psf_model_zstack.tif` (float32 normalized model PSF at the stack's planes, ImageJ stack).
 
 ![result](docs/result.png)
@@ -69,7 +70,7 @@ likelihood, Levenberg-Marquardt: the GPU computes the PSF, its derivatives (x, y
 normal equations; the CPU eliminates the per-image and per-bead blocks (Schur complement) and solves the global system.
 Beads are the isolated maxima of the mean projection over z (R x R neighbourhood, above median + 0.3 x range; the mean
 projection is peaked at the bead centre also for wide PSFs such as the tetrapod, whose max projection has one maximum
-per lobe). Not modelled (unlike SIMCODE's `fit_beads`): finite bead size, bleaching / per-slice intensity terms
+per lobe). Not modelled (unlike torch_psf's `fit_beads`): finite bead size, bleaching / per-slice intensity terms
 (here every plane has its own intensity), NA / n_med fits.
 
 ## Supported
@@ -109,13 +110,16 @@ checked in between.
 
 | test | result | criterion (DESIGN.md) |
 |---|---|---|
-| PSF images vs SIMCODE's `VectorialPSF` code, 4 optics sets (tetrapod-like, astigmatic, 2 random Zernike sets; NA 1.2-1.49, os 1-3, npupil 32-64) | max rel. error <= 2e-6 | 1e-4 |
+| PSF images vs torch_psf's `VectorialPSF`, 4 optics sets (tetrapod-like, astigmatic, 2 random Zernike sets; NA 1.2-1.49, os 1-3, npupil 32-64) | max rel. error <= 2e-6 | 1e-4 |
 | Jacobian (x, y, focus, z_e, 17 Zernikes) vs the same code (forward-mode AD) | max rel. error <= 3e-6 | 1e-3 |
 | TIFF reader, 17 tifffile cases + multi-part | identical values | |
 | bead fit, generated astigmatic stack (3 beads, z-step scale fitted) vs the Python fit of the same model | Zernikes 0.0000 w rms, focus 0.00 nm, PSF L2 2e-6, held-out NLL 1.5e-6 rel.; vs truth 0.0002 w rms | 0.005 w, 5 nm, 1e-2, 1e-3 |
 | bead fit, generated tetrapod-like stack (3 beads, ROI 40, 3 um z range) | Zernikes 0.0000 w rms, focus 0.00 nm, PSF L2 3e-7, held-out NLL 1.2e-6 rel.; vs truth 0.0001 w rms | same |
 | bead fit, one-bead real crop vs the Python fit (no held-out bead; z-step scale fixed) | Zernikes 0.0000 w rms, focus 0.05 nm, PSF L2 7e-5, NLL 4e-7 rel. | same |
-| spline knots vs SIMCODE's `ConvSplinePSF` code | max rel. error 2e-6 | |
+| spline knots vs torch_psf's `ConvSplinePSF` (knots_from_vectorial) | max rel. error 2e-6 | |
+| SMLM movie: spot detection vs torch_psf `extract_spots` / `detect_spots` (seeded simulated movie, 300 frames, chunks of 100) | identical spots and order (718 / 718), noise rel. 2e-6 | |
+| SMLM movie: spline localization vs torch_psf `fit.localize` / `crlb` (same knots, 600 spots) | xy 99 % 4e-3 px, z 99 % 1e-3 um, CRLB 1e-3 rel. (float32 vs float64 solves) | 1e-2 px, 3e-3 um |
+| SMLM movie: whole pipeline (ADU, detection, knots, localization) vs the torch_psf localization table | same spots and frames; xy 99 % 4e-3 px | 1e-2 px |
 
 With a single real bead and a free z-step scale the fit has several optima (the web LM and the Python L-BFGS ended in
 different ones), so that test keeps the z step fixed.

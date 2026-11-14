@@ -1,11 +1,11 @@
-// vec_forward / vec_jacobian against SIMCODE's VectorialPSF (tests/data/web/forward.*): tolerances from DESIGN.md.
+// vec_forward / vec_jacobian against torch_psf's VectorialPSF (tests/data/web/forward.*): tolerances from DESIGN.md.
 import { test, check, fetchBuf, fetchJson, maxAbs, maxAbsDiff } from './harness';
 import { getDevice } from '../src/gpu/device';
 import { parseNpz } from '../src/io/npy';
 import { VecEngine } from '../src/gpu/ops';
 import { DEFAULT_NOLL } from '../src/psf/vectorial';
 
-test('forward: PSF images and Jacobian vs SIMCODE', async () => {
+test('forward: PSF images and Jacobian vs torch_psf', async () => {
   const { device } = await getDevice();
   const meta = await fetchJson('forward.json');
   const npz = await parseNpz(await fetchBuf('forward.npz'));

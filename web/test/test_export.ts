@@ -1,4 +1,4 @@
-// Exports: spline knots vs SIMCODE's ConvSplinePSF z-stack, npz round trip, float32 TIFF round trip.
+// Exports: spline knots vs torch_psf ConvSplinePSF (knots_from_vectorial), npz round trip, float32 TIFF round trip.
 import { test, check, fetchBuf, fetchJson, maxAbs, maxAbsDiff } from './harness';
 import { getDevice } from '../src/gpu/device';
 import { parseNpz, writeNpz } from '../src/io/npy';
@@ -7,7 +7,7 @@ import { writeTiffStack } from '../src/io/tifwrite';
 import { TiffMovie } from '../src/io/tiff';
 import { DEFAULT_NOLL } from '../src/psf/vectorial';
 
-test('export: spline knots vs SIMCODE ConvSplinePSF', async () => {
+test('export: spline knots vs torch_psf ConvSplinePSF', async () => {
   const { device } = await getDevice();
   const m = await fetchJson('knots.json');
   const npz = await parseNpz(await fetchBuf('knots.npz'));
