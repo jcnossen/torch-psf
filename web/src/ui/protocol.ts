@@ -34,6 +34,7 @@ export interface MovieForm {
   roisize: number; threshold: number; isolation: number; chunk: number; maxFrames: number;
   npupil: number; oversample: number; noll: number[]; zcoef: number[];   // the PSF used for localization
   zpad?: number;                                          // spline knot planes beyond the z range (default 2)
+  excessNoise?: number;                                   // Camera.excess_noise (F^2; EMCCD 2): photons / F^2, read-noise variance / F^4
   knots?: Float32Array;                                   // use these knots (grid of zpad) instead of the vectorial PSF
 }
 
@@ -41,6 +42,8 @@ export interface InsituForm extends MovieForm {
   nspots: number; nheldout: number; iters: number; tile: number;
   rejectOverlap?: boolean; devianceK?: number;            // torch_psf InSituEstimator(reject_overlap=True, deviance_k=3)
   refine?: boolean; refineOuter?: number;                 // InSituEstimator(refine=False, refine_outer=12)
+  sample?: 'spread' | 'sequential'; sampleChunk?: number;  // InSituEstimator(sample='spread', chunk=50)
+  devianceRule?: 'median' | 'poisson';                    // InSituEstimator(deviance_rule='median')
 }
 export type MovieSourceSpec = 'demo' | File[];
 

@@ -18,6 +18,9 @@ export interface InsituReport {
   n_spots: number; n_train: number; n_test: number; n_rejected: number; deviance_threshold: number | null;
   frames_read: number; frames_total: number;
   heldout: { start: number; fitted: number; diff: number } | null;   // mean NLL per pixel (constant dropped)
+  heldout_chi2_median: number | null;   // held-out spots fitted with the returned PSF: ~1 if the camera model is right
+  deviance: { rule: string; median: number; scale: number; threshold: number; rejected_fraction: number } | null;
+  frames_requested: number; n_chunks: number; warnings: string[];
   z_scale: number; z_offset_um: number; at_limit: number; history: InsituIter[];
   /** refine=True: free knots regularised towards the vectorial spline (kept only if the held-out NLL improves). */
   refine: { kept: boolean; heldout_refined: number | null; z_scale_vs_vectorial: number; z_offset_um_vs_vectorial: number; outer: number; seconds: number;
@@ -33,32 +36,43 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   const mv = await openSource(source, progress);
   const P = form.roisize, h = (P - 1) >> 1;
   const maxSpots = 2 * (form.nspots + form.nheldout);
-  const chunk = Math.max(1, Math.min(form.chunk, mv.n));
+  const chunk = Math.max(1, Math.min(form.sampleChunk ?? 50, mv.n));
   const nFrames = form.maxFrames > 0 ? Math.min(mv.n, form.maxFrames) : mv.n;
-  // 1. spots (torch_psf.spots.extract_spots with max_spots: stop after the chunk that reaches it, keep the first ones)
+  const warnings: string[] = [];
+  // 1. spots: torch_psf.spots.extract_spots(sample='spread', chunk=50, max_spots): chunks in bit-reversed order over the
+  //    frame range until max_spots, the first max_spots in read order kept, then sorted by frame (stable)
+  let starts: number[] = []; for (let f = 0; f < nFrames; f += chunk) starts.push(f);
+  if ((form.sample ?? 'spread') === 'spread') { const s0 = starts; starts = spreadOrder(s0.length).map((i) => s0[i]); }
   const det = new Detector(dev, mv.H, mv.W, chunk, { threshold: form.threshold, border: h + 2, isolation: form.isolation > 0 ? form.isolation : null });
-  const roiParts: Float32Array[] = [], cx: number[] = [], cy: number[] = [];
-  let n = 0, done = 0;
+  const roiParts: Float32Array[] = [], cx0: number[] = [], cy0: number[] = [], cf: number[] = [];
+  let n = 0, done = 0, nChunks = 0;
   const eta = new Eta();
+  const F2 = form.excessNoise ?? 1;
   try {
-    for (let f0 = 0; f0 < nFrames && n < maxSpots; f0 += chunk) {
+    for (const f0 of starts) {
+      if (n >= maxSpots) break;
       tok.check();
       if (tok.stopEarly) break;
       const f1 = Math.min(nFrames, f0 + chunk);
       const fr = await mv.read(f0, f1);
       const gain = Math.fround(form.gain), off = Math.fround(form.offset);
       for (let i = 0; i < fr.length; i++) fr[i] = Math.fround(Math.fround(fr[i] - off) * gain);
+      if (F2 !== 1) for (let i = 0; i < fr.length; i++) fr[i] = Math.fround(fr[i] / F2);
       const d = await det.detect(fr, f1 - f0, f0);
       roiParts.push(extractRois(fr, mv.H, mv.W, f0, d, P));
-      for (let i = 0; i < d.x.length; i++) { cx.push(d.x[i]); cy.push(d.y[i]); }
-      n += d.x.length; done = f1;
+      for (let i = 0; i < d.x.length; i++) { cx0.push(d.x[i]); cy0.push(d.y[i]); cf.push(d.frame[i]); }
+      n += d.x.length; done += f1 - f0; nChunks++;
       progress({ stage: 'spots', done: Math.min(n, maxSpots), total: maxSpots, info: { frames: done }, ...eta.update(Math.min(n, maxSpots), maxSpots) });
     }
   } finally { det.destroy(); }
   if (tok.signal === 'enough') tok.signal = 'run';          // "enough" applied to the spot collection
   n = Math.min(n, maxSpots);
-  const P2 = P * P, all = new Float32Array(n * P2);
-  let o = 0; for (const r of roiParts) { const k = Math.min(r.length, all.length - o); all.set(r.subarray(0, k), o); o += k; }
+  const P2 = P * P, raw = new Float32Array(n * P2);
+  let o = 0; for (const r of roiParts) { const k = Math.min(r.length, raw.length - o); raw.set(r.subarray(0, k), o); o += k; }
+  const ord = Array.from({ length: n }, (_, i) => i).sort((a, b) => (cf[a] - cf[b]) || (a - b));   // frame order, stable
+  const all = new Float32Array(n * P2);
+  ord.forEach((k, i) => all.set(raw.subarray(k * P2, (k + 1) * P2), i * P2));
+  const cx = ord.map((k) => cx0[k]), cy = ord.map((k) => cy0[k]);
   // 2. split: parity of the 16 px tile of the detection pixel (corner + (P - 1) / 2)
   const tr: number[] = [], te: number[] = [];
   for (let i = 0; i < n; i++) {
@@ -81,16 +95,25 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   let partial = fit.history.length < form.iters;
   const K0 = fit.K0;
   let nRej = 0, thr: number | null = null, nFit = tr.length, history = fit.history, dFit = dTr;
+  let devRep: { rule: string; median: number; scale: number; threshold: number; rejected_fraction: number } | null = null;
   if (reject && !tok.stopEarly) {
     // spot_deviance with the first-pass PSF tabulated as a spline (localized afresh: zstarts, 30 iterations)
     const K1a = (await knotsAndJacobian(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um)).knots;
     const loc = new SplineLocalizer(dev, g, K1a);
     let dv: Float32Array;
     try { dv = (await loc.localize(dTr, tr.length)).deviance; } finally { loc.destroy(); }
-    thr = 1 + k * Math.sqrt(2 / P2);
+    // deviance_rule 'median' (default): median + k max(1.4826 MAD, median sqrt(2 / P^2)); 'poisson': 1 + k sqrt(2 / P^2)
+    const med = median(dv);
+    let scale: number;
+    if ((form.devianceRule ?? 'median') === 'poisson') { scale = Math.sqrt(2 / P2); thr = 1 + k * scale; }
+    else { scale = Math.max(1.4826 * median(Float32Array.from(dv, (v) => Math.abs(v - med))), med * Math.sqrt(2 / P2)); thr = med + k * scale; }
+    devRep = { rule: form.devianceRule ?? 'median', median: med, scale, threshold: thr, rejected_fraction: 0 };
     const keep: number[] = [];
     for (let i = 0; i < tr.length; i++) if (dv[i] < thr) keep.push(i);
     nRej = tr.length - keep.length; nFit = keep.length;
+    devRep.rejected_fraction = nRej / tr.length;
+    if (devRep.rejected_fraction > 0.25) warnings.push(`${(100 * devRep.rejected_fraction).toFixed(0)} % of the training spots were rejected as overlaps`);
+    if (devRep.median > 1.3) warnings.push(`median deviance per px ${devRep.median.toFixed(2)} (1 for Poisson statistics): check the camera gain / offset / excess noise`);
     const dKeep = new Float32Array(keep.length * P2);
     keep.forEach((i, q) => dKeep.set(dTr.subarray(i * P2, (i + 1) * P2), q * P2));
     dFit = dKeep;
@@ -115,19 +138,42 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     const zr = await zScale(dev, rr.knots, K1, g);
     refine = { kept: false, heldout_refined: null, z_scale_vs_vectorial: zr.scale, z_offset_um_vs_vectorial: zr.offset, outer: rr.history.length, seconds: rr.seconds, knots: rr.knots };
   }
-  let heldout: InsituReport['heldout'] = null;
+  let heldout: InsituReport['heldout'] = null, heldoutChi2: number | null = null;
   if (te.length) {
+    const chi2s: Float32Array[] = [];
     const nllPx = async (K: Float32Array) => {
       const loc = new SplineLocalizer(dev, g, K);
-      try { const r = await loc.localize(dTe, te.length); let s = 0; for (const v of r.nll) s += v; return s / te.length / P2; }
+      try { const r = await loc.localize(dTe, te.length); chi2s.push(r.chi2); let s = 0; for (const v of r.nll) s += v; return s / te.length / P2; }
       finally { loc.destroy(); }
     };
     const a = await nllPx(fit.K0), b = await nllPx(K1);
     heldout = { start: a, fitted: b, diff: b - a };
-    if (refine) { refine.heldout_refined = await nllPx(refine.knots!); refine.kept = refine.heldout_refined < b; }
+    let chosen = chi2s[1];
+    if (refine) { refine.heldout_refined = await nllPx(refine.knots!); refine.kept = refine.heldout_refined < b; if (refine.kept) chosen = chi2s[2]; }
+    heldoutChi2 = median(chosen);                       // the held-out spots fitted with the returned PSF
+    if (!(heldoutChi2 > 0.7 && heldoutChi2 < 1.4)) warnings.push(`held-out median chi2 per px ${heldoutChi2.toFixed(2)} (about 1 expected): check the camera gain / offset / excess noise`);
   }
   return { zcoef: fit.zcoef, zcoef_start: [...form.zcoef], noll: form.noll, iterations: history.length, partial,
     seconds: (performance.now() - tFit0) / 1000,
     n_spots: n, n_train: tr.length, n_test: te.length, n_rejected: nRej, deviance_threshold: thr, frames_read: done, frames_total: mv.n, heldout,
-    z_scale: zs.scale, z_offset_um: zs.offset, at_limit: lim / Math.max(1, nFit), history, refine, grid: { zpad: 5 } };
+    z_scale: zs.scale, z_offset_um: zs.offset, at_limit: lim / Math.max(1, nFit), history, refine, grid: { zpad: 5 },
+    heldout_chi2_median: heldoutChi2, deviance: devRep, frames_requested: nFrames, n_chunks: nChunks,
+    warnings: tr.length < form.nspots ? [...warnings, `only ${tr.length} training spots found (${form.nspots} requested)`] : warnings };
+}
+
+/** torch_psf.spots.spread_order: 0..n-1 in bit-reversed (van der Corput) order (every prefix spread over the range). */
+export function spreadOrder(n: number): number[] {
+  if (n <= 1) return Array.from({ length: n }, (_, i) => i);
+  const bits = Math.ceil(Math.log2(n)), out: number[] = [];
+  for (let i = 0; i < 1 << bits; i++) {
+    let r = 0; for (let b = 0; b < bits; b++) if (i & (1 << b)) r |= 1 << (bits - 1 - b);
+    if (r < n) out.push(r);
+  }
+  return out;
+}
+
+/** numpy.median (the mean of the two middle values for an even count). */
+function median(a: ArrayLike<number>): number {
+  const s = Float64Array.from(a).sort(), n = s.length;
+  return n % 2 ? s[(n - 1) >> 1] : 0.5 * (s[n / 2 - 1] + s[n / 2]);
 }

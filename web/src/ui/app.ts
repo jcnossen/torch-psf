@@ -247,6 +247,7 @@ export function startApp(root: HTMLElement) {
     roisize: Math.round(n('m-roi')), threshold: n('m-thr'), isolation: Math.round(n('m-iso')), chunk: Math.round(n('m-chunk')), maxFrames: Math.round(n('m-frames')),
     npupil: 64, oversample: 3, noll: psf.noll, zcoef: psf.zcoef, nspots: Math.round(n('m-nspots')), nheldout: Math.round(n('m-nheld')), iters: Math.round(n('m-iters')), tile: 16,
     rejectOverlap: n('m-devk') > 0, devianceK: n('m-devk'), refine: $<HTMLInputElement>('m-refine').checked, refineOuter: 12,
+    sample: 'spread', sampleChunk: Math.round(n('m-schunk')), devianceRule: 'median', excessNoise: n('o-excess'),
   });
 
   // --- progress, stop
@@ -407,13 +408,15 @@ export function startApp(root: HTMLElement) {
   function showInsitu(r: InsituReport) {
     $('p-insitu').hidden = false;
     const rows: [string, string][] = [
-      ['spots (fit / held out)', `${r.n_train} / ${r.n_test} of ${r.n_spots}, from ${r.frames_read} of ${r.frames_total} frames`],
-      ['overlapping spots rejected', r.deviance_threshold === null ? 'off' : `${r.n_rejected} (deviance per pixel > ${r.deviance_threshold.toFixed(3)}), then a second pass`],
+      ['spots (fit / held out)', `${r.n_train} / ${r.n_test} of ${r.n_spots}, from ${r.frames_read} of ${r.frames_total} frames (${r.n_chunks} chunks spread over the movie)`],
+      ['overlapping spots rejected', !r.deviance ? 'off' : `${r.n_rejected} (${(100 * r.deviance.rejected_fraction).toFixed(0)} %; deviance per pixel > ${r.deviance.threshold.toFixed(3)} = median ${r.deviance.median.toFixed(3)} + k x ${r.deviance.scale.toFixed(3)}), then a second pass`],
+      ['held-out median chi2 per px', r.heldout_chi2_median === null ? 'n/a' : `${r.heldout_chi2_median.toFixed(3)} (about 1 if the camera gain / offset / excess noise are right)`],
       ['iterations', `${r.iterations}${r.partial ? ' (stopped early)' : ''}, ${r.seconds.toFixed(1)} s`],
       ['held-out NLL / px, fitted - start', r.heldout ? `${r.heldout.diff.toFixed(4)} (negative: the fitted PSF explains spots it was not fitted to better)` : 'no held-out spots'],
       ['z scale vs the start PSF', `${r.z_scale.toFixed(3)} (offset ${(1000 * r.z_offset_um).toFixed(0)} nm)`],
       ['spots at the offset limit', (100 * r.at_limit).toFixed(2) + ' %'],
     ];
+    if (r.warnings.length) rows.push(['warnings', r.warnings.join('; ')]);
     if (r.refine) {
       const f = r.refine;
       rows.push(['spline refinement', `${f.kept ? 'kept' : 'not kept'}: held-out NLL / px ${f.heldout_refined === null ? 'n/a' : (f.heldout_refined - (r.heldout?.start ?? 0)).toFixed(4)} vs start ` +
@@ -662,7 +665,7 @@ const TEMPLATE = `
     <div class="tabs" role="tablist"><button data-tab="movie" role="tab">SMLM movie</button><button data-tab="stack" role="tab">Bead z-stack</button></div>
     <div class="essentials">${num('o-px', 'pixel size (um)', 0.108)}${num('o-na', 'NA', 1.49)}${num('o-wl', 'wavelength (um)', 0.68)}</div>
     <details class="adv" data-key="adv-optics"><summary>Advanced: refractive indices, camera</summary>
-      <div class="advgrid">${num('o-nimm', 'n immersion', 1.518)}${num('o-nmed', 'n medium', 1.33)}${num('o-gain', 'camera gain (e-/ADU)', 0.5)}${num('o-offset', 'camera offset (ADU)', 100)}${num('o-rn', 'read noise (e- rms, localization)', 0)}</div>
+      <div class="advgrid">${num('o-nimm', 'n immersion', 1.518)}${num('o-nmed', 'n medium', 1.33)}${num('o-gain', 'camera gain (e-/ADU)', 0.5)}${num('o-offset', 'camera offset (ADU)', 100)}${num('o-rn', 'read noise (e- rms, localization)', 0)}${num('o-excess', 'excess noise F^2 (EMCCD 2, else 1)', 1, 'any', 'torch_psf Camera.excess_noise: photons are divided by F^2 (Poisson-equivalent), read-noise variance by F^4')}</div>
     </details>
     <div id="tab-movie">
       <div id="mdrop" class="drop"><input id="mfile" type="file" multiple accept=".tif,.tiff,.h5,.hdf5,.csv,.yaml"><p>Drop your SMLM movie (TIFF, streamed) to replace the demo, or a localization file (torch-psf / Picasso HDF5, ThunderSTORM csv) anywhere on the page to view it. <a href="#" id="m-demo">Back to the demo</a></p><p id="mfiles" class="note"></p></div>
@@ -673,7 +676,7 @@ const TEMPLATE = `
           ${num('m-focus', 'focal plane (um)', 0.4, 'any', 'focal-plane position above the coverslip during the acquisition')}${num('m-zlo', 'emitter z from (um)', 0)}${num('m-zhi', 'to (um)', 0.8)}
           ${num('m-roi', 'ROI (px, odd)', 15, '2')}${num('m-thr', 'detection threshold (x noise)', 6)}${num('m-iso', 'isolation (px, 0 = off)', 0, '1')}
           ${num('m-nspots', 'spots for the fit', 8000, '1')}${num('m-nheld', 'held-out spots', 4000, '1')}${num('m-iters', 'iterations', 80, '1')}
-          ${num('m-chunk', 'frames per chunk', 500, '1', 'the detection noise is estimated per chunk (torch_psf default 500)')}${num('m-frames', 'max frames (0 = all)', 0, '1')}
+          ${num('m-chunk', 'frames per chunk (localization)', 500, '1', 'the detection noise is estimated per chunk (torch_psf default 500)')}${num('m-schunk', 'frames per chunk (spot sampling)', 50, '1', 'the PSF fit samples spots from chunks spread over the whole movie (bit-reversed order; torch_psf InSituEstimator chunk=50)')}${num('m-frames', 'max frames (0 = all)', 0, '1')}
           <label title="free spline knots regularised towards the fitted vectorial PSF (torch_psf InSituEstimator refine=True); kept only if the held-out NLL improves"><input id="m-refine" type="checkbox"> spline refinement</label>
           ${num('m-devk', 'overlap rejection k (0 = off)', 3, 'any', 'after the first pass, spots with a Poisson deviance per pixel above 1 + k sqrt(2 / P^2) are dropped and the fit is repeated (torch_psf InSituEstimator deviance_k)')}
           <label>start PSF <select id="m-psf"><option value="guess">generic astigmatic (Noll 6 = 0.08)</option><option value="view">the PSF in the 3D view</option><option value="insitu">the last in-situ estimate</option><option value="json">a PSF json file</option></select></label>

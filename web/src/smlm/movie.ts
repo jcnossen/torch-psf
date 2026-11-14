@@ -45,7 +45,7 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
   const eta = new Eta();
   const t0 = performance.now();
   let n = 0, nLimit = 0, done = 0, partial = false;
-  const varE = form.readnoise_e > 0 ? Math.fround(form.readnoise_e * form.readnoise_e) : 0;
+  const varE = form.readnoise_e > 0 ? Math.fround(form.readnoise_e * form.readnoise_e / (form.excessNoise ?? 1) ** 2) : 0;
   try {
     for (let f0 = 0; f0 < nFrames; f0 += chunk) {
       tok.check();
@@ -54,6 +54,7 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
       const fr = await mv.read(f0, f1);
       const gain = Math.fround(form.gain), off = Math.fround(form.offset);
       for (let i = 0; i < fr.length; i++) fr[i] = Math.fround(Math.fround(fr[i] - off) * gain);
+      if ((form.excessNoise ?? 1) !== 1) { const F2 = form.excessNoise!; for (let i = 0; i < fr.length; i++) fr[i] = Math.fround(fr[i] / F2); }
       const d = await det.detect(fr, T, f0);
       const N = d.frame.length;
       if (N) {

@@ -190,8 +190,11 @@ test('insitu: whole estimate (movie -> spots -> split -> fit -> overlap rejectio
   const hp = rp.heldout ? rp.heldout.vectorial.nll_per_px_vs_first : NaN;
   const msg = `spots ${r.n_spots} (torch_psf ${rp.n_spots}), train ${r.n_train} (${rp.n_train}), test ${r.n_test} (${rp.n_test}), rejected ${r.n_rejected} (${rp.n_rejected}); ` +
     `zcoef rms vs torch_psf ${rms.toExponential(1)} w; held-out NLL/px fitted - start ${r.heldout?.diff.toFixed(5)} (${hp.toFixed(5)}); ` +
-    `z scale ${r.z_scale.toFixed(4)} (${rp.z_scale.toFixed(4)}); at limit ${r.at_limit.toFixed(4)} (${rp.at_limit.toFixed(4)}); ${r.seconds.toFixed(1)} s`;
-  check(r.n_spots === rp.n_spots && r.n_train === rp.n_train && Math.abs(r.n_rejected - rp.n_rejected) <= 3 && rms < 2e-3 && Math.abs((r.heldout?.diff ?? 0) - hp) < 2e-3 && Math.abs(r.z_scale - rp.z_scale) < 0.01, msg);
+    `z scale ${r.z_scale.toFixed(4)} (${rp.z_scale.toFixed(4)}); at limit ${r.at_limit.toFixed(4)} (${rp.at_limit.toFixed(4)}); ` +
+    `deviance threshold ${r.deviance?.threshold.toFixed(4)} (${rp.deviance.threshold.toFixed(4)}); held-out chi2 median ${r.heldout_chi2_median?.toFixed(4)} (${rp.heldout_chi2_median.toFixed(4)}); ` +
+    `frames read ${r.frames_read} (${rp.frames_read}); ${r.seconds.toFixed(1)} s`;
+  check(r.n_spots === rp.n_spots && r.n_train === rp.n_train && r.frames_read === rp.frames_read && Math.abs(r.n_rejected - rp.n_rejected) <= 3 &&
+    Math.abs(r.deviance!.threshold - rp.deviance.threshold) < 1e-3 && Math.abs(r.heldout_chi2_median! - rp.heldout_chi2_median) < 2e-3 && rms < 2e-3 && Math.abs((r.heldout?.diff ?? 0) - hp) < 2e-3 && Math.abs(r.z_scale - rp.z_scale) < 0.01, msg);
   return msg;
 });
 
