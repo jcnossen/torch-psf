@@ -5,7 +5,10 @@ import { drawArray } from './colormap';
 import { DEFAULT_NOLL, Optics } from '../psf/vectorial';
 import { makePsfJson } from '../io/psfjson';
 import { WEBGPU_HELP } from '../gpu/device';
-import type { FitForm, FitSummary, VolumeSpec, Req } from './protocol';
+import type { FitForm, FitSummary, VolumeSpec, Req, MovieForm } from './protocol';
+import { Recon } from './recon';
+import { locsToCsv, MovieSummary, NCOL } from '../smlm/movie';
+import type { ViewLook } from './view3d';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -14,9 +17,11 @@ const worker = new Worker(new URL('../worker.ts', import.meta.url), { type: 'mod
 let nextId = 1;
 const pending = new Map<number, { res: (v: any) => void; rej: (e: any) => void }>();
 let onProgress: (p: any) => void = () => {};
+let onLocs: (rows: Float32Array) => void = () => {};
 worker.onmessage = (ev) => {
   const m = ev.data;
   if (m.type === 'progress') { onProgress(m.p); return; }
+  if (m.type === 'locs') { onLocs(m.rows); return; }
   const p = pending.get(m.id);
   if (!p) return;
   pending.delete(m.id);
@@ -47,10 +52,17 @@ const PRESETS: Preset[] = [
 // ---------------------------------------------------------------- DOM
 export function startApp(root: HTMLElement) {
   root.innerHTML = TEMPLATE;
+  // foldable panels: the open / closed state is remembered per panel (localStorage may be unavailable)
+  for (const d of root.querySelectorAll<HTMLDetailsElement>('details.panel')) {
+    const key = 'tpsf.panel.' + d.dataset.key;
+    try { const v = localStorage.getItem(key); if (v !== null) d.open = v === '1'; } catch { /* no storage */ }
+    d.addEventListener('toggle', () => { try { localStorage.setItem(key, d.open ? '1' : '0'); } catch { /* no storage */ } });
+  }
   const view = new View3D($('view3d'));
   (window as any).__view = view;
   let fitResult: FitSummary | null = null;
   let current: { vol: Volume; spec: VolumeSpec } | null = null;
+  let refreshPsfInfo = () => {};
 
   const status = $('gpu-status');
   call({ type: 'init' }).then(
@@ -82,6 +94,7 @@ export function startApp(root: HTMLElement) {
     const v: Volume = { data, nx: spec.nxy, ny: spec.nxy, nz: spec.nz, dx_um: spec.dxy_um, dz_um: (spec.zmax - spec.zmin) / Math.max(1, spec.nz - 1), z0_um: spec.zmin };
     current = { vol: v, spec };
     view.setVolume(v);
+    refreshPsfInfo();
     $('preset-note').textContent = note;
     drawSections();
   }
@@ -102,12 +115,10 @@ export function startApp(root: HTMLElement) {
     $<HTMLInputElement>(id).oninput = (e) => { view.setSlice(i as 0 | 1 | 2, +(e.target as HTMLInputElement).value / 100); drawSections(); };
   }
   $<HTMLInputElement>('zexag').oninput = (e) => { view.setZExag(+(e.target as HTMLInputElement).value); $('zexag-v').textContent = view.opts.zExag.toFixed(1); };
-  $<HTMLInputElement>('levels').onchange = (e) => {
-    const lv = (e.target as HTMLInputElement).value.split(/[ ,]+/).map(Number).filter((x) => x > 0 && x < 100).map((x) => x / 100);
-    if (lv.length) { view.opts.levels = lv; view.rebuild(); }
-  };
-  $<HTMLInputElement>('show-iso').onchange = (e) => { view.opts.showIso = (e.target as HTMLInputElement).checked; view.rebuild(); };
-  $<HTMLInputElement>('show-slices').onchange = (e) => { view.opts.showSlices = (e.target as HTMLInputElement).checked; view.rebuild(); };
+  const lookSel = $<HTMLSelectElement>('look');
+  try { const v = localStorage.getItem('tpsf.look'); if (v === 'slices' || v === 'volume') lookSel.value = v; } catch { /* no storage */ }
+  view.opts.look = lookSel.value as ViewLook;
+  lookSel.onchange = () => { view.setLook(lookSel.value as ViewLook); try { localStorage.setItem('tpsf.look', lookSel.value); } catch { /* no storage */ } };
   $<HTMLInputElement>('decades').onchange = (e) => { view.opts.decades = +(e.target as HTMLInputElement).value; view.updateSlices(); drawSections(); };
 
   // --- files
@@ -129,15 +140,18 @@ export function startApp(root: HTMLElement) {
   busy(false);
   enoughBtn.onclick = () => worker.postMessage({ type: 'stop', signal: 'enough' });
   abortBtn.onclick = () => worker.postMessage({ type: 'stop', signal: 'abort' });
+  let running: 'stack' | 'movie' = 'stack';
   onProgress = (p) => {
     const frac = p.total ? Math.min(1, p.done / p.total) : 0;
-    $('pbar').style.width = (100 * frac).toFixed(1) + '%';
-    enoughBtn.textContent = p.stage === 'read' ? 'Enough frames' : p.stage === 'fit' ? 'Stop and keep current estimate' : 'Use what we have';
+    const [bar, txt] = running === 'movie' ? ['mbar', 'mtext'] : ['pbar', 'ptext'];
+    $(bar).style.width = (100 * frac).toFixed(1) + '%';
+    if (running === 'stack') enoughBtn.textContent = p.stage === 'read' ? 'Enough frames' : p.stage === 'fit' ? 'Stop and keep current estimate' : 'Use what we have';
     const info = Object.entries(p.info ?? {}).map(([k, v]) => `${k} ${typeof v === 'number' ? (Math.abs(v) < 1e-2 || Math.abs(v) > 1e4 ? v.toExponential(2) : v.toFixed(5)) : v}`).join(', ');
     const t = p.elapsed_s !== undefined ? ` | ${p.elapsed_s.toFixed(1)} s` + (p.eta_s !== undefined ? `, ~${p.eta_s.toFixed(1)} s left (at most)` : '') : '';
-    $('ptext').textContent = `${p.stage}: ${p.done} / ${p.total}${info ? ' | ' + info : ''}${t}`;
+    $(txt).textContent = `${p.stage}: ${p.done} / ${p.total}${info ? ' | ' + info : ''}${t}`;
   };
   runBtn.onclick = async () => {
+    running = 'stack';
     if (!files.length) { $('ptext').textContent = 'Drop or choose a bead z-stack TIFF first.'; return; }
     busy(true);
     $('ptext').textContent = 'starting...';
@@ -155,10 +169,128 @@ export function startApp(root: HTMLElement) {
     } finally { busy(false); }
   };
 
+  const n = (id: string) => +$<HTMLInputElement>(id).value;
+  const readOptics = () => ({ NA: n('f-na'), wavelength_um: n('f-wl'), n_imm: n('f-nimm'), n_med: n('f-nmed'), pixel_um: n('f-px') });
+
+  // --- mode switch (shared optics / camera; mode-specific inputs and result panels)
+  const setMode = (m: string) => {
+    $('mode-stack').hidden = m !== 'stack';
+    $('mode-movie').hidden = m !== 'movie';
+    $('results').hidden = m !== 'stack' || !fitResult;
+    $('p-recon').hidden = m !== 'movie' || !recon;
+    $('p-locs').hidden = m !== 'movie' || !recon;
+    try { localStorage.setItem('tpsf.mode', m); } catch { /* no storage */ }
+  };
+  for (const r of root.querySelectorAll<HTMLInputElement>('input[name=mode]')) r.onchange = () => setMode(r.value);
+  try {
+    const m0 = localStorage.getItem('tpsf.mode');
+    if (m0 === 'movie') { (root.querySelector('input[name=mode][value=movie]') as HTMLInputElement).checked = true; setTimeout(() => setMode('movie')); }
+  } catch { /* no storage */ }
+
+  // --- SMLM movie: detect and localize with the PSF of the 3D view or a PSF json, reconstruction, csv
+  let mfiles: File[] = [];
+  let recon: Recon | null = null;
+  let psfJson: { noll: number[]; zcoef: number[]; name: string } | null = null;
+  const mdrop = $('mdrop');
+  const setMFiles = (fl: FileList | File[]) => {
+    mfiles = [...fl].filter((f) => /\.tiff?$/i.test(f.name));
+    $('mfiles').textContent = mfiles.length ? mfiles.map((f) => `${f.name} (${(f.size / 2 ** 20).toFixed(1)} MB)`).join(', ') : 'no TIFF selected';
+  };
+  (window as any).__setMovieFiles = setMFiles;
+  mdrop.ondragover = (e) => { e.preventDefault(); mdrop.classList.add('over'); };
+  mdrop.ondragleave = () => mdrop.classList.remove('over');
+  mdrop.ondrop = (e) => { e.preventDefault(); mdrop.classList.remove('over'); if (e.dataTransfer) setMFiles(e.dataTransfer.files); };
+  $<HTMLInputElement>('mfile').onchange = (e) => setMFiles((e.target as HTMLInputElement).files!);
+  const psfSel = $<HTMLSelectElement>('m-psf');
+  const psfInfo = () => {
+    if (psfSel.value === 'json') { $('m-psfinfo').textContent = psfJson ? `${psfJson.name}: Zernikes ${fmtZ(psfJson.noll, psfJson.zcoef)}` : 'choose a psf.json'; return; }
+    $('m-psfinfo').textContent = current ? `${sel.options[sel.selectedIndex]?.text ?? ''}: Zernikes ${fmtZ(current.spec.noll, current.spec.zcoef)}` : '';
+  };
+  refreshPsfInfo = psfInfo;
+  psfSel.onchange = () => { $('m-psfjson').hidden = psfSel.value !== 'json'; psfInfo(); };
+  sel.addEventListener('change', psfInfo);
+  $<HTMLInputElement>('m-psfjson').onchange = async (e) => {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (!f) return;
+    try {
+      const j = JSON.parse(await f.text());
+      const noll = j.zernike_noll ?? j.psf?.zernike_noll, zw = j.zernike_waves ?? j.psf?.zernike_waves;
+      if (!Array.isArray(noll) || !Array.isArray(zw)) throw new Error('no zernike_noll / zernike_waves');
+      psfJson = { noll: noll.map(Number), zcoef: zw.map(Number), name: f.name };
+    } catch (err) { psfJson = null; $('m-psfinfo').textContent = 'not a torch-psf PSF json: ' + (err as Error).message; return; }
+    psfInfo();
+  };
+  const mRun = $<HTMLButtonElement>('m-run'), mEnough = $<HTMLButtonElement>('m-enough'), mAbort = $<HTMLButtonElement>('m-abort');
+  const mBusy = (b: boolean) => { mRun.disabled = b; mEnough.disabled = !b; mAbort.disabled = !b; runBtn.disabled = b; };
+  mBusy(false);
+  mEnough.onclick = () => worker.postMessage({ type: 'stop', signal: 'enough' });
+  mAbort.onclick = () => worker.postMessage({ type: 'stop', signal: 'abort' });
+  let lastDraw = 0, drawTimer = 0;
+  const drawRecon = () => {
+    if (!recon) return;
+    const r = recon.render($('recon') as HTMLCanvasElement, { pixel_nm: n('r-px'), blur_px: n('r-blur'), colorZ: $<HTMLInputElement>('r-colorz').checked,
+      zlo: n('m-zlo'), zhi: n('m-zhi'), maxCrlbNm: n('r-crlb') });
+    $('r-label').textContent = `${r.shown} of ${recon.n} localizations, ${r.w} x ${r.h} pixels of ${n('r-px')} nm` +
+      ($<HTMLInputElement>('r-colorz').checked ? `; colour = z from ${n('m-zlo')} (blue) to ${n('m-zhi')} um (red)` : '');
+    lastDraw = performance.now();
+  };
+  for (const id of ['r-px', 'r-blur', 'r-crlb', 'r-colorz']) $(id).addEventListener('change', drawRecon);
+  onLocs = (rows) => {
+    recon?.add(rows);
+    if (performance.now() - lastDraw > 700) drawRecon();
+    else { clearTimeout(drawTimer); drawTimer = window.setTimeout(drawRecon, 700); }
+  };
+  $('r-csv').onclick = () => { if (recon) download(locsToCsv(recon.rows()), 'localizations.csv', 'text/csv'); };
+  mRun.onclick = async () => {
+    if (!mfiles.length) { $('mtext').textContent = 'Drop or choose a movie TIFF first.'; return; }
+    const src = psfSel.value === 'json' ? psfJson : current ? { noll: current.spec.noll, zcoef: current.spec.zcoef } : null;
+    if (!src) { $('mtext').textContent = psfSel.value === 'json' ? 'Choose a PSF json first.' : 'No PSF in the 3D view yet.'; return; }
+    const P = Math.round(n('m-roi'));
+    if (P % 2 !== 1 || P < 5) { $('mtext').textContent = 'The ROI size must be odd (>= 5).'; return; }
+    const form: MovieForm = { optics: readOptics(), gain: n('f-gain'), offset: n('f-offset'), readnoise_e: n('m-rn'),
+      focus_um: n('m-focus'), zlo: n('m-zlo'), zhi: n('m-zhi'), roisize: P, threshold: n('m-thr'), isolation: Math.round(n('m-iso')),
+      chunk: Math.round(n('m-chunk')), maxFrames: Math.round(n('m-frames')), npupil: 64, oversample: 2, noll: src.noll, zcoef: src.zcoef };
+    running = 'movie';
+    mBusy(true);
+    recon = null;
+    $('mtext').textContent = 'starting...';
+    try {
+      // the reconstruction needs the frame size: read it from the TIFF header in the worker's first progress message;
+      // here a provisional size from the first locs is avoided by asking the worker (movie header) first
+      const hdr = await call({ type: 'movieHeader', files: mfiles });
+      recon = new Recon(hdr.H, hdr.W, form.optics.pixel_um);
+      $('p-recon').hidden = false; $('p-locs').hidden = false;
+      const r = await call({ type: 'movie', files: mfiles, form });
+      const s = r.summary as MovieSummary;
+      drawRecon();
+      showLocs(s);
+      $('mbar').style.width = '100%';
+      $('mtext').textContent = `done: ${s.n_locs} localizations from ${s.frames_read} frames in ${s.seconds.toFixed(1)} s` + (s.partial ? ' (stopped early)' : '');
+      (window as any).__movieDone = s;
+    } catch (e) {
+      const err = e as Error & { abort?: boolean };
+      $('mtext').textContent = err.abort ? 'aborted' : 'error: ' + err.message;
+      $('mbar').style.width = '0%';
+    } finally { mBusy(false); }
+  };
+  function showLocs(s: MovieSummary) {
+    const rows = recon!.rows(), N = rows.length / NCOL;
+    const med = (k: number, f = 1) => { const a = new Float32Array(N); for (let i = 0; i < N; i++) a[i] = rows[i * NCOL + k] * f; a.sort(); return N ? a[N >> 1] : NaN; };
+    const px = n('f-px') * 1000;
+    const t: [string, string][] = [
+      ['localizations', `${s.n_locs} (${(s.n_locs / Math.max(1, s.frames_read)).toFixed(2)} per frame)`],
+      ['frames', `${s.frames_read} of ${s.frames_total}${s.partial ? ' (stopped early)' : ''}, ${s.W} x ${s.H} px`],
+      ['median photons / bg', `${med(4).toFixed(0)} / ${med(5).toFixed(1)}`],
+      ['median CRLB x / y / z', `${med(6, px).toFixed(1)} / ${med(7, px).toFixed(1)} / ${med(8, 1000).toFixed(1)} nm`],
+      ['at the offset limit', (100 * s.at_limit_fraction).toFixed(2) + ' %'],
+      ['time', `${s.seconds.toFixed(1)} s (${s.spots_per_s.toFixed(0)} spots / s, including reading)`],
+    ];
+    $('l-table').innerHTML = t.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
+  }
+
   function readForm(): FitForm {
-    const n = (id: string) => +$<HTMLInputElement>(id).value;
     return {
-      optics: { NA: n('f-na'), wavelength_um: n('f-wl'), n_imm: n('f-nimm'), n_med: n('f-nmed'), pixel_um: n('f-px') },
+      optics: readOptics(),
       sign: n('f-sign'), dz_um: n('f-dz'), gain: n('f-gain'), offset: n('f-offset'), ze_um: n('f-ze'),
       roisize: n('f-roi'), npupil: n('f-npupil'), oversample: n('f-os'),
       fitDz: $<HTMLInputElement>('f-fitdz').checked, fitDrift: $<HTMLInputElement>('f-drift').checked,
@@ -171,6 +303,7 @@ export function startApp(root: HTMLElement) {
 
   function showResult(r: FitSummary) {
     $('results').hidden = false;
+    psfInfo();
     const opt = sel.querySelector('option[value="fit"]') as HTMLOptionElement;
     opt.disabled = false;
     sel.value = 'fit';
@@ -221,13 +354,13 @@ export function startApp(root: HTMLElement) {
   }
 
   // --- exports
-  const download = (bytes: BlobPart, name: string, type = 'application/octet-stream') => {
+  function download(bytes: BlobPart, name: string, type = 'application/octet-stream') {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([bytes], { type }));
     a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-  };
+  }
   const expParams = () => ({ focus_um: +$<HTMLInputElement>('e-focus').value, splineRoi: +$<HTMLInputElement>('e-roi').value, zmin: +$<HTMLInputElement>('e-zmin').value, zmax: +$<HTMLInputElement>('e-zmax').value });
   $('x-json').onclick = () => {
     const r = fitResult!, f = readForm();
@@ -246,6 +379,9 @@ export function startApp(root: HTMLElement) {
   $('x-knots').onclick = () => viaWorker('knots');
   $('x-tif').onclick = () => viaWorker('tif');
 }
+
+const fmtZ = (noll: number[], z: number[]) => noll.map((j, i) => [j, z[i]] as [number, number]).filter(([, v]) => Math.abs(v) >= 0.005)
+  .map(([j, v]) => `${j}: ${v.toFixed(3)}`).join(', ') || 'none';
 
 function flipRows(a: Float32Array, w: number, h: number) {
   const o = new Float32Array(a.length);
@@ -279,48 +415,87 @@ const TEMPLATE = `
 <header><h1>torch-psf <span>web</span></h1><div id="gpu-status">Checking WebGPU...</div></header>
 <div id="nogpu" class="warn" hidden></div>
 <main>
-  <section id="viewer">
+  <div class="col">
+  <details class="panel" data-key="view" open><summary><h2>3D PSF</h2></summary>
     <div class="bar">
       <label>PSF <select id="preset"></select></label>
-      <label title="relative levels of the peak, in %">isosurfaces (%) <input id="levels" value="50, 10, 1" size="9"></label>
+      <label>view <select id="look"><option value="slices">slices</option><option value="volume">volume</option></select></label>
       <label>z exaggeration <input id="zexag" type="range" min="0.25" max="4" step="0.25" value="1"><span id="zexag-v">1.0</span></label>
       <label>log decades <input id="decades" type="number" min="1" max="6" value="3" style="width:3em"></label>
-      <label><input id="show-iso" type="checkbox" checked> surfaces</label>
-      <label><input id="show-slices" type="checkbox" checked> slices</label>
     </div>
     <div id="view3d"></div>
-    <div class="bar">slice planes: <label>x <input id="sx" type="range" min="0" max="100" step="0.1" value="50"></label>
+    <div class="bar">slice planes (or drag them): <label>x <input id="sx" type="range" min="0" max="100" step="0.1" value="50"></label>
       <label>y <input id="sy" type="range" min="0" max="100" step="0.1" value="50"></label>
       <label>z <input id="sz" type="range" min="0" max="100" step="0.1" value="50"></label></div>
     <p id="preset-note" class="note"></p>
+  </details>
+  <details class="panel" data-key="sections" open><summary><h2>Sections</h2></summary>
     <div class="panels">
       <figure><canvas id="sec-xy" width="200" height="200"></canvas><figcaption>xy</figcaption></figure>
       <figure><canvas id="sec-xz" width="200" height="200"></canvas><figcaption>xz</figcaption></figure>
       <figure><canvas id="sec-yz" width="200" height="200"></canvas><figcaption>yz</figcaption></figure>
     </div>
     <p id="sec-label" class="note"></p>
-  </section>
-  <section id="fit">
-    <h2>Bead z-stack &rarr; vectorial PSF</h2>
-    <div id="drop"><input id="file" type="file" multiple accept=".tif,.tiff"><p>Drop bead z-stack TIFF(s) here or choose files. Several stacks: one file each; a multi-part stack: movie.tif, movie_X1.tif, ...</p><p id="files" class="note">no TIFF selected</p></div>
-    <fieldset><legend>Optics and stage</legend>
+  </details>
+  <details class="panel" data-key="recon" open id="p-recon" hidden><summary><h2>Reconstruction</h2></summary>
+    <div class="bar">
+      ${num('r-px', 'pixel (nm)', 20)}${num('r-blur', 'blur (pixels)', 0.7)}${num('r-crlb', 'max CRLB x (nm, 0 = all)', 0)}
+      <label><input id="r-colorz" type="checkbox" checked> colour by z</label>
+      <button id="r-csv">localizations .csv</button>
+    </div>
+    <div class="recon-wrap"><canvas id="recon" width="10" height="10"></canvas></div>
+    <p id="r-label" class="note"></p>
+  </details>
+  </div>
+  <div class="col">
+  <details class="panel" data-key="input" open><summary><h2>Input</h2></summary>
+    <fieldset><legend>Optics (all modes)</legend>
       ${num('f-na', 'NA', 1.49)}${num('f-wl', 'wavelength (um)', 0.68)}${num('f-nimm', 'n immersion', 1.518)}${num('f-nmed', 'n medium', 1.33)}
-      ${num('f-px', 'pixel size (um)', 0.1)}${num('f-dz', 'z step (um)', 0.02)}
-      <label>stage sign<select id="f-sign"><option value="1">+1</option><option value="-1">-1</option></select></label>
-      ${num('f-ze', 'bead centre height (um)', 0.05, 'any', 'emitter height of the (point) bead above the coverslip')}
+      ${num('f-px', 'pixel size (um)', 0.1)}
     </fieldset>
     <fieldset><legend>Camera</legend>${num('f-gain', 'gain (e-/ADU)', 0.5)}${num('f-offset', 'offset (ADU)', 100)}</fieldset>
-    <fieldset><legend>Fit</legend>
-      ${num('f-roi', 'ROI (px)', 26, '1')}${num('f-npupil', 'pupil samples', 64, '1')}${num('f-os', 'oversampling', 2, '1')}
-      ${num('f-iter', 'max iterations', 100, '1')}${num('f-minrel', 'bead threshold (rel.)', 0.3)}
-      <label><input id="f-fitdz" type="checkbox" checked> fit z-step scale</label>
-      <label><input id="f-drift" type="checkbox"> fit xy drift (per stack)</label>
-      <label>held out<select id="f-holdout"><option value="last-bead">last bead</option><option value="last-stack">last stack</option><option value="none">none</option></select></label>
-    </fieldset>
-    <div class="buttons"><button id="run">Fit PSF</button><button id="enough">Use what we have</button><button id="abort">Abort</button></div>
-    <div id="progress"><div id="pbar"></div></div><p id="ptext" class="note"></p>
-    <div id="results" hidden>
-      <h3>Result</h3>
+    <div class="modes" role="radiogroup">
+      <label><input type="radio" name="mode" value="stack" checked> Bead z-stack &rarr; PSF</label>
+      <label><input type="radio" name="mode" value="movie"> SMLM movie &rarr; localizations</label>
+    </div>
+    <div id="mode-stack">
+      <div id="drop" class="drop"><input id="file" type="file" multiple accept=".tif,.tiff"><p>Drop bead z-stack TIFF(s) here or choose files. Several stacks: one file each; a multi-part stack: movie.tif, movie_X1.tif, ...</p><p id="files" class="note">no TIFF selected</p></div>
+      <fieldset><legend>Stage</legend>
+        ${num('f-dz', 'z step (um)', 0.02)}
+        <label>stage sign<select id="f-sign"><option value="1">+1</option><option value="-1">-1</option></select></label>
+        ${num('f-ze', 'bead centre height (um)', 0.05, 'any', 'emitter height of the (point) bead above the coverslip')}
+      </fieldset>
+      <fieldset><legend>Fit</legend>
+        ${num('f-roi', 'ROI (px)', 26, '1')}${num('f-npupil', 'pupil samples', 64, '1')}${num('f-os', 'oversampling', 2, '1')}
+        ${num('f-iter', 'max iterations', 100, '1')}${num('f-minrel', 'bead threshold (rel.)', 0.3)}
+        <label><input id="f-fitdz" type="checkbox" checked> fit z-step scale</label>
+        <label><input id="f-drift" type="checkbox"> fit xy drift (per stack)</label>
+        <label>held out<select id="f-holdout"><option value="last-bead">last bead</option><option value="last-stack">last stack</option><option value="none">none</option></select></label>
+      </fieldset>
+      <div class="buttons"><button id="run">Fit PSF</button><button id="enough">Use what we have</button><button id="abort">Abort</button></div>
+      <div class="progress"><div id="pbar"></div></div><p id="ptext" class="note"></p>
+    </div>
+    <div id="mode-movie" hidden>
+      <div id="mdrop" class="drop"><input id="mfile" type="file" multiple accept=".tif,.tiff"><p>Drop an SMLM movie (DNA-PAINT / dSTORM TIFF; a multi-part movie.tif, movie_X1.tif, ... is joined). It is streamed, not loaded at once.</p><p id="mfiles" class="note">no TIFF selected</p></div>
+      <fieldset><legend>Sample</legend>
+        ${num('m-focus', 'focal plane (um)', 0.4, 'any', 'focal-plane position above the coverslip during the acquisition')}
+        ${num('m-zlo', 'emitter z from (um)', 0)}${num('m-zhi', 'to (um)', 0.8)}${num('m-rn', 'read noise (e- rms)', 0, 'any', 'sCMOS read noise; 0 = Poisson only')}
+      </fieldset>
+      <fieldset><legend>PSF for localization</legend>
+        <label>source <select id="m-psf"><option value="view">the PSF in the 3D view</option><option value="json">a PSF json file</option></select></label>
+        <input id="m-psfjson" type="file" accept=".json" hidden>
+        <span id="m-psfinfo" class="note"></span>
+      </fieldset>
+      <fieldset><legend>Detection and fit (torch_psf defaults)</legend>
+        ${num('m-roi', 'ROI (px, odd)', 15, '2')}${num('m-thr', 'threshold (x noise)', 6)}${num('m-iso', 'isolation (px, 0 = off)', 0, '1')}
+        ${num('m-chunk', 'frames per chunk', 500, '1', 'the noise is estimated per chunk (torch_psf default 500)')}${num('m-frames', 'max frames (0 = all)', 0, '1')}
+      </fieldset>
+      <div class="buttons"><button id="m-run">Detect and localize</button><button id="m-enough">Enough frames</button><button id="m-abort">Abort</button>
+        <button id="m-insitu" disabled title="next step: in-situ PSF estimation from the spots (knot route) and optional spline refinement">Estimate PSF in situ (next)</button></div>
+      <div class="progress"><div id="mbar"></div></div><p id="mtext" class="note"></p>
+    </div>
+  </details>
+  <details class="panel" data-key="results" open id="results" hidden><summary><h2>Bead fit result</h2></summary>
       <table id="res-table"></table>
       <canvas id="zern" width="460" height="150"></canvas>
       <p class="note">Zernike coefficients (waves rms) by Noll index</p>
@@ -339,7 +514,10 @@ const TEMPLATE = `
         ${num('e-roi', 'spline ROI (px)', 13, '1')}${num('e-zmin', 'spline z from (um)', 0)}${num('e-zmax', 'to (um)', 0.8)}</div>
       <div class="buttons"><button id="x-json">PSF json</button><button id="x-knots">spline knots .npz</button><button id="x-tif">model z-stack .tif</button></div>
       <p id="x-status" class="note"></p>
-    </div>
-  </section>
+  </details>
+  <details class="panel" data-key="locs" open id="p-locs" hidden><summary><h2>Localizations</h2></summary>
+    <table id="l-table"></table>
+  </details>
+  </div>
 </main>
 <footer>Everything runs in your browser (WebGPU); no data leave the machine. Python reference: torch-psf.</footer>`;

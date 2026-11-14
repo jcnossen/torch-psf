@@ -15,7 +15,14 @@ export interface Volume {
   z0_um: number;        // z of plane 0
 }
 
-export interface ViewOptions { levels: number[]; zExag: number; decades: number; showSlices: boolean; showIso: boolean; }
+/** look 'slices': slice planes only (default); 'volume': faint slice planes plus many nested white isosurfaces. */
+export type ViewLook = 'slices' | 'volume';
+export interface ViewOptions { levels: number[]; zExag: number; decades: number; showSlices: boolean; showIso: boolean; look: ViewLook; }
+
+// volume look: 10 log-spaced levels from 60 % to 2 % of the peak, white and faint (additive: the inner shells add up
+// to a glow); the outer shells are fainter than the inner ones
+const VOLUME_LEVELS = Array.from({ length: 10 }, (_, i) => 0.6 * Math.pow(0.02 / 0.6, i / 9));
+const SLICE_OPACITY: Record<ViewLook, number> = { slices: 0.85, volume: 0.2 };
 
 const ISO_COLORS = [0xffd84d, 0xff8a3d, 0x3d8bff, 0x9b6bff];
 const ISO_OPACITY = [0.9, 0.45, 0.18, 0.12];
@@ -34,7 +41,7 @@ export class View3D {
   private vol: Volume | null = null;
   private vmax = 1;
   private isoKey = '';
-  opts: ViewOptions = { levels: [0.5, 0.1, 0.01], zExag: 1, decades: 3, showSlices: true, showIso: true };
+  opts: ViewOptions = { levels: [0.5, 0.1, 0.01], zExag: 1, decades: 3, showSlices: true, showIso: true, look: 'slices' };
   slicePos = [0.5, 0.5, 0.5];   // fractions along x, y, z
   autoRotate = true;
   /** called when a slice plane is moved by dragging (to keep sliders in sync) */
@@ -164,12 +171,19 @@ export class View3D {
   /** Change the z exaggeration: only transforms are updated (no isosurface extraction). */
   setZExag(z: number) { this.opts.zExag = z; this.applyTransform(); }
 
+  /** Switch between the slice look and the volume look (isosurfaces are rebuilt, slice opacity changes). */
+  setLook(look: ViewLook) {
+    this.opts.look = look;
+    for (const m of this.slices) (m.material as THREE.MeshBasicMaterial).opacity = SLICE_OPACITY[look];
+    this.rebuild();
+  }
+
   /** Full update after a change of options. Isosurfaces are recomputed only when the volume, the levels or the
    *  surface toggle changed; a z-exaggeration change only updates the transforms. */
   rebuild() {
     const v = this.vol;
     if (!v) return;
-    const key = JSON.stringify([this.opts.levels, this.opts.showIso]);
+    const key = JSON.stringify([this.opts.levels, this.opts.showIso, this.opts.look]);
     if (key !== this.isoKey) { this.buildIso(); this.isoKey = key; }
     if (!this.box) {
       const bx = new THREE.BoxGeometry(1, 1, 1);
@@ -192,11 +206,12 @@ export class View3D {
   private buildIso() {
     const v = this.vol!;
     for (const c of [...this.isoGroup.children]) { this.isoGroup.remove(c); (c as THREE.Mesh).geometry.dispose(); }
-    if (!this.opts.showIso) return;
+    const vol = this.opts.look === 'volume';
+    if (!vol && (this.opts.look === 'slices' || !this.opts.showIso)) return;
     const norm = new Float32Array(v.data.length);
     for (let i = 0; i < norm.length; i++) norm[i] = v.data[i] / this.vmax;
     // innermost (highest level) first; the outer, more transparent shells are drawn after it
-    const levels = [...this.opts.levels].sort((a, b) => b - a);
+    const levels = [...(vol ? VOLUME_LEVELS : this.opts.levels)].sort((a, b) => b - a);
     levels.forEach((lv, i) => {
       const m = isosurface(norm, v.nx, v.ny, v.nz, lv);
       if (!m.positions.length) return;
@@ -204,10 +219,13 @@ export class View3D {
       g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
       // normals are in grid units; with an anisotropic scale three.js uses the normal matrix, which is correct
       g.setAttribute('normal', new THREE.BufferAttribute(m.normals, 3));
-      const mat = new THREE.MeshPhongMaterial({
-        color: ISO_COLORS[i % ISO_COLORS.length], transparent: true, opacity: ISO_OPACITY[i % ISO_OPACITY.length],
-        side: THREE.DoubleSide, depthWrite: i === 0, shininess: 40,
-      });
+      const mat = vol
+        ? new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.09 - 0.06 * i / (levels.length - 1),
+          side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending })
+        : new THREE.MeshPhongMaterial({
+          color: ISO_COLORS[i % ISO_COLORS.length], transparent: true, opacity: ISO_OPACITY[i % ISO_OPACITY.length],
+          side: THREE.DoubleSide, depthWrite: i === 0, shininess: 40,
+        });
       const mesh = new THREE.Mesh(g, mat);
       mesh.renderOrder = i;
       this.isoGroup.add(mesh);
@@ -246,7 +264,7 @@ export class View3D {
     const pg = new THREE.PlaneGeometry(1, 1);
     const eg = new THREE.EdgesGeometry(pg);
     const mk = () => {
-      const m = new THREE.Mesh(pg.clone(), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, transparent: true, opacity: 0.85, depthWrite: false }));
+      const m = new THREE.Mesh(pg.clone(), new THREE.MeshBasicMaterial({ side: THREE.DoubleSide, transparent: true, opacity: SLICE_OPACITY[this.opts.look], depthWrite: false }));
       m.renderOrder = 10;
       const o = new THREE.LineSegments(eg.clone(), new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true }));
       o.renderOrder = 11;

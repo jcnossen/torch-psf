@@ -6,6 +6,8 @@ import { Detector } from '../src/gpu/detect';
 import { SplineLocalizer, splineGrid } from '../src/gpu/spline_lm';
 import { parseNpz } from '../src/io/npy';
 import { buildKnots } from '../src/psf/spline';
+import { localizeMovie, NCOL } from '../src/smlm/movie';
+import { StopToken } from '../src/core/task';
 
 test('smlm: spot detection = torch_psf extract_spots / detect_spots', async () => {
   const meta = await fetchJson('smlm/movie.json');
@@ -88,5 +90,33 @@ test('smlm: knots from the vectorial model = torch_psf ConvSplinePSF.from_vector
   let m = 0, d = 0; for (let i = 0; i < ref.length; i++) { m = Math.max(m, Math.abs(ref[i])); d = Math.max(d, Math.abs(k.knots[i] - ref[i])); }
   const msg = `${k.nz} x ${k.nv} x ${k.nu} knots; max |web - torch_psf| / max ${(d / m).toExponential(2)}`;
   check(d / m < 1e-4, msg);
+  return msg;
+});
+
+test('smlm: whole movie pipeline (ADU -> detect -> knots -> localize) = torch_psf table', async () => {
+  const meta = await fetchJson('smlm/movie.json');
+  const z = await parseNpz(await fetchBuf('smlm/localize.npz'));
+  const { device } = await getDevice();
+  const files = [new File([await fetchBuf('smlm/movie.tif')], 'movie.tif')];
+  const chunks: Float32Array[] = [];
+  const s = await localizeMovie(device, files, {
+    optics: meta.optics, gain: 1, offset: 0, readnoise_e: 0, focus_um: meta.focus_um, zlo: meta.z_range[0], zhi: meta.z_range[1],
+    roisize: meta.roisize, threshold: 6, isolation: 0, chunk: meta.chunk, maxFrames: 0, npupil: meta.npupil, oversample: meta.oversample,
+    noll: meta.noll, zcoef: meta.noll.map((j: number) => meta.zernike[String(j)] ?? 0),
+  }, new StopToken(), () => {}, (r) => chunks.push(r));
+  const rows = new Float32Array(s.n_locs * NCOL); let o = 0; for (const c of chunks) { rows.set(c, o); o += c.length; }
+  const n = (z.tab_x.data as Float32Array).length;
+  const col = (k: string) => z['tab_' + k].data as ArrayLike<number>;
+  let dxy = 0, dzz = 0, frameBad = 0;
+  const dx: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (rows[i * NCOL] !== Number(col('frame')[i])) frameBad++;
+    const d = Math.max(Math.abs(rows[i * NCOL + 1] - col('x')[i]), Math.abs(rows[i * NCOL + 2] - col('y')[i]));
+    dx.push(d); dxy = Math.max(dxy, d); dzz = Math.max(dzz, Math.abs(rows[i * NCOL + 3] - col('z')[i]));
+  }
+  dx.sort((a, b) => a - b);
+  const msg = `${s.n_locs} localizations in ${s.seconds.toFixed(2)} s; first ${n} rows vs torch_psf: frames differ ${frameBad}, ` +
+    `|dxy| median ${dx[n >> 1].toExponential(1)} px, 99% ${dx[Math.floor(0.99 * (n - 1))].toExponential(1)}, max ${dxy.toExponential(1)}; max |dz| ${dzz.toExponential(1)} um`;
+  check(s.n_locs === 718 && frameBad === 0 && dx[Math.floor(0.99 * (n - 1))] < 0.01, msg);
   return msg;
 });

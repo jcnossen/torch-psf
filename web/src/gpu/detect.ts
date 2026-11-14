@@ -83,6 +83,7 @@ export class Detector {
   }
 
   destroy() {
+    for (const b of this.ubs) b.destroy();
     for (const b of [this.raw, this.F, this.A, this.B, this.C, this.map, this.k0, this.k1, this.hist, this.peaks, this.dummy, this.dummyU]) b.destroy();
   }
 
@@ -97,6 +98,7 @@ export class Detector {
     });
     const ub = this.dev.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | CD });
     this.dev.queue.writeBuffer(ub, 0, dv.buffer);
+    this.ubs.push(ub);
     const bg = this.dev.createBindGroup({ layout: this.layout, entries: [
       { binding: 0, resource: { buffer: ub } },
       { binding: 1, resource: { buffer: b.src ?? this.dummy } },
@@ -114,6 +116,7 @@ export class Detector {
     pass.dispatchWorkgroups(gx, Math.ceil(n / gx));
     pass.end();
   }
+  private ubs: GPUBuffer[] = [];
   private _dh: GPUBuffer | null = null; private _dp: GPUBuffer | null = null;
   private dummyHist() { return (this._dh ??= this.dev.createBuffer({ size: 16, usage: SU })); }
   private dummyPk() { return (this._dp ??= this.dev.createBuffer({ size: 16, usage: SU })); }
@@ -192,6 +195,8 @@ export class Detector {
       out.frame[i] = pk[4 * k]; out.y[i] = pk[4 * k + 1]; out.x[i] = pk[4 * k + 2];
       out.score[i] = Math.fround(fv[4 * k + 3] / sig);
     });
+    for (const b of this.ubs) b.destroy();
+    this.ubs = [];
     return out;
   }
 }

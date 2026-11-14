@@ -25,9 +25,18 @@ export interface FitSummary {
   volume: Float32Array; volumeSpec: VolumeSpec;
 }
 
+export interface MovieForm {
+  optics: Optics; gain: number; offset: number; readnoise_e: number;
+  focus_um: number; zlo: number; zhi: number;            // focal plane during the acquisition; emitter heights (um)
+  roisize: number; threshold: number; isolation: number; chunk: number; maxFrames: number;
+  npupil: number; oversample: number; noll: number[]; zcoef: number[];   // the PSF used for localization
+}
+
 export type Req =
   | { id: number; type: 'init' }
   | { id: number; type: 'volume'; spec: VolumeSpec }
   | { id: number; type: 'fit'; files: File[]; form: FitForm }
+  | { id: number; type: 'movie'; files: File[]; form: MovieForm }
+  | { id: number; type: 'movieHeader'; files: File[] }
   | { id: number; type: 'export'; kind: 'knots' | 'tif'; params: { focus_um: number; splineRoi: number; zmax: number; zmin: number } }
   | { type: 'stop'; signal: 'enough' | 'abort' };

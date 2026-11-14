@@ -10,6 +10,7 @@ import { writeNpz } from './io/npy';
 import { writeTiffStack } from './io/tifwrite';
 import { DEFAULT_NOLL, VectorialConfig } from './psf/vectorial';
 import type { Req, VolumeSpec, FitForm, FitSummary } from './ui/protocol';
+import { localizeMovie } from './smlm/movie';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 let token: StopToken | null = null;
@@ -167,6 +168,15 @@ ctx.onmessage = async (ev: MessageEvent<Req>) => {
       token = new StopToken();
       const { summary, transfer } = await fit(m.files, m.form);
       post({ id: m.id, type: 'result', summary }, transfer);
+    } else if (m.type === 'movieHeader') {
+      const mv = await TiffMovie.open(m.files);
+      post({ id: m.id, type: 'result', n: mv.n, H: mv.H, W: mv.W });
+    } else if (m.type === 'movie') {
+      token = new StopToken();
+      const { device } = await getDevice();
+      const summary = await localizeMovie(device, m.files, m.form, token, (p) => progress(p),
+        (rows) => post({ type: 'locs', rows }, [rows.buffer]));
+      post({ id: m.id, type: 'result', summary });
     } else if (m.type === 'export') {
       const r = await exportFile(m.kind, m.params);
       post({ id: m.id, type: 'result', bytes: r.bytes, name: r.name }, [r.bytes.buffer]);
