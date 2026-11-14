@@ -57,6 +57,6 @@ Optional array [F, D'] (px per movie frame, D' <= D). The drift of a localizatio
 
 ## Exports
 
-`save_picasso(path)` writes a Picasso hdf5 ('locs' table: lpx / lpy = precision, sx / sy = PSF width) and its
+`save_picasso(path)` writes a Picasso hdf5 ('locs' table: lpx / lpy = precision, sx / sy = PSF width; Picasso units: x, y, lpx, lpy in px, z and lpz in nm, so 3D needs pixel_nm) and its
 .yaml; `load_picasso` reads one. `save_csv(path)` / `load_csv(path, pixel_nm)` use the ThunderSTORM conventions
 (positions and uncertainties in nm, frames counted from 1, the centre of the first pixel at 0.5 px).
