@@ -225,7 +225,7 @@ for t in np.arange(-0.5, 28, 2):
     ax.axhline(t, color='w', lw=0.25, alpha=0.45); ax.axvline(t, color='w', lw=0.25, alpha=0.45)
 ax.add_patch(Rectangle((6.5, 6.5), 4, 4, fill=False, ec='#38c6ff', lw=1.2))
 clean(ax)
-ax.set_title('ConvSplinePSF: knots at z = 400 nm\n(2 per px; blue: one 4 × 4 × 4 kernel)', pad=2)
+ax.set_title('3D cubic spline: knots at z = 400 nm\n(2 per px; blue: one 4 × 4 × 4 kernel)', pad=2)
 letter(ax, 'g', 1)
 ax = fig.add_subplot(sg[1]); ax.axis('off'); ax.set_xlim(0, 1); ax.set_ylim(0, 1)
 for x, t in [(0.0, 'knot block\n(gather)'), (0.35, 'conv2d\nstride 2'), (0.70, 'ROIs and\nderivatives')]:
