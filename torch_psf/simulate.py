@@ -52,8 +52,9 @@ def simulate_bead_stack(render, focus, nbeads=6, photons=40000.0, bg=30.0, emitt
 @torch.no_grad()
 def simulate_movie(render, roisize, T=6000, H=128, W=128, nsites=700, p_on=0.002, mean_on=3.0, bg=30.0,
                    photons=4000.0, photons_logsd=0.4, z_range=(0.0, 0.8), margin=4, generator=None, seed=0,
-                   device=None, chunk=500):
-    """SMLM movie: fixed binding sites (uniform in the frame minus `margin` px, z uniform in z_range) that blink with a
+                   device=None, chunk=500, sites=None):
+    """SMLM movie: fixed binding sites (uniform in the frame minus `margin` px, z uniform in z_range; or given as
+    sites = (x [n], y [n], z [n]) tensors in px / px / um, e.g. from filament_sites; nsites is then ignored) that blink with a
     two-state Markov chain (off -> on with p_on per frame, on -> off with 1 / mean_on), log-normal photons per event,
     constant background, Poisson noise. Each event is rendered on a roisize x roisize patch around its pixel.
     Returns movie [T, H, W] (uint16, cpu) and the truth table [n, 6] = (frame, x, y, z, photons, site) (x = column,
@@ -62,8 +63,12 @@ def simulate_movie(render, roisize, T=6000, H=128, W=128, nsites=700, p_on=0.002
     g = _gen(generator, device, seed)
     r = lambda *s: torch.rand(*s, generator=g, device=device)
     PR = roisize
-    sx, sy = margin + (W - 2 * margin) * r(nsites), margin + (H - 2 * margin) * r(nsites)
-    sz = z_range[0] + (z_range[1] - z_range[0]) * r(nsites)
+    if sites is None:
+        sx, sy = margin + (W - 2 * margin) * r(nsites), margin + (H - 2 * margin) * r(nsites)
+        sz = z_range[0] + (z_range[1] - z_range[0]) * r(nsites)
+    else:
+        sx, sy, sz = [torch.as_tensor(v, dtype=torch.float32, device=device) for v in sites]
+        nsites = len(sx)
     on = torch.zeros(T, nsites, dtype=torch.bool, device=device)
     state = torch.zeros(nsites, dtype=torch.bool, device=device)
     for t in range(T):                                     # sequential in time (Markov chain)
@@ -92,6 +97,41 @@ def simulate_movie(render, roisize, T=6000, H=128, W=128, nsites=700, p_on=0.002
         movie[t0:t0 + chunk] = torch.poisson(fr, generator=g).clamp(max=65535).to(torch.uint16).cpu()
     truth = torch.stack([tt.float(), X, Y, Z, phot, ss.float()], 1)
     return movie, truth
+
+
+def filament_sites(n_filaments=6, sites_per_um=60.0, H=128, W=128, pixel_um=0.108, z_range=(0.0, 0.8), margin=6,
+                   curvature=0.6, generator=None, seed=0, device=None):
+    """Binding sites along smooth random filaments (a microtubule-like test structure) for simulate_movie(sites=...).
+    Each filament is a curve through the frame (minus margin px) whose direction changes smoothly (curvature: rms
+    change of the direction in rad per um), with its height varying smoothly within z_range. Sites are uniform along
+    the curves (sites_per_um per um). Returns (x px, y px, z um) tensors."""
+    device = resolve_device(device)
+    g = _gen(generator, device, seed)
+    r = lambda *s: torch.rand(*s, generator=g, device=device)
+    xs, ys, zs = [], [], []
+    step = 0.05                                             # um
+    for _ in range(n_filaments):
+        x, y = margin + (W - 2 * margin) * r(1), margin + (H - 2 * margin) * r(1)
+        ang = 2 * math.pi * r(1)
+        z0, z1, ph = r(1), r(1), 2 * math.pi * r(1)
+        pts = []
+        for k in range(4000):
+            ang = ang + curvature * math.sqrt(step) * torch.randn(1, generator=g, device=device)
+            x = x + step / pixel_um * torch.cos(ang); y = y + step / pixel_um * torch.sin(ang)
+            if not (margin <= float(x) < W - margin and margin <= float(y) < H - margin):
+                break
+            pts.append(torch.cat([x, y]))
+        if len(pts) < 2:
+            continue
+        P = torch.stack(pts)
+        L = len(P) * step
+        n = int(sites_per_um * L)
+        idx = (r(n) * (len(P) - 1)).long()
+        t = idx.float() / max(len(P) - 1, 1)
+        zf = z0 + (z1 - z0) * t + 0.25 * torch.sin(2 * math.pi * t + ph)
+        zf = zf.clamp(0, 1)
+        xs.append(P[idx, 0]); ys.append(P[idx, 1]); zs.append(z_range[0] + (z_range[1] - z_range[0]) * zf)
+    return torch.cat(xs), torch.cat(ys), torch.cat(zs)
 
 
 PRESETS = dict(

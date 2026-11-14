@@ -92,7 +92,9 @@ loss = NLL(rois) + w_stack NLL(stack) + lam_ref sum((K - ref)^2 / (|ref| + 1e-4)
 crlb_bg f4, loglik f4 (= -NLL), chi2 f4 (mean of (d - mu)^2 / (mu + v) per pixel), at_limit ?` (image px, um, photons).
 
 `simulate.simulate_emitters`, `simulate_bead_stack`, `simulate_movie`: seeded by a `torch.Generator`; the order of the
-random draws is part of the API (reference data depend on it).
+random draws is part of the API (reference data depend on it). `simulate_movie(..., sites=(x, y, z))` takes given
+binding sites (px, px, um) instead of drawing them (no random draws for the sites then); `filament_sites(...)` draws
+sites along smooth random filaments (a microtubule-like test structure).
 
 `simulate.simulate_reference_movie(psf='astigmatic' | 'tetrapod' | VectorialPSF, T=200, H=64, W=64,
 emitters_per_frame=5.0, mean_on=3.0, photons=3000.0, photons_logsd=0.3, bg=20.0, gain_e_per_adu=0.5, offset_adu=100.0,
