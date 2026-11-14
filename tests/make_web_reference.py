@@ -14,7 +14,7 @@ Outputs:
   tiff/*.tif, tiff.json/.npz   TIFF reader cases (compressions, BigTIFF, tiles, dtypes, byte order, multi-part)
   stack_<name>.tif, <name>.json  simulated bead z-stacks (3 beads, Poisson noise) of the presets 'astig' and 'tetrapod'
   fit_ref.json                 the Python fit of the web's bead model (web/src/fit/beads.ts) on both simulated stacks and
-                               on the tracked one-bead real crop tests/data/web/real_bead.tif
+                               on the tracked one-bead real crop tests/data/web/epfl_npc_bead.tif (public data, see its json)
 """
 import argparse, json, math, os, sys
 import numpy as np
@@ -24,7 +24,7 @@ ap.add_argument('--simcode', default=os.environ.get('SIMCODE_DIR', os.path.expan
 ap.add_argument('--device', default='cuda')
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ap.add_argument('--out', default=os.path.join(ROOT, 'web', 'test', '.cache'))
-ap.add_argument('--real', default=os.path.join(ROOT, 'tests', 'data', 'web', 'real_bead.tif'))
+ap.add_argument('--real', default=os.path.join(ROOT, 'tests', 'data', 'web', 'epfl_npc_bead.tif'))
 ap.add_argument('--skip-fit', action='store_true')
 ap.add_argument('--only', default='', help='comma list of parts: forward,tiff,knots,sim,fit')
 a = ap.parse_args()

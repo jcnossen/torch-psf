@@ -69,8 +69,8 @@ for (const name of ['astig', 'tetrapod']) {
   });
 }
 
-test('fit: real one-bead crop (PSF_calib zstack2-1) vs the Python fit of the same model', async () => {
-  const r = await runCase('real', 'real_bead.tif');
+test('fit: real one-bead crop (EPFL SMLM challenge 2016, NPC-A647-3D beads) vs the Python fit of the same model', async () => {
+  const r = await runCase('real', 'epfl_npc_bead.tif');
   check(r.dzern < 0.005 && r.dfocus < 5 && r.l2 < 1e-2 && r.dtr < 1e-3, r.msg);
   return r.msg;
 });

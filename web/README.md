@@ -36,8 +36,9 @@ The test references are generated, not stored: `run_tests.py` runs `../tests/mak
 `test/.cache/` (ignored by git) when that folder is missing or the generator has changed (about 2 min on a GPU; needs
 torch, tifffile, imagecodecs and SIMCODE's `simcode/psf/vectorial.py` / `conv_spline.py` code, found via `SIMCODE_DIR` or
 `~/simcode2`). All test PSFs are generated from known parameters (the astigmatic and tetrapod-like presets); no fitted
-calibration is used. The only tracked data file is a one-bead real crop, `../tests/data/web/real_bead.tif` (30 x 30 px x
-151 planes, 0.3 MB, from PSF_calib zstack2-1).
+calibration is used. The only tracked data file is a one-bead real crop of public data,
+`../tests/data/web/epfl_npc_bead.tif` (30 x 30 px x 41 planes, 81 kB, from the bead stack of the EPFL SMLM challenge
+2016 real 3D data set NPC-A647-3D; source, citation and the assumed acquisition settings in `epfl_npc_bead.json`).
 
 ## Using it
 

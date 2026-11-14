@@ -1,0 +1,25 @@
+{
+ "source": "EPFL SMLM challenge 2016, real 3D data set NPC-A647-3D (astigmatic, cylindrical lens; courtesy of Jonas Ries, EMBL), bead stack NPC-A647-3D-BEADS-as-stacks.tif (41 planes, 512 x 512), rows 377-406, cols 161-190: one isolated bead (beads on the coverslip in water, per the challenge page), big-endian uint16 ImageJ stack as the original. https://srm.epfl.ch/srm/dataset/challenge-3D-real/",
+ "citation": "Sage, D. et al. Super-resolution fight club: assessment of 2D and 3D single-molecule localization microscopy software. Nature Methods 16, 387-395 (2019). Data: EPFL SMLM challenge 2016 (srm.epfl.ch); no explicit licence is stated on the challenge site, the data are distributed there for benchmarking with the citation above.",
+ "crop_yx": [
+  377,
+  407,
+  161,
+  191
+ ],
+ "shape": [
+  41,
+  30,
+  30
+ ],
+ "pixel_um": 0.138,
+ "NA": 1.43,
+ "n_imm": 1.518,
+ "n_med": 1.33,
+ "wavelength_um": 0.68,
+ "sign": 1.0,
+ "dz_um": 0.05,
+ "gain": 1.412,
+ "offset": 197.7,
+ "notes": "dz 50 nm and the -1.0 ... +1.0 um range from the MicroManager SlicePosition metadata of the stack. Not published with the data, assumed here: pixel size (about 135 x 142 nm in the Ries-lab Cspline submission; isotropic 138 nm used), NA 1.43, emission 680 nm (Alexa Fluor 647 channel), scan sign. gain / offset: an effective conversion from the variance-vs-mean relation of this bead stack (var = -140 + 0.708 mean ADU, EMCCD at EM gain 4), i.e. photon-equivalent counts whose variance equals their mean."
+}
