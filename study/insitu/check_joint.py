@@ -1,12 +1,12 @@
 import time, torch, sys
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize
+from torch_psf import localize
 scn = sys.argv[1]
 D = torch.load(f'study/insitu/out_dev_{scn}.pt')
 rois = D['rois'].to(C.DEV); stack = {k: (v.to(C.DEV) if torch.is_tensor(v) else v) for k, v in D['stack'].items()}
 spl = F.new_spline()
-Ktrue = spl.stack_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
 test = C.sim_test(scn, 3000)
 spl.knots = Ktrue; _, nll_true = localize(spl, test['d'])
 def show(name, K):

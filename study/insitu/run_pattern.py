@@ -9,7 +9,8 @@ Control: M = 0 (same frames and photons, uniform illumination, so no pattern inf
 import sys, time, json, math, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize, poisson_nll, _clamp
+from torch_psf import localize
+from torch_psf.fit import poisson_nll, clamp_theta as _clamp
 M = float(sys.argv[1]) if len(sys.argv) > 1 else 0.9
 scns = sys.argv[2] if len(sys.argv) > 2 else 'AB'
 NE, NTOT, BG, PITCH = 3000, 12000.0, 30.0, 220 / 108
@@ -47,7 +48,7 @@ class PatternLoc:
         self.d6, self.corner, self.th = d6, corner, None
 
     def model(self, spl, t, corner):
-        g, gx, gy, gz = spl.evaluate(t[:, :3], grad=True)
+        g, gx, gy, gz = spl.render(t[:, :3], grad=True)
         r, rx, ry = relint(t[:, :2], corner, True)
         N = t[:, 3, None, None, None]
         G = lambda a: a[:, None]
@@ -96,7 +97,7 @@ class PatternLoc:
 res = {}
 for scn in scns:
     spl = F.new_spline()
-    Ktrue = spl.stack_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+    Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
     test = C.sim_test(scn, 6000)
     spl.knots = Ktrue
     _, nll_true = localize(spl, test['d'])

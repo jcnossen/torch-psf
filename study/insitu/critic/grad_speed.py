@@ -6,7 +6,8 @@ Run from the repo root:  python study/insitu/critic/grad_speed.py"""
 import math, sys, time, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize, poisson_nll
+from torch_psf import localize
+from torch_psf.fit import poisson_nll
 
 torch.manual_seed(0)
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 2000
@@ -25,7 +26,7 @@ def sync_time(fn, rep=3):
 
 def routes(zc, d, th, names=('zcoef',)):
     big, small = C.model_vec(spl.Pl, zc), C.model_vec(C.P, zc)
-    spl.knots = spl.stack_from_vectorial(big, C.insitu_pos)
+    spl.knots = spl.knots_from_vectorial(big, C.insitu_pos)
     gK, _ = F.knot_grad(spl, d, th)
     gk = spl.vjp_vectorial(big, C.insitu_pos, gK, names=names)
     # route V for all named parameters (buffers included)
@@ -102,7 +103,7 @@ del test
 print('== (c) route V cost per emitter (64 pupil, oversampling 3, 15 px), interleaved with the knot gradient')
 rois = torch.load('study/insitu/out_dev_A.pt', weights_only=False)['rois'].to(C.DEV)[:N]
 big = C.model_vec(spl.Pl, zs); small = C.model_vec(C.P, zs)
-spl.knots = spl.stack_from_vectorial(big, C.insitu_pos)
+spl.knots = spl.knots_from_vectorial(big, C.insitu_pos)
 th, _ = localize(spl, rois)
 
 
@@ -122,12 +123,12 @@ def vec_grad_fast(psf, d, th, nb=1000):
         Wp = torch.einsum('j,jnm->nm', zc, psf.Z) * (2 * math.pi)
         Pa = P * torch.exp(1j * Wp)                                          # [6, N, N], shared
         dph = torch.exp(1j * (kz_med[None] * t[:, 2, None, None] - kz_imm[None] * C.F0))   # [B, N, N]
-        x = t[:, 0, None, None] * psf.pixelsize; y = t[:, 1, None, None] * psf.pixelsize
+        x = t[:, 0, None, None] * psf.pixel_um; y = t[:, 1, None, None] * psf.pixel_um
         Fx = torch.exp(1j * (psf.u[None, :, None] - x) * kx1[None, None, :])                # [B, ns, N]
         Fy = torch.exp(1j * (psf.u[None, :, None] - y) * ky1[None, None, :])
         E = Fy[:, None] @ (Pa[None] * dph[:, None]) @ Fx[:, None].transpose(-1, -2)          # [B, 6, ns, ns]
         I = (E.real ** 2 + E.imag ** 2).sum(1) / 3 * (dk / (2 * math.pi) ** 2) ** 2
-        I = I.reshape(len(t), R, o, R, o).mean((2, 4)) * psf.pixelsize ** 2 / energy
+        I = I.reshape(len(t), R, o, R, o).mean((2, 4)) * psf.pixel_um ** 2 / energy
         l = poisson_nll(d[s:s + nb], t[:, 3, None, None] * I + t[:, 4, None, None]).sum()
         g += torch.autograd.grad(l, zc)[0]
         tot += float(l)
@@ -144,7 +145,7 @@ for rnd in range(2):
                      ('V fast, fp32', lambda: vec_grad_fast(small, rois, th)),
                      ('K knot gradient', lambda: F.knot_grad(spl, rois, th)),
                      ('K vjp (fixed)', lambda: spl.vjp_vectorial(big, C.insitu_pos, F.knot_grad(spl, rois, th)[0])),
-                     ('K build (fixed)', lambda: spl.stack_from_vectorial(big, C.insitu_pos)),
+                     ('K build (fixed)', lambda: spl.knots_from_vectorial(big, C.insitu_pos)),
                      ('localize 3 its (both)', lambda: localize(spl, rois, th, iters=3))):
         tt, _ = sync_time(fn, rep=2)
         res.setdefault(name, []).append(tt)

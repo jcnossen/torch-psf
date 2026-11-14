@@ -2,7 +2,7 @@
 import time, json, torch, sys
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize
+from torch_psf import localize
 D = torch.load('study/insitu/out_dev_A.pt', weights_only=False)
 rois = D['rois'].to(C.DEV); zc0 = D['zc_s'].to(C.DEV)
 def tm(fn, rep=2):
@@ -15,7 +15,7 @@ for npupil, osamp in ((64, 3), (128, 4), (256, 6)):
     spl = F.new_spline()
     big, small = C.model_vec(spl.Pl, zc0), C.model_vec(C.P, zc0)
     ch = 4 if npupil < 256 else 1
-    t_build, K = tm(lambda: spl.stack_from_vectorial(big, C.insitu_pos, chunk=ch)); spl.knots = K
+    t_build, K = tm(lambda: spl.knots_from_vectorial(big, C.insitu_pos, chunk=ch)); spl.knots = K
     th, _ = localize(spl, rois[:4000])
     N = 4000; d, t = rois[:N], th
     tk, (gK, _) = tm(lambda: F.knot_grad(spl, d, t))

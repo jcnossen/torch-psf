@@ -2,19 +2,19 @@
 import sys, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize
-from torch_convspline.vectorial import zernike
+from torch_psf import localize
+from torch_psf.zernike import zernike
 scn = 'B'
 spl = F.new_spline()
 tv = C.make_vec(spl.Pl, scn, 'insitu')
-Ktrue = spl.stack_from_vectorial(tv, C.insitu_pos)
+Ktrue = spl.knots_from_vectorial(tv, C.insitu_pos)
 test = C.sim_test(scn, 6000)
 prm = torch.load('study/insitu/out/pupil_B.pt', weights_only=False)
 big = C.model_vec(spl.Pl, prm['zcoef'])
 mask = big.mask.bool()
 with torch.no_grad():
     big.pupil_phase.copy_(prm['phase'].to(C.DEV)); big.pupil_amp.copy_(torch.exp(prm['la'].to(C.DEV)))
-K = spl.stack_from_vectorial(big, C.insitu_pos)
+K = spl.knots_from_vectorial(big, C.insitu_pos)
 ph_t = (torch.einsum('j,jnm->nm', tv.zcoef, tv.Z) + tv.pupil_phase)[mask]; ph_e = (torch.einsum('j,jnm->nm', big.zcoef, big.Z) + big.pupil_phase)[mask]
 low = torch.stack([zernike(j, big.rho.clamp(max=1), big.phi)[mask] for j in (1, 2, 3, 4)], 1); Q, _ = torch.linalg.qr(low)
 d = ph_e - ph_t; co = torch.linalg.lstsq(low, d[:, None]).solution[:, 0]; d2 = d - Q @ (Q.T @ d)

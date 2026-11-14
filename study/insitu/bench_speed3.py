@@ -9,8 +9,9 @@ Self-contained (simulates its own patches). Writes study/insitu/out/speed3.json.
 import time, json, sys, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize, poisson_nll
-from torch_convspline.vectorial import VectorialPSF
+from torch_psf import localize
+from torch_psf.fit import poisson_nll
+from torch_psf import VectorialPSF
 NREF = 16000
 rois = C.sim_test('A', NREF, seed=5)['d']
 zc0 = C.zc_insitu().to(C.DEV) + 0.01 * torch.randn(len(C.NOLL), device=C.DEV, generator=torch.Generator(device=C.DEV).manual_seed(1))
@@ -28,7 +29,7 @@ def one_pass(spl, big, gK):
     """Knot build that keeps the autograd graph, then one backward."""
     prm = {k: v.detach() for k, v in list(big.named_parameters()) + list(big.named_buffers())}
     prm['zcoef'] = prm['zcoef'].clone().requires_grad_(True)
-    K = spl.stack_planes(big, prm, 0, spl.nz, C.insitu_pos)
+    K = spl.build_planes(big, prm, 0, spl.nz, C.insitu_pos)
     return torch.autograd.grad(K, prm['zcoef'], gK.float())[0]
 
 
@@ -53,9 +54,9 @@ for npupil, osamp in ((64, 3), (128, 4), (256, 6)):
     im = C.render(small, pos, f0, nb=10)
     acc = float(((im - ref).flatten(1).norm(dim=1) / ref.flatten(1).norm(dim=1)).median())
     ch = 4 if npupil < 256 else 1
-    t_build, K = tm(lambda: spl.stack_from_vectorial(big, C.insitu_pos, chunk=ch))
+    t_build, K = tm(lambda: spl.knots_from_vectorial(big, C.insitu_pos, chunk=ch))
     spl.knots = K
-    acc_spl = float(((spl.evaluate(pos) - im).flatten(1).norm(dim=1) / im.flatten(1).norm(dim=1)).median())
+    acc_spl = float(((spl.render(pos) - im).flatten(1).norm(dim=1) / im.flatten(1).norm(dim=1)).median())
     th, _ = localize(spl, rois)
     N = NREF
     tk, (gK, _) = tm(lambda: F.knot_grad(spl, rois, th))

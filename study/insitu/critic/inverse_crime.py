@@ -6,7 +6,7 @@ Run from the repo root:  python study/insitu/critic/inverse_crime.py"""
 import sys, time, math, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize
+from torch_psf import localize
 
 NTR, NTE = 8000, 4000
 zt = C.zc_insitu().to(C.DEV)
@@ -31,7 +31,7 @@ for label, opt in (('control: data 64/3 (inverse crime)', dict()),
                    ('data 128/4, n_med 1.35', dict(npupil=128, oversample=4, n_med=1.35))):
     spl = F.new_spline()
     C.OPT.update(opt)
-    Ktrue = spl.stack_from_vectorial(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
+    Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
     C.OPT.clear(); C.OPT.update(OPT0)
     test, train = sim(NTE, 1, opt), sim(NTR, 2, opt)
     spl.knots = Ktrue; _, nll_true = localize(spl, test['d'])

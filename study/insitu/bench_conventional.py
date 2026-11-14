@@ -9,7 +9,7 @@ Writes study/insitu/out/conventional.json."""
 import sys, time, json, numpy as np, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize
+from torch_psf import localize
 try:
     from fastpsf import Context, CSplineMethods
     from fastpsf.estim_queue import EstimQueue
@@ -22,7 +22,7 @@ d0, th0 = test['d'], test['th']
 rep = N // len(d0)
 spl = F.new_spline()
 vec = C.make_vec(spl.Pl, 'A', 'insitu')
-spl.knots = spl.stack_from_vectorial(vec, C.insitu_pos)
+spl.knots = spl.knots_from_vectorial(vec, C.insitu_pos)
 # pixel-sampled z-stack for the conventional spline: emitter at the patch centre, the knot z planes of spl
 zs = spl.zs.float()
 zstack = C.render(vec, torch.stack([torch.zeros_like(zs), torch.zeros_like(zs), zs], 1), torch.full_like(zs, C.F0)).cpu().numpy()
@@ -54,12 +54,12 @@ def best(fn, n=3):
 # ---------------------------------------------------------------- convolution spline
 D = d0.repeat(rep, 1, 1); S0 = start.repeat(rep, 1)
 localize(spl, D[:3000], S0[:3000].clone(), iters=ITERS)
-t_fit, (th_c, _) = best(lambda: localize(spl, D, S0.clone(), iters=ITERS, nb=20000))
+t_fit, (th_c, _) = best(lambda: localize(spl, D, S0.clone(), iters=ITERS, batch=20000))
 Dn = D.cpu().numpy(); Sn = S0.cpu().numpy()
-t_fit_io, _ = best(lambda: localize(spl, torch.from_numpy(Dn).to(C.DEV), torch.from_numpy(Sn).to(C.DEV), iters=ITERS, nb=20000)[0].cpu().numpy())
+t_fit_io, _ = best(lambda: localize(spl, torch.from_numpy(Dn).to(C.DEV), torch.from_numpy(Sn).to(C.DEV), iters=ITERS, batch=20000)[0].cpu().numpy())
 P3 = S0[:, :3]
-t_ev, _ = best(lambda: [spl.evaluate(P3[s:s + 20000]) for s in range(0, N, 20000)][-1])
-t_evd, _ = best(lambda: [spl.evaluate(P3[s:s + 20000], grad=True) for s in range(0, N, 20000)][-1])
+t_ev, _ = best(lambda: [spl.render(P3[s:s + 20000]) for s in range(0, N, 20000)][-1])
+t_evd, _ = best(lambda: [spl.render(P3[s:s + 20000], grad=True) for s in range(0, N, 20000)][-1])
 res['conv'] = dict(fit_us=t_fit / N * 1e6, fit_us_with_transfer=t_fit_io / N * 1e6, eval_us=t_ev / N * 1e6, eval_deriv_us=t_evd / N * 1e6,
                    **stats(th_c[:len(d0)].cpu().numpy(), 'conv spline  '))
 print('conv spline: fit', res['conv']['fit_us'], 'us/spot (', res['conv']['fit_us_with_transfer'], 'with host transfer ), eval', res['conv']['eval_us'],
@@ -73,7 +73,7 @@ class CoefPSF:
     def __init__(self, spl):
         self.spl = spl
         self.nv, self.nu = spl.nv - 3, spl.nu - 3
-        r = torch.arange(spl.P, device=spl.dev) * spl.S
+        r = torch.arange(spl.roisize, device=spl.dev) * spl.S
         self.pat = (r[:, None] * self.nu + r[None, :]).reshape(-1)
         self.e = torch.arange(4, device=spl.dev)
 
@@ -92,19 +92,19 @@ class CoefPSF:
         p = fr[..., None] ** self.e                                             # [N, 3, 4] powers of (tz, ty, tx)
         mon = (p[:, 0, :, None, None] * p[:, 1, None, :, None] * p[:, 2, None, None, :]).reshape(-1, 64)
         if not grad:
-            return torch.einsum('npc,nc->np', c, mon).view(-1, spl.P, spl.P)
+            return torch.einsum('npc,nc->np', c, mon).view(-1, spl.roisize, spl.roisize)
         dp = self.e * fr[..., None] ** (self.e - 1).clamp_min(0)
         mz = (dp[:, 0, :, None, None] * p[:, 1, None, :, None] * p[:, 2, None, None, :]).reshape(-1, 64)
         my = (p[:, 0, :, None, None] * dp[:, 1, None, :, None] * p[:, 2, None, None, :]).reshape(-1, 64)
         mx = (p[:, 0, :, None, None] * p[:, 1, None, :, None] * dp[:, 2, None, None, :]).reshape(-1, 64)
-        r = torch.einsum('npc,ndc->ndp', c, torch.stack([mon, mx, my, mz], 1)).view(-1, 4, spl.P, spl.P)
+        r = torch.einsum('npc,ndc->ndp', c, torch.stack([mon, mx, my, mz], 1)).view(-1, 4, spl.roisize, spl.roisize)
         return r[:, 0], -S * r[:, 1], -S * r[:, 2], r[:, 3] / spl.hz
 
 
 cp = CoefPSF(spl)
 coef = cp.coefs(spl.knots)
 res['coef_MB'] = coef.numel() * 4 / 1e6
-a_, b_ = spl.evaluate(P3[:2000], grad=True), cp.evaluate(P3[:2000], coef, grad=True)
+a_, b_ = spl.render(P3[:2000], grad=True), cp.evaluate(P3[:2000], coef, grad=True)
 res['coef_vs_conv_maxdiff'] = [float((x - y).abs().max() / x.abs().max()) for x, y in zip(a_, b_)]
 print('coefficient form vs convolution form, max relative difference (value, dx, dy, dz):', res['coef_vs_conv_maxdiff'], flush=True)
 NB = 5000
@@ -114,7 +114,7 @@ resid = torch.randn(N, C.P, C.P, device=C.DEV)
 def back_conv():
     K = spl.knots.clone().requires_grad_(True)
     for s in range(0, N, NB):
-        (spl.evaluate(P3[s:s + NB], knots=K) * resid[s:s + NB]).sum().backward()
+        (spl.render(P3[s:s + NB], knots=K) * resid[s:s + NB]).sum().backward()
     return K.grad
 
 
@@ -134,9 +134,9 @@ def back_coef_direct():                      # gradient on the 64-coefficient ta
 
 tt = {}
 with torch.no_grad():
-    tt['conv_eval'], _ = best(lambda: [spl.evaluate(P3[s:s + NB]) for s in range(0, N, NB)][-1])
+    tt['conv_eval'], _ = best(lambda: [spl.render(P3[s:s + NB]) for s in range(0, N, NB)][-1])
     tt['coef_eval'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], coef) for s in range(0, N, NB)][-1])
-    tt['conv_eval_deriv'], _ = best(lambda: [spl.evaluate(P3[s:s + NB], grad=True) for s in range(0, N, NB)][-1])
+    tt['conv_eval_deriv'], _ = best(lambda: [spl.render(P3[s:s + NB], grad=True) for s in range(0, N, NB)][-1])
     tt['coef_eval_deriv'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], coef, grad=True) for s in range(0, N, NB)][-1])
 tt['conv_knot_grad'], g1 = best(back_conv)
 tt['coef_knot_grad'], g2 = best(back_coef)
@@ -165,7 +165,7 @@ o, rs = P3[:NB], resid[:NB]
 
 
 def g_conv():
-    K = spl.knots.clone().requires_grad_(True); (spl.evaluate(o, knots=K) * rs).sum().backward()
+    K = spl.knots.clone().requires_grad_(True); (spl.render(o, knots=K) * rs).sum().backward()
 
 
 def g_coef():
@@ -173,7 +173,7 @@ def g_coef():
 
 
 with torch.no_grad():
-    res['peak_MB'] = dict(conv_eval=peak(lambda: spl.evaluate(o)), rebuilt_eval=peak(lambda: cp.evaluate(o, cp.coefs(spl.knots))),
+    res['peak_MB'] = dict(conv_eval=peak(lambda: spl.render(o)), rebuilt_eval=peak(lambda: cp.evaluate(o, cp.coefs(spl.knots))),
                           table_eval=peak(lambda: cp.evaluate(o, coef)))
     tt['rebuilt_eval'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], cp.coefs(spl.knots)) for s in range(0, N, NB)][-1])
     tt['rebuilt_eval_deriv'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], cp.coefs(spl.knots), grad=True) for s in range(0, N, NB)][-1])
@@ -205,7 +205,7 @@ with Context(debugMode=False) as ctx:
             c0 = (cen, err)
     cen = c0[0]
     res['conventional_model_err_L1'] = float(c0[1])
-    evc = spl.evaluate(th0[:200, :3]) * th0[:200, 3, None, None] + th0[:200, 4, None, None]
+    evc = spl.render(th0[:200, :3]) * th0[:200, 3, None, None] + th0[:200, 4, None, None]
     res['conv_model_err_L1'] = float((evc - test['mu'][:200]).abs().sum() / test['mu'][:200].sum())
     lmp, stepcoeff, stoplimit = psf.GetLevMarParams()
     psf.SetLevMarParams(stepcoeff, ITERS, normalizeWeights=True, stoplimits=np.zeros_like(stoplimit))

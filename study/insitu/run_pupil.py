@@ -2,7 +2,7 @@
 import time, json, sys, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize
+from torch_psf import localize
 OUT = 'study/insitu/out/'
 lam = float(sys.argv[1]) if len(sys.argv) > 1 else 0.0
 iters = int(sys.argv[2]) if len(sys.argv) > 2 else 200
@@ -10,7 +10,7 @@ lr_a = float(sys.argv[4]) if len(sys.argv) > 4 else 1e-2
 res = {}
 for scn in (sys.argv[3] if len(sys.argv) > 3 else 'AB'):
     spl = F.new_spline()
-    Ktrue = spl.stack_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+    Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
     test = C.sim_test(scn, 6000)
     spl.knots = Ktrue; _, nll_true = localize(spl, test['d'])
     D = torch.load(f'study/insitu/out_dev_{scn}.pt', weights_only=False)

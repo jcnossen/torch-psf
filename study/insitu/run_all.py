@@ -7,7 +7,7 @@ Writes study/insitu/out/all_seed{SEED}.json.
 import sys, time, json, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-from torch_convspline.knotpsf import localize
+from torch_psf import localize
 seed = int(sys.argv[1]) if len(sys.argv) > 1 else 0
 scns = sys.argv[2] if len(sys.argv) > 2 else 'AB'
 res = {}
@@ -33,7 +33,7 @@ def score(spl, K, test, nll_true):
 
 for scn in scns:
     spl = F.new_spline()
-    Ktrue = spl.stack_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+    Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
     test = C.sim_test(scn, 6000, seed=1000 + seed)
     spl.knots = Ktrue
     _, nll_true = localize(spl, test['d'])

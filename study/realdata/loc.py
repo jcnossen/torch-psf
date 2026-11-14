@@ -14,7 +14,8 @@ usage: python loc.py --spline psf_spline.pt --gain 10.9 --offset 295 --out locs.
 import sys, time, argparse, json, math
 import numpy as np, torch, tifffile
 sys.path.insert(0, '.')
-from torch_convspline.knotpsf import KnotPSF
+from torch_psf import ConvSplinePSF, crlb as crlb_psf
+from torch_psf.fit import lm_poisson, model_and_jacobian
 from rdcommon import transfer_knots, DEV
 
 ap = argparse.ArgumentParser()
@@ -39,13 +40,13 @@ P, h = A.P, A.P // 2
 
 # ------------------------------------------------------------------------------------------------ spline
 cal = torch.load(A.spline)
-spl = KnotPSF(P, cal['zlo'], cal['zhi'], S=cal['S'], hz=cal['hz'], zpad=cal['zpad'], xmax=A.xmax, device=DEV)
+spl = ConvSplinePSF(P, (cal['zlo'], cal['zhi']), oversample=cal['S'], dz_um=cal['hz'], zpad=cal['zpad'], xy_limit=A.xmax, device=DEV)
 assert spl.nz == cal['nz'] and abs(spl.z0 - cal['z0']) < 1e-9
 spl.knots = transfer_knots(cal['knots'].to(DEV), cal['c'], spl.c, cal['S'])
 ZLO, ZHI = -A.zlim, A.zlim
 assert spl.z0 + spl.hz <= ZLO and ZHI <= spl.z0 + (spl.nz - 2) * spl.hz
 off0 = torch.zeros(1, 3, device=DEV)
-frac = float(spl.evaluate(off0).sum())
+frac = float(spl.render(off0).sum())
 print(f'spline: P {P}, xmax {A.xmax}, c {spl.c}, S {spl.S}, hz {spl.hz}, z0 {spl.z0:.3f}, nz {spl.nz}; '
       f'fraction of the PSF inside the {P}x{P} patch at z = 0: {frac:.4f}', flush=True)
 
@@ -60,47 +61,23 @@ def clamp(th):
 
 
 def model(t):
-    g, gx, gy, gz = spl.evaluate(t[:, :3], grad=True)
-    I = t[:, 3, None, None]
-    return I * g + t[:, 4, None, None], torch.stack([I * gx, I * gy, I * gz, g, torch.ones_like(g)], 1)
+    return model_and_jacobian(spl, t)
 
 
 @torch.no_grad()
 def lm(d, w, th, iters, nb=6000):
+    """torch_psf.lm_poisson with the pixel mask w (frame border), mu >= 1e-4 and this script's clamp."""
     out, onll = [], []
     for s in range(0, len(d), nb):
-        dd, ww = d[s:s + nb], w[s:s + nb]
-        t = clamp(th[s:s + nb].clone())
-        lam = torch.ones(len(dd), device=DEV)
-        nllf = lambda mu: (ww * (mu - dd * torch.log(mu))).flatten(1).sum(1)
-        mu, J = model(t)
-        mu = mu.clamp_min(1e-4)
-        nll = nllf(mu)
-        for _ in range(iters):
-            Jw = J * ww[:, None]
-            gr = (Jw * (dd / mu - 1)[:, None]).flatten(2).sum(2)
-            H = torch.einsum('nap,nbp->nab', Jw.flatten(2) / mu.flatten(1)[:, None], J.flatten(2))
-            dg = torch.diagonal(H, dim1=1, dim2=2).clamp_min(1e-12)
-            H = H + torch.diag_embed(dg * lam[:, None])
-            step = torch.linalg.solve(H.double(), gr.double()[..., None])[..., 0].float()
-            tn = clamp(t + step)
-            mun, Jn = model(tn)
-            mun = mun.clamp_min(1e-4)
-            nn_ = nllf(mun)
-            ok = nn_ < nll
-            t[ok], mu[ok], J[ok], nll[ok] = tn[ok], mun[ok], Jn[ok], nn_[ok]
-            lam = torch.where(ok, lam * 0.3, lam * 5).clamp(1e-4, 1e6)
+        t, nll = lm_poisson(model, d[s:s + nb], th[s:s + nb], weight=w[s:s + nb], clamp=clamp, iters=iters,
+                            mu_min=1e-4)
         out.append(t); onll.append(nll)
     return torch.cat(out), torch.cat(onll)
 
 
 @torch.no_grad()
 def crlb(th, w):
-    mu, J = model(th)
-    mu = mu.clamp_min(1e-4).flatten(1)
-    J = J.flatten(2)
-    F = torch.einsum('nap,nbp->nab', J * (w.flatten(1) / mu)[:, None], J) + 1e-9 * torch.eye(5, device=DEV)
-    return torch.sqrt(torch.diagonal(torch.linalg.inv(F.double()), dim1=1, dim2=2).clamp_min(0)).float()
+    return crlb_psf(spl, th, weight=w, ridge=1e-9)
 
 
 def gk(s):

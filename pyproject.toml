@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torch-psf"
+version = "0.1.0"
+description = "PSF models (vectorial, convolutional 3D spline, Gaussian), single-emitter fitting and in-situ PSF estimation for SMLM in PyTorch"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Jelmer Cnossen", email = "j.cnossen@gmail.com"}]
+requires-python = ">=3.9"
+dependencies = ["numpy", "scipy", "torch", "tifffile"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+viewer = ["scikit-image"]
+
+[project.urls]
+Repository = "https://github.com/jcnossen/torch-psf"
+
+[tool.setuptools.packages.find]
+include = ["torch_psf*"]
+
+[tool.setuptools.package-data]
+torch_psf = ["viewer_static/*", "viewer_static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

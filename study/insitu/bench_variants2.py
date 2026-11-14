@@ -1,13 +1,13 @@
 import sys, time, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-spl = F.new_spline(); vec = C.make_vec(spl.Pl, 'A', 'insitu'); spl.knots = spl.stack_from_vectorial(vec, C.insitu_pos)
+spl = F.new_spline(); vec = C.make_vec(spl.Pl, 'A', 'insitu'); spl.knots = spl.knots_from_vectorial(vec, C.insitu_pos)
 N, NB = 200000, 5000
 g = torch.Generator(device=C.DEV).manual_seed(1)
 P3 = torch.stack([torch.rand(N, generator=g, device=C.DEV) - .5, torch.rand(N, generator=g, device=C.DEV) - .5, 0.05 + 0.7 * torch.rand(N, generator=g, device=C.DEV)], 1)
 resid = torch.randn(N, C.P, C.P, device=C.DEV)
 def ev(self, off, K, mode):
-    N, P, S, Lw = off.shape[0], self.P, self.S, self.Lw
+    N, P, S, Lw = off.shape[0], self.roisize, self.S, self.Lw
     tz = ((off[:, 2] - self.z0) / self.hz).clamp(1, self.nz - 2 - 1e-4)
     t = torch.stack([tz, self.oS0 - off[:, 1] * S, self.oS0 - off[:, 0] * S], 1)
     ix = torch.floor(t); fr = t - ix; i0 = ix.long() - 1
@@ -33,7 +33,7 @@ def tm(fn, n=3):
     for _ in range(n):
         torch.cuda.synchronize(); t = time.time(); r = fn(); torch.cuda.synchronize(); ts.append(time.time() - t)
     return min(ts) / N * 1e6, r
-ref = spl.evaluate(P3[:1000]); gref = None
+ref = spl.render(P3[:1000]); gref = None
 for mode in ('index', 'index_select', 'take', 'rows'):
     d = float((ev(spl, P3[:1000], spl.knots, mode) - ref).abs().max())
     def f():

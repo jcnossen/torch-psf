@@ -1,13 +1,13 @@
 import sys, time, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-spl = F.new_spline(); vec = C.make_vec(spl.Pl, 'A', 'insitu'); spl.knots = spl.stack_from_vectorial(vec, C.insitu_pos)
+spl = F.new_spline(); vec = C.make_vec(spl.Pl, 'A', 'insitu'); spl.knots = spl.knots_from_vectorial(vec, C.insitu_pos)
 N, NB = 200000, 5000
 g = torch.Generator(device=C.DEV).manual_seed(1)
 P3 = torch.stack([torch.rand(N, generator=g, device=C.DEV) - .5, torch.rand(N, generator=g, device=C.DEV) - .5, 0.05 + 0.7 * torch.rand(N, generator=g, device=C.DEV)], 1)
 resid = torch.randn(N, C.P, C.P, device=C.DEV)
 def ev_unfold(self, off, K):
-    N, P, S, Lw = off.shape[0], self.P, self.S, self.Lw
+    N, P, S, Lw = off.shape[0], self.roisize, self.S, self.Lw
     tz = ((off[:, 2] - self.z0) / self.hz).clamp(1, self.nz - 2 - 1e-4)
     t = torch.stack([tz, self.oS0 - off[:, 1] * S, self.oS0 - off[:, 0] * S], 1)
     ix = torch.floor(t); fr = t - ix; i0 = ix.long() - 1
@@ -18,7 +18,7 @@ def ev_unfold(self, off, K):
     return torch.einsum('nzpqab,nz,na,nb->npq', win, wa[:, 0], wa[:, 1], wa[:, 2])
 def ev_sep(self, off, K):
     # separable: z first (4 planes -> 1), then y, then x with small matmuls
-    N, P, S, Lw = off.shape[0], self.P, self.S, self.Lw
+    N, P, S, Lw = off.shape[0], self.roisize, self.S, self.Lw
     tz = ((off[:, 2] - self.z0) / self.hz).clamp(1, self.nz - 2 - 1e-4)
     t = torch.stack([tz, self.oS0 - off[:, 1] * S, self.oS0 - off[:, 0] * S], 1)
     ix = torch.floor(t); fr = t - ix; i0 = ix.long() - 1
@@ -40,8 +40,8 @@ def back(ev):
             (ev(P3[s:s + NB], K) * resid[s:s + NB]).sum().backward()
         return K.grad
     return f
-ref = spl.evaluate(P3[:1000])
-for name, ev in (('conv2d', lambda o, K: spl.evaluate(o, knots=K)), ('unfold+einsum', lambda o, K: ev_unfold(spl, o, K)), ('separable', lambda o, K: ev_sep(spl, o, K))):
+ref = spl.render(P3[:1000])
+for name, ev in (('conv2d', lambda o, K: spl.render(o, knots=K)), ('unfold+einsum', lambda o, K: ev_unfold(spl, o, K)), ('separable', lambda o, K: ev_sep(spl, o, K))):
     d = float((ev(P3[:1000], spl.knots) - ref).abs().max() / ref.abs().max())
     with torch.no_grad():
         tf, _ = tm(lambda: [ev(P3[s:s + NB], spl.knots) for s in range(0, N, NB)][-1])

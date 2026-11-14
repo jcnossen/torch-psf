@@ -56,7 +56,7 @@ def spline_widths(spl, zs, P=None):
     """Second-moment widths sx, sy (px) and x, y centroid of the spline PSF evaluated at x = y = 0 for heights zs."""
     off = torch.zeros(len(zs), 3, device=spl.dev)
     off[:, 2] = torch.as_tensor(zs, device=spl.dev, dtype=torch.float32)
-    g = spl.evaluate(off).double().cpu().numpy()
+    g = spl.render(off).double().cpu().numpy()
     Pp = g.shape[1]
     o = np.arange(Pp) - (Pp - 1) / 2
     gs = np.clip(g, 0, None)
@@ -69,60 +69,22 @@ def spline_widths(spl, zs, P=None):
 
 
 def localize_w(spl, d, w, th0, iters=30, nb=4000, fixed=(), lam0=1.0):
-    """As torch_convspline.knotpsf.localize (Levenberg-Marquardt Poisson MLE of x, y, z, I, bg on the spline) with a
-    pixel weight mask w [N, P, P] in {0, 1}: pixels with w = 0 (outside the frame) do not enter the likelihood."""
-    from torch_convspline.knotpsf import _clamp
+    """torch_psf.localize-style Levenberg-Marquardt Poisson MLE of x, y, z, I, bg on the spline with a pixel weight
+    mask w [N, P, P] in {0, 1}: pixels with w = 0 (outside the frame) do not enter the likelihood."""
+    from torch_psf.fit import lm_poisson, model_and_jacobian, clamp_theta
     out, onll = [], []
-    with torch.no_grad():
-        for s in range(0, len(d), nb):
-            dd, ww = d[s:s + nb], w[s:s + nb]
-            th = _clamp(th0[s:s + nb].clone().to(spl.dtype), spl)
-            fx = list(fixed)
-            lam = torch.full((len(dd),), lam0, device=dd.device)
-
-            def model(t):
-                g, gx, gy, gz = spl.evaluate(t[:, :3], grad=True)
-                I = t[:, 3, None, None]
-                return I * g + t[:, 4, None, None], torch.stack([I * gx, I * gy, I * gz, g, torch.ones_like(g)], 1)
-
-            def nllf(mu):
-                mu = mu.clamp_min(1e-6)
-                return (ww * (mu - dd * torch.log(mu))).flatten(1).sum(1)
-
-            mu, J = model(th)
-            nll = nllf(mu)
-            for _ in range(iters):
-                mu = mu.clamp_min(1e-6)
-                if fx:
-                    J[:, fx] = 0
-                Jw = J * ww[:, None]
-                gr = (Jw * (dd / mu - 1)[:, None]).flatten(2).sum(2)
-                H = torch.einsum('nap,nbp->nab', Jw.flatten(2) / mu.flatten(1)[:, None], J.flatten(2))
-                dg = torch.diagonal(H, dim1=1, dim2=2).clamp_min(1e-12)
-                H = H + torch.diag_embed(dg * lam[:, None])
-                if fx:
-                    H[:, fx, fx] = 1.0
-                step = torch.linalg.solve(H.double(), gr.double()[..., None])[..., 0].to(th.dtype)
-                tn = _clamp(th + step, spl)
-                mun, Jn = model(tn)
-                nn_ = nllf(mun)
-                ok = nn_ < nll
-                th[ok], mu[ok], J[ok], nll[ok] = tn[ok], mun[ok], Jn[ok], nn_[ok]
-                lam = torch.where(ok, lam * 0.3, lam * 5).clamp(1e-4, 1e6)
-            out.append(th); onll.append(nll)
+    for s in range(0, len(d), nb):
+        th, nll = lm_poisson(lambda t: model_and_jacobian(spl, t), d[s:s + nb], th0[s:s + nb].to(spl.dtype),
+                             weight=w[s:s + nb], clamp=lambda t: clamp_theta(t, spl), fixed=fixed, iters=iters,
+                             lam0=lam0)
+        out.append(th); onll.append(nll)
     return torch.cat(out), torch.cat(onll)
 
 
 def crlb_w(spl, th, w):
     """Poisson CRLB (std of x, y, z, I, bg) with a pixel mask."""
-    with torch.no_grad():
-        g, gx, gy, gz = spl.evaluate(th[:, :3], grad=True)
-        I = th[:, 3, None, None]
-        mu = (I * g + th[:, 4, None, None]).clamp_min(1e-6)
-        J = torch.stack([I * gx, I * gy, I * gz, g, torch.ones_like(g)], 1).flatten(2)
-        F = torch.einsum('nap,nbp->nab', J * (w.flatten(1) / mu.flatten(1))[:, None], J)
-        F = F + 1e-9 * torch.eye(5, device=F.device)
-        return torch.sqrt(torch.diagonal(torch.linalg.inv(F.double()), dim1=1, dim2=2).clamp_min(0)).float()
+    from torch_psf import crlb
+    return crlb(spl, th, weight=w, ridge=1e-9)
 
 
 class PageStack:

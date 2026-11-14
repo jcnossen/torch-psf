@@ -18,7 +18,7 @@ import sys, json, time, argparse, math
 sys.path.insert(0, '.'); sys.path.insert(0, 'study/realdata')
 import numpy as np, torch
 from insitu_common import AVecPSF, DEV, D, OUT, jdump, PX0, PY0
-from torch_convspline.knotpsf import poisson_nll
+from torch_psf.fit import poisson_nll
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--tag', required=True)
@@ -69,7 +69,7 @@ T = dict(zc=torch.zeros(len(noll), device=DEV), aNA=torch.zeros(1, device=DEV), 
          ablur=torch.full((1,), 3.0, device=DEV), ahe=torch.full((1,), 3.0, device=DEV),
          azs=torch.zeros(1, device=DEV), phase=torch.zeros(A.npupil, A.npupil, device=DEV),
          la=torch.zeros(A.npupil, A.npupil, device=DEV))
-from torch_convspline.vectorial import zernike
+from torch_psf.zernike import zernike
 _mask = psf.mask.bool()
 _low = torch.stack([zernike(j, psf.rho.clamp(max=1), psf.phi)[_mask] for j in (1, 2, 3, 4)], 1)
 _Q, _ = torch.linalg.qr(_low)

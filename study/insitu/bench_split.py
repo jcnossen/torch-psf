@@ -5,13 +5,13 @@ import sys, time, json, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
 spl = F.new_spline()
-spl.knots = spl.stack_from_vectorial(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
+spl.knots = spl.knots_from_vectorial(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
 N, NB = 200000, 5000
 g = torch.Generator(device=C.DEV).manual_seed(1)
 r = lambda: torch.rand(N, generator=g, device=C.DEV)
 P3 = torch.stack([r() - .5, r() - .5, 0.05 + 0.7 * r()], 1)
 resid = torch.randn(N, C.P, C.P, device=C.DEV)
-S, P, Lw = spl.S, spl.P, spl.Lw
+S, P, Lw = spl.S, spl.roisize, spl.Lw
 
 
 def prep(off):
@@ -40,7 +40,7 @@ with torch.no_grad():
     res['prep_index_weights'] = best(lambda: [prep(P3[a:b]) for a, b in B])
     res['fwd_window_read'] = best(lambda: [Kf.index_select(0, idx) for idx, w in pre])
     res['fwd_convolution'] = best(lambda: [torch.nn.functional.conv2d(sub, w, groups=w.shape[0], stride=S) for sub, (idx, w) in zip(subs, pre)])
-    res['fwd_total'] = best(lambda: [spl.evaluate(P3[a:b]) for a, b in B])
+    res['fwd_total'] = best(lambda: [spl.render(P3[a:b]) for a, b in B])
 
 
 def bwd_conv():                      # forward + backward of the convolution only (gradient on the windows)
@@ -58,7 +58,7 @@ def bwd_read():                      # forward + backward of the window read onl
 def bwd_total():
     K = spl.knots.clone().requires_grad_(True)
     for a, b in B:
-        (spl.evaluate(P3[a:b], knots=K) * resid[a:b]).sum().backward()
+        (spl.render(P3[a:b], knots=K) * resid[a:b]).sum().backward()
 
 
 res['fwdbwd_convolution'] = best(bwd_conv)

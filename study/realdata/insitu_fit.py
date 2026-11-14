@@ -21,7 +21,7 @@ import sys, time, argparse, math, json
 sys.path.insert(0, '.'); sys.path.insert(0, 'study/realdata')
 import numpy as np, torch
 from insitu_common import *
-from torch_convspline.vectorial import zernike
+from torch_psf.zernike import zernike
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--method', required=True)
@@ -263,7 +263,7 @@ if A.method == 'e':
             tot = 0.0
             for s_ in range(0, len(dtr), 20000):
                 t = th[s_:s_ + 20000]
-                mu = (t[:, 3, None, None] * spl.evaluate(t[:, :3], knots=Kp) + t[:, 4, None, None]).clamp_min(1e-4)
+                mu = (t[:, 3, None, None] * spl.render(t[:, :3], knots=Kp) + t[:, 4, None, None]).clamp_min(1e-4)
                 l = (mu - dtr[s_:s_ + 20000] * torch.log(mu)).double().sum()
                 l.backward()
                 tot += float(l)

@@ -3,8 +3,11 @@ fitted wavelength, the movie spline geometry, a Levenberg-Marquardt localizer wi
 gradient for any vectorial parameters (data-agnostic versions of study/insitu/fit.py)."""
 import math, json, time, os
 import numpy as np, torch
-from torch_convspline.vectorial import VectorialPSF, zernike
-from torch_convspline.knotpsf import KnotPSF, poisson_nll
+from torch_psf import VectorialPSF
+from torch_psf.zernike import zernike
+from torch_psf import ConvSplinePSF
+from torch_psf.fit import poisson_nll, lm_poisson, model_and_jacobian
+from torch_psf.insitu import knot_loss
 from rdcommon import transfer_knots
 
 DEV = 'cuda'
@@ -24,7 +27,7 @@ elif DS == 'tubulin':
     PX0, PY0 = 0.117, 0.1182
 else:
     raise ValueError(f'unknown INSITU_DS {DS}')
-OUT = f'{D}/insitu'
+OUT = os.environ.get('INSITU_OUT', f'{D}/insitu')   # INSITU_OUT: write / read the in-situ files elsewhere
 P, XMAX, ZLIM = 17, 3.0, 0.8
 
 
@@ -34,8 +37,8 @@ class AVecPSF(VectorialPSF):
     a tensor (lam, um) so that it can be fitted. Everything else as VectorialPSF."""
 
     def __init__(self, roisize, px=0.135, py=0.142, lam=0.68, **kw):
-        kw.setdefault('pixelsize', 0.5 * (px + py))
-        super().__init__(roisize, wavelength=lam, **kw)
+        kw.setdefault('pixel_um', 0.5 * (px + py))
+        super().__init__(roisize, wavelength_um=lam, **kw)
         self.pxy = torch.nn.Parameter(torch.tensor([px, py], device=self.dev), requires_grad=False)
         self.lam = torch.nn.Parameter(torch.tensor(float(lam), device=self.dev), requires_grad=False)
         # lateral Gaussian blur (um) of the image: finite bead size or any other blur (vibration, camera); 0 = none
@@ -146,7 +149,7 @@ def make_vec(roisize, st, npupil=64, oversample=3, use_blur=False):
 def movie_spline():
     """Same knot grid as the bead calibration (S 2, hz 50 nm, z -0.8...0.8 um + 4 pad planes), 17 px patch, +-3 px."""
     cal = torch.load(f'{D}/locs/calib/psf_spline.pt')
-    spl = KnotPSF(P, cal['zlo'], cal['zhi'], S=cal['S'], hz=cal['hz'], zpad=cal['zpad'], xmax=XMAX, device=DEV)
+    spl = ConvSplinePSF(P, (cal['zlo'], cal['zhi']), oversample=cal['S'], dz_um=cal['hz'], zpad=cal['zpad'], xy_limit=XMAX, device=DEV)
     assert spl.nz == cal['nz'] and abs(spl.z0 - cal['z0']) < 1e-9
     Kb = transfer_knots(cal['knots'].to(DEV), cal['c'], spl.c, cal['S'])
     return spl, Kb
@@ -161,7 +164,7 @@ def pos_fn_maker(f0, s, D=0.0, kappa=1.0):
 
 
 def knots_from_vec(spl, big, pos_fn):
-    return spl.stack_from_vectorial(big, pos_fn, chunk=spl.nz)
+    return spl.knots_from_vectorial(big, pos_fn, chunk=spl.nz)
 
 
 # ---------------------------------------------------------------------------------------------- localization
@@ -175,35 +178,18 @@ def _clamp(th, zlim=ZLIM, xmax=XMAX):
 
 
 def _model(spl, t):
-    g, gx, gy, gz = spl.evaluate(t[:, :3], grad=True)
-    I = t[:, 3, None, None]
-    return I * g + t[:, 4, None, None], torch.stack([I * gx, I * gy, I * gz, g, torch.ones_like(g)], 1)
+    return model_and_jacobian(spl, t)
 
 
 @torch.no_grad()
 def lm(spl, d, th, iters, nb=8000):
-    """Levenberg-Marquardt Poisson MLE (as loc.py), patches on the GPU or CPU (moved per batch)."""
+    """Levenberg-Marquardt Poisson MLE (torch_psf.lm_poisson with the movie z limits and mu >= 1e-4), patches on the
+    GPU or CPU (moved per batch)."""
     out, onll = [], []
     for s in range(0, len(d), nb):
         dd = d[s:s + nb].to(DEV, non_blocking=True)
-        t = _clamp(th[s:s + nb].to(DEV).clone())
-        lam = torch.ones(len(dd), device=DEV)
-        mu, J = _model(spl, t)
-        mu = mu.clamp_min(1e-4)
-        nll = poisson_nll(dd, mu)
-        for _ in range(iters):
-            gr = (J * (dd / mu - 1)[:, None]).flatten(2).sum(2)
-            H = torch.einsum('nap,nbp->nab', J.flatten(2) / mu.flatten(1)[:, None], J.flatten(2))
-            dg = torch.diagonal(H, dim1=1, dim2=2).clamp_min(1e-12)
-            H = H + torch.diag_embed(dg * lam[:, None])
-            step = torch.linalg.solve(H.double(), gr.double()[..., None])[..., 0].float()
-            tn = _clamp(t + step)
-            mun, Jn = _model(spl, tn)
-            mun = mun.clamp_min(1e-4)
-            nn_ = poisson_nll(dd, mun)
-            ok = nn_ < nll
-            t[ok], mu[ok], J[ok], nll[ok] = tn[ok], mun[ok], Jn[ok], nn_[ok]
-            lam = torch.where(ok, lam * 0.3, lam * 5).clamp(1e-4, 1e6)
+        t, nll = lm_poisson(lambda t_: _model(spl, t_), dd, th[s:s + nb].to(DEV), clamp=_clamp, iters=iters,
+                            mu_min=1e-4)
         out.append(t); onll.append(nll)
     return torch.cat(out), torch.cat(onll)
 
@@ -267,11 +253,7 @@ def knot_grad(spl, d, th, nb=20000):
     K = spl.knots.clone().requires_grad_(True)
     tot = 0.0
     for s in range(0, len(d), nb):
-        dd = d[s:s + nb].to(DEV); t = th[s:s + nb].to(DEV)
-        mu = t[:, 3, None, None] * spl.evaluate(t[:, :3], knots=K) + t[:, 4, None, None]
-        l = poisson_nll(dd, mu).sum()
-        l.backward()
-        tot += float(l)
+        tot += knot_loss(spl, K, d[s:s + nb].to(DEV), th[s:s + nb].to(DEV), batch=nb)
     return K.grad, tot
 
 
