@@ -343,7 +343,7 @@ web/
   src/fit/        lm.ts (batched LM), adam.ts, beads.ts, insitu.ts (v2)
   src/io/         tiff.ts, psfjson.ts (torch-psf json read / write), npy.ts, tifwrite.ts
   src/ui/         app.ts, form.ts, progress.ts, view3d.ts (shared with the viewer page)
-  test/           node / browser tests; data in ../tests/data/web/
+  test/           node / browser tests; data in ../web/test/.cache/ (generated, git-ignored; tests/data/web/ only holds the one-bead real crop)
 ```
 - Build: Vite + TypeScript, pinned in a lockfile, which produces a static `dist/`. GitHub Actions builds it and deploys
   to Pages. The WGSL files are imported as strings (`?raw`), so there is no shader build step.
@@ -432,7 +432,7 @@ The example GPU is an RTX 4060 laptop class, about 10 TFLOP/s f32 peak, about 1-
 - Precision: everything is f32. f16 is not used.
 
 ### Validation against the Python library (the reference)
-- Shared test data and expected outputs live in the repo under `tests/data/web/`:
+- Shared test data and expected outputs live in the repo under `web/test/.cache/ (generated, git-ignored; tests/data/web/ only holds the one-bead real crop)`:
   - two small stacks: a simulated stack with a known Zernike set + bead xy, and a crop of a real bead stack (PSF_calib
     zstack2-1, 2-3 beads);
   - the forward test cases: parameter sets and their torch_psf images / Jacobians (npz);
