@@ -62,14 +62,21 @@ def _crop(m, corners, P, frame_shape=None):
 @dataclasses.dataclass
 class Camera:
     """Camera conversion. gain_e_per_adu (e- per ADU), offset_adu (ADU), readnoise_e (e- rms): each a scalar or a
-    per-pixel map [H, W] (numpy or torch). maps: optional npz path with per-pixel 'offset_adu' / 'readnoise_e' maps, loaded by load_maps().
-    type: 'scmos' or 'emccd' (EMCCD: gain includes the EM gain,
-    the excess noise factor 2 is not modelled here)."""
+    per-pixel map [H, W] (numpy or torch). maps: optional npz path with per-pixel 'offset_adu' / 'readnoise_e' maps,
+    loaded by load_maps(). type: 'scmos' or 'emccd' (a label only).
+
+    excess_noise: the noise factor F^2 of the camera (1 = Poisson; an EMCCD has F^2 ~ 2: the EM gain doubles the
+    variance of the photoelectron count). to_photons divides by it, so the fits, CRLBs and deviances work with
+    Poisson-equivalent ('effective') photons, var = mean, and the photon / background numbers they report are
+    effective photons = photoelectrons / F^2. For an EMCCD give the true gain (photoelectrons per ADU, including the
+    EM gain) with excess_noise=2, or equivalently the Poisson-equivalent gain (gain / 2, = 1 / the photon-transfer
+    slope) with excess_noise=1. torch_psf.calibrate.photon_transfer measures it from a movie."""
     gain_e_per_adu: Number = 1.0
     offset_adu: Number = 0.0
     readnoise_e: Number = 0.0
     type: str = 'scmos'
     maps: Optional[str] = None
+    excess_noise: float = 1.0
 
     @classmethod
     def from_dict(cls, d, base_dir=None, load_maps=True):
@@ -125,11 +132,12 @@ class Camera:
         adu = torch.as_tensor(adu)
         x = adu.float()
         P = x.shape[-1]
-        return (x - self._t(self.offset_adu, x, corners, P)) * self._t(self.gain_e_per_adu, x, corners, P)
+        ph = (x - self._t(self.offset_adu, x, corners, P)) * self._t(self.gain_e_per_adu, x, corners, P)
+        return ph if self.excess_noise == 1 else ph / float(self.excess_noise)
 
     def variance(self, like, corners=None):
         """Read-noise variance in e^2 for frames or ROIs shaped like `like` (scalar tensor if the read noise is a
         scalar). Pass it as `var` to localize()."""
         P = like.shape[-1]
         rn = self._t(self.readnoise_e, like, corners, P)
-        return rn ** 2
+        return rn ** 2 if self.excess_noise == 1 else rn ** 2 / float(self.excess_noise) ** 2

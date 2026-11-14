@@ -24,6 +24,8 @@ class Spots:
     score: Optional[torch.Tensor] = None
     var: Optional[torch.Tensor] = None
     frames_read: int = 0
+    frame_ranges: Optional[list] = None      # the (t0, t1) chunks read, in frame order
+
 
     def __len__(self):
         return len(self.rois)
@@ -35,12 +37,12 @@ class Spots:
     def subset(self, idx):
         v = self.var if (self.var is None or self.var.dim() == 0) else self.var[idx]
         return Spots(self.rois[idx], self.frame[idx], self.corner[idx],
-                     None if self.score is None else self.score[idx], v, self.frames_read)
+                     None if self.score is None else self.score[idx], v, self.frames_read, self.frame_ranges)
 
     def to(self, device):
         mv = lambda a: None if a is None else a.to(device)
         return Spots(self.rois.to(device), self.frame.to(device), self.corner.to(device), mv(self.score),
-                     mv(self.var), self.frames_read)
+                     mv(self.var), self.frames_read, self.frame_ranges)
 
     def image_xy(self, th):
         """ROI-relative fitted x, y (theta[:, :2]) -> image coordinates (px)."""
@@ -58,13 +60,25 @@ def extract_rois(frames, t, y, x, roisize):
     return frames[t[:, None, None], yy, xx]
 
 
+def spread_order(n):
+    """0..n-1 in bit-reversed (van der Corput) order: every prefix is spread evenly over the range."""
+    if n <= 1:
+        return list(range(n))
+    bits = int(np.ceil(np.log2(n)))
+    rev = [int(format(i, f'0{bits}b')[::-1], 2) for i in range(1 << bits)]
+    return [r for r in rev if r < n]
+
+
 @torch.no_grad()
 def extract_spots(movie, roisize, camera=None, frames=None, chunk=500, device=None, max_spots=None, stop=None,
-                  progress=None, **detect_kw):
+                  progress=None, sample='sequential', **detect_kw):
     """Detect spots on a movie (any reader of torch_psf.movie, a path or an array) and extract their ROIs.
 
     camera: Camera (ADU -> photons; None: the movie is already in photons). frames: (f0, f1) range (default all).
-    chunk: frames per GPU chunk. max_spots: stop when this many spots are collected. stop(): optional callable that
+    chunk: frames per GPU chunk. max_spots: stop when this many spots are collected. sample: order in which the chunks
+    are read: 'sequential' (from the start of the range) or 'spread' (bit-reversed chunk order, so that the chunks read
+    before max_spots is reached are spread evenly over the whole range; spots are returned in frame order).
+    Spots.frames_read = frames read, Spots.frame_ranges = the chunks read. stop(): optional callable that
     returns True to stop early (use what we have). progress(frames_done, frames_total, n_spots): optional callback.
     detect_kw: arguments of detect_spots (threshold, sigma, nms, noise, isolation, median); border defaults to
     (P - 1) / 2 + 2 px. Returns Spots (on `device`)."""
@@ -74,8 +88,13 @@ def extract_spots(movie, roisize, camera=None, frames=None, chunk=500, device=No
     h = (roisize - 1) // 2
     detect_kw.setdefault('border', h + 2)
     rois, fr, cor, sc, var = [], [], [], [], []
-    n, done = 0, f0
-    for t0 in range(f0, f1, chunk):
+    starts = list(range(f0, f1, chunk))
+    if sample == 'spread':
+        starts = [starts[i] for i in spread_order(len(starts))]
+    elif sample != 'sequential':
+        raise ValueError(f"sample must be 'sequential' or 'spread', not {sample!r}")
+    n, nread, ranges = 0, 0, []
+    for t0 in starts:
         t1 = min(t0 + chunk, f1)
         x = torch.as_tensor(mv.read(t0, t1)).to(device).float()
         if camera is not None:
@@ -90,18 +109,25 @@ def extract_spots(movie, roisize, camera=None, frames=None, chunk=500, device=No
         if camera is not None and np.ndim(camera.readnoise_e) == 2:
             var.append(camera.variance(rois[-1], c))
         n += len(t)
-        done = t1
+        nread += t1 - t0
+        ranges.append((t0, t1))
         if progress is not None:
-            progress(t1 - f0, f1 - f0, n)
+            progress(nread, f1 - f0, n)
         if (max_spots is not None and n >= max_spots) or (stop is not None and stop()):
             break
     cat = lambda L: torch.cat(L) if L else None
     v = cat(var)
     if v is None and camera is not None:
         v = torch.as_tensor(float(np.asarray(camera.readnoise_e)) ** 2, device=device)
-    s = Spots(torch.cat(rois), torch.cat(fr), torch.cat(cor), torch.cat(sc), v, done - f0)
+    if not rois:
+        z = torch.zeros(0, dtype=torch.long, device=device)
+        return Spots(torch.zeros(0, roisize, roisize, device=device), z, torch.zeros(0, 2, dtype=torch.long,
+                     device=device), torch.zeros(0, device=device), v, 0, [])
+    s = Spots(torch.cat(rois), torch.cat(fr), torch.cat(cor), torch.cat(sc), v, nread, sorted(ranges))
     if max_spots is not None and len(s) > max_spots:
-        s = s.subset(slice(0, max_spots))
+        s = s.subset(slice(0, max_spots))       # drops the end of the last chunk read
+    if sample == 'spread' and len(s):
+        s = s.subset(torch.argsort(s.frame, stable=True))
     return s
 
 

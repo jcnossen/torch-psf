@@ -12,7 +12,7 @@ default: cuda if available, else cpu. Lower-level pieces: torch_psf.fit, .spots,
 .zernike, .varpro. Localizations: Dataset (torch_psf.dataset).
 
 Module layers (each imports only from the layers before it): config, zernike, fit, varpro -> detect, movie, spots,
-dataset -> psf (the base class) -> vectorial, spline, gaussian -> io, insitu, simulate -> estimators -> viewer,
+dataset, calibrate -> psf (the base class) -> vectorial, spline, gaussian -> io, insitu, simulate -> estimators -> viewer,
 __main__. The model classes register themselves by their psf.json type name when they are defined
 (PSF.__init_subclass__), and this __init__ imports all of them, so PSF.load knows every type whenever torch_psf is
 imported; importing a submodule alone (e.g. `from torch_psf.psf import PSF`) runs this __init__ first and so
@@ -31,4 +31,5 @@ from torch_psf.detect import detect_spots
 from torch_psf.spots import extract_spots
 from torch_psf.estimators import ZStackEstimator, InSituEstimator
 from torch_psf.dataset import Dataset
-from torch_psf import fit, insitu, simulate, spots, detect, io, zernike, varpro   # noqa: F401
+from torch_psf.calibrate import photon_transfer
+from torch_psf import fit, insitu, simulate, spots, detect, io, zernike, varpro, calibrate   # noqa: F401

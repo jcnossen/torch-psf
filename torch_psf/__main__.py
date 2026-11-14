@@ -138,7 +138,7 @@ def main(argv=None):
                               sign=a.sign, nbeads=a.nbeads, iters=a.iters, holdout=a.holdout, device=a.device,
                               progress=_progress)
         psf = est.estimate(a.stacks, a.dz_um)
-        psf.save(a.out, camera=_camera(a), provenance=dict(report=_jsonable(est.report)))
+        psf.save(a.out, camera=_camera(a))
         _print_report(est)
     elif a.cmd == 'insitu':
         est = InSituEstimator(start=a.psf, optics=_optics(a), camera=_camera(a), focus_um=a.focus_um,
@@ -146,7 +146,7 @@ def main(argv=None):
                               iters=a.iters, threshold=a.threshold, isolation=a.isolation, refine=a.refine,
                               device=a.device, progress=_progress)
         psf = est.estimate(a.movie, frames=_frames(a.frames))
-        psf.save(a.out, camera=_camera(a), provenance=dict(report=_jsonable(est.report)))
+        psf.save(a.out, camera=_camera(a))
         _print_report(est)
     elif a.cmd == 'localize':
         psf = PSF.load(a.psf, roisize=a.roisize, device=a.device)

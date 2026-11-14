@@ -8,6 +8,8 @@ estimator.history (list of per-iteration records).
     psf = est.estimate('movie.tif')
     print(est.report['heldout'], est.report['z_scale'])
 """
+import copy
+import dataclasses
 import time
 import numpy as np
 import tifffile
@@ -19,6 +21,7 @@ from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
 from torch_psf.spline import CubicSplinePSF, stage_scan_pos_fn
 from torch_psf.gaussian import AstigmaticGaussianPSF
+from torch_psf.movie import open_movie
 from torch_psf.spots import extract_spots
 from torch_psf.insitu import (fit_beads, stage_focus, fit_zernike_knots, fit_pupil_knots, fit_free_knots,
                               split_checkerboard, compare_heldout, spot_deviance, z_scale, FREE_KNOT_WARNING)
@@ -156,7 +159,13 @@ class ZStackEstimator(Estimator):
         return torch.stack(rois), torch.tensor(sid, device=self.dev)
 
     def estimate(self, stacks, dz_um):
-        """stacks: list of [nk, H, W] arrays or TIFF paths (one bead field each, the same nk). Returns the PSF."""
+        """stacks: list of [nk, H, W] arrays or TIFF paths (one bead field each, the same nk). Returns the PSF (its
+        provenance holds the settings and the report)."""
+        psf = self._estimate(stacks, dz_um)
+        psf.provenance = dict(estimator='ZStackEstimator', model=self.model, dz_um=float(dz_um), report=self.report)
+        return psf
+
+    def _estimate(self, stacks, dz_um):
         self._reset()
         if isinstance(stacks, (str, np.ndarray)) or torch.is_tensor(stacks):
             stacks = [stacks]
@@ -182,7 +191,7 @@ class ZStackEstimator(Estimator):
         psf.focus_um = 0.0
         if self.fit_na or self.fit_n_med:
             self.report.update(NA=float(psf.NA), n_med=float(psf.n_med))
-        for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um'):
+        for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um', 'chi2_median', 'heldout_chi2_median'):
             if k in r['report']:
                 self.report[k] = r['report'][k]
         self.data = dict(rois=d, stack_id=sid, focus_um=focus, xy=r['xy'], photons=r['photons'], bg=r['bg'])
@@ -251,35 +260,58 @@ class ZStackEstimator(Estimator):
 
 
 class InSituEstimator(Estimator):
-    """In-situ PSF from an SMLM movie: detection, spot ROIs, a checkerboard split into training / held-out spots, the
-    vectorial Zernike fit by the knot route (torch_psf.insitu.fit_zernike_knots; method 'pupil' adds free pupil
-    maps), rejection of spots the single-emitter model does not explain (overlapping emitters: Poisson deviance per
-    pixel above 1 + deviance_k sqrt(2 / P^2) after the first pass; refit on the rest), an optional cubic-spline
-    refinement (refine=True: free knots regularised towards the vectorial spline, kept only if the held-out NLL
-    improves), and the held-out comparison.
+    """In-situ PSF from an SMLM movie: detection, spot ROIs sampled over the whole frame range, a checkerboard split
+    into training / held-out spots, the vectorial Zernike fit by the knot route (torch_psf.insitu.fit_zernike_knots;
+    method 'pupil' adds free pupil maps), rejection of spots the single-emitter model does not explain (overlapping
+    emitters; see deviance_rule), an optional scan of the focus and / or the wavelength by held-out NLL, an optional
+    cubic-spline refinement (refine=True: free knots regularised towards the vectorial spline, kept only if the
+    held-out NLL improves), the held-out comparison and a chi2 check of the camera model.
 
-    start (VectorialPSF or PSF file, e.g. a bead fit) or optics: the starting model; focus_um: the focal plane during
-    the acquisition (default: the start's focus_um). camera: Camera / calibration json / None (movie in photons).
-    roisize (px), z_range (um): emitter heights. nspots / nheldout: training / held-out spots (tile px checkerboard).
+    start (VectorialPSF or PSF file, e.g. a bead fit) or optics: the starting model (zernike_indices, npupil,
+    oversample_pupil: pupil model of a start built from optics); focus_um: the focal plane during the acquisition
+    (default: the start's focus_um). camera: Camera / calibration json / None (movie in photons). roisize (px),
+    z_range (um): emitter heights. nspots / nheldout: training / held-out spots (tile px checkerboard).
+    Spots: the movie is read in chunks of `chunk` frames in a bit-reversed order over the requested range
+    (sample='spread', torch_psf.spots.extract_spots) until 2 (nspots + nheldout) spots are found, so they come from the
+    whole range, not from its start (sample='sequential': the earlier behaviour).
+    Overlap rejection (reject_overlap): Poisson deviance per pixel of each training spot after the first fit;
+    deviance_rule 'median' (default): rejected above median + deviance_k x max(1.4826 MAD, median sqrt(2 / P^2)),
+    robust to a camera gain error or EMCCD statistics, which scale all deviances; 'poisson': above
+    1 + deviance_k sqrt(2 / P^2) (exact Poisson statistics only). A warning is added when more than warn_rejected of
+    the spots are rejected.
+    Focus / wavelength (for 2D data the focus is weakly determined): scan_focus_um and / or scan_wavelength_um = lists of
+    values; each combination is fitted (scan_iters iterations) and the one with the lowest held-out NLL is used.
     Spline grid: oversample, dz_um, xy_limit (>= 3 px recommended). Detection: threshold, isolation, detect_kw.
 
     estimate(movie, frames=None) -> PSF (VectorialPSF, or the refined CubicSplinePSF when refine=True and it
-    wins on the held-out spots). report: n_spots, n_train, n_test, n_rejected, at_limit, z_scale / z_offset_um (fit vs
-    start), heldout (NLL per pixel of start / vectorial / refined), chosen, warnings."""
+    wins on the held-out spots); its provenance holds the settings and the report. report: n_spots, n_train, n_test,
+    frames_requested, frames_read, frame_span, deviance (median, scale, threshold, rejected_fraction), n_rejected,
+    at_limit, z_scale / z_offset_um (fit vs start), scan, heldout (NLL per pixel of start / vectorial / refined),
+    chosen, heldout_chi2_median (held-out spots fitted with the chosen PSF: ~1 if the camera gain and noise model are
+    right), warnings. data: spots, train, test, vectorial (the fitted VectorialPSF), vectorial_spline (its spline),
+    psf (the returned PSF), spline (the spline of the returned PSF, ready for localization)."""
 
     def __init__(self, start=None, optics=None, camera=None, focus_um=None, roisize=15, z_range=(0.0, 0.8),
                  nspots=8000, nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0,
-                 refine=False, refine_lam_ref=3000.0, refine_lam_s=1000.0, refine_outer=12, oversample=2, dz_um=0.04,
-                 xy_limit=3.0, threshold=6.0, isolation=None, tile=16, device=None, progress=None, stop=None,
-                 **detect_kw):
+                 deviance_rule='median', warn_rejected=0.25, refine=False, refine_lam_ref=3000.0,
+                 refine_lam_s=1000.0, refine_outer=12, oversample=2, dz_um=0.04, xy_limit=3.0, threshold=6.0,
+                 isolation=None, tile=16, chunk=50, sample='spread', zernike_indices=tuple(range(5, 22)), npupil=64,
+                 oversample_pupil=3, scan_focus_um=None, scan_wavelength_um=None, scan_iters=None, device=None,
+                 progress=None, stop=None, **detect_kw):
         super().__init__(device, progress, stop)
         self.start, self.optics, self.camera, self.focus_um = start, optics, _camera(camera), focus_um
         self.roisize, self.z_range, self.nspots, self.nheldout = roisize, tuple(z_range), nspots, nheldout
         self.method, self.iters, self.reject_overlap, self.deviance_k = method, iters, reject_overlap, deviance_k
+        if deviance_rule not in ('median', 'poisson'):
+            raise ValueError(f"deviance_rule must be 'median' or 'poisson', not {deviance_rule!r}")
+        self.deviance_rule, self.warn_rejected = deviance_rule, warn_rejected
         self.refine, self.refine_lam_ref, self.refine_lam_s, self.refine_outer = (refine, refine_lam_ref,
                                                                                    refine_lam_s, refine_outer)
         self.grid = dict(oversample=oversample, dz_um=dz_um, zpad=5, xy_limit=xy_limit)
         self.threshold, self.isolation, self.tile, self.detect_kw = threshold, isolation, tile, detect_kw
+        self.chunk, self.sample = chunk, sample
+        self.zernike_indices, self.npupil, self.oversample_pupil = tuple(zernike_indices), npupil, oversample_pupil
+        self.scan_focus_um, self.scan_wavelength_um, self.scan_iters = scan_focus_um, scan_wavelength_um, scan_iters
 
     def _fit(self, spline, rois, vec, iters, stage):
         fn = fit_zernike_knots if self.method == 'zernike' else fit_pupil_knots
@@ -287,43 +319,117 @@ class InSituEstimator(Estimator):
             raise ValueError(self.method)
         return fn(spline, rois, vec, iters=iters, log=self._log(stage), stop=self.stop)
 
+    def _variant(self, vec0, focus_um, wavelength_um):
+        """the start model at another focus / wavelength (the Zernikes of the start are kept)"""
+        if wavelength_um is None or float(wavelength_um) == float(vec0.optics.wavelength_um):
+            v = copy.deepcopy(vec0)
+        else:
+            o = dataclasses.replace(vec0.optics, wavelength_um=float(wavelength_um))
+            v = VectorialPSF.from_optics(o, vec0.roisize, zernike_indices=tuple(vec0.zidx), npupil=vec0.npupil,
+                                         oversample=vec0.os, device=self.dev, focus_um=vec0.focus_um,
+                                         z_range=vec0.z_range)
+            with torch.no_grad():
+                v.zcoef.copy_(vec0.zcoef.detach())
+        v.focus_um = float(vec0.focus_um if focus_um is None else focus_um)
+        v.z_range = self.z_range
+        return v
+
+    def _deviance_threshold(self, dv):
+        P2 = self.roisize ** 2
+        if self.deviance_rule == 'poisson':
+            med, scale = float(np.median(dv)), float(np.sqrt(2.0 / P2))
+            return 1 + self.deviance_k * scale, med, scale
+        med = float(np.median(dv))
+        mad = 1.4826 * float(np.median(np.abs(dv - med)))
+        scale = max(mad, med * float(np.sqrt(2.0 / P2)))
+        return med + self.deviance_k * scale, med, scale
+
     def estimate(self, movie, frames=None):
         self._reset()
         R, zr = self.roisize, self.z_range
-        vec0 = _start_vectorial(self.start, self.optics, R, self.dev)
+        vec0 = _start_vectorial(self.start, self.optics, R, self.dev, self.zernike_indices, self.npupil,
+                                self.oversample_pupil)
         if self.focus_um is not None:
             vec0.focus_um = float(self.focus_um)
         vec0.z_range = zr
-        sp = extract_spots(movie, R, self.camera, frames, device=self.dev,
+        mv = open_movie(movie)
+        f0, f1 = (0, mv.n) if frames is None else (int(frames[0]), int(frames[1]))
+        sp = extract_spots(mv, R, self.camera, (f0, f1), chunk=self.chunk, device=self.dev, sample=self.sample,
                            max_spots=2 * (self.nspots + self.nheldout), threshold=self.threshold,
                            isolation=self.isolation, **self.detect_kw)
+        warnings = []
+        if len(sp) == 0:
+            raise ValueError(f'no spots detected in frames {f0}..{f1}')
         h = (R - 1) / 2
         par = split_checkerboard(sp.corner[:, 0] + h, sp.corner[:, 1] + h, self.tile)
         tr = np.flatnonzero(par == 0)[:self.nspots]
         te = np.flatnonzero(par == 1)[:self.nheldout]
         rois = sp.rois[torch.as_tensor(tr, device=self.dev)]
+        rois_te = sp.rois[torch.as_tensor(te, device=self.dev)]
+        fr = sp.frame.cpu().numpy()
+        self.report.update(method=self.method, n_spots=len(sp), n_train=len(tr), n_test=len(te),
+                           frames_requested=[f0, f1], frames_read=sp.frames_read,
+                           frame_span=[int(fr.min()), int(fr.max()) + 1], n_chunks=len(sp.frame_ranges or []),
+                           spots_per_frame=len(sp) / max(sp.frames_read, 1), warnings=warnings)
+        if len(tr) < self.nspots:
+            warnings.append(f'only {len(tr)} training spots (nspots {self.nspots}): the whole range was read')
         spline = CubicSplinePSF(R, zr, device=self.dev, **self.grid)
+
+        def heldout(v):
+            return compare_heldout({'m': v.to_spline(R, zr, **self.grid)}, rois_te)['m']['nll_per_px']
+
+        # focus / wavelength scan (held-out NLL)
+        fs = list(self.scan_focus_um) if self.scan_focus_um is not None else [None]
+        ws = list(self.scan_wavelength_um) if self.scan_wavelength_um is not None else [None]
+        if (len(fs) > 1 or len(ws) > 1 or fs[0] is not None or ws[0] is not None) and len(te):
+            scan = []
+            for fz in fs:
+                for wl in ws:
+                    if self._stopped():
+                        break
+                    v = self._variant(vec0, fz, wl)
+                    r = self._fit(spline, rois, v, self.scan_iters or max(self.iters // 2, 1),
+                                  f'scan focus {v.focus_um:g} wavelength {v.optics.wavelength_um:g}')
+                    scan.append(dict(focus_um=float(v.focus_um), wavelength_um=float(v.optics.wavelength_um),
+                                     heldout_nll_per_px=heldout(r['psf'])))
+            best = min(scan, key=lambda q: q['heldout_nll_per_px'])
+            self.report['scan'] = dict(results=scan, best=best)
+            vec0 = self._variant(vec0, best['focus_um'], best['wavelength_um'])
+            for k, vals in (('focus_um', fs), ('wavelength_um', ws)):
+                if len(vals) > 2 and best[k] in (min(vals), max(vals)):
+                    warnings.append(f'the best {k} ({best[k]:g}) is at the edge of the scanned values')
+
         r = self._fit(spline, rois, vec0, self.iters, 'vectorial')
         vec = r['psf']
         n_rej = 0
         if self.reject_overlap and not self._stopped():
             s1 = vec.to_spline(R, zr, **self.grid)
             dv, _ = spot_deviance(s1, rois)
-            thr = 1 + self.deviance_k * np.sqrt(2.0 / R ** 2)
+            thr, med, scale = self._deviance_threshold(dv)
             keep = dv < thr
             n_rej = int((~keep).sum())
+            frac = n_rej / max(len(dv), 1)
+            self.report['deviance'] = dict(rule=self.deviance_rule, k=self.deviance_k, median=med, scale=scale,
+                                           threshold=float(thr), rejected_fraction=frac,
+                                           quantiles=dict(zip(('q05', 'q25', 'q50', 'q75', 'q95'),
+                                                              np.quantile(dv, [.05, .25, .5, .75, .95]).tolist())))
+            if frac > self.warn_rejected:
+                warnings.append(f'{100 * frac:.0f} % of the training spots were rejected as overlaps (median deviance '
+                                f'{med:.2f} per px): dense data (use isolation=...) or a wrong camera model (gain, '
+                                f'excess_noise)')
+            if med > 1.3:
+                warnings.append(f'median deviance per px {med:.2f} (1 for Poisson statistics): check the camera gain '
+                                f'and excess_noise (EMCCD: 2)')
             rois = rois[torch.as_tensor(keep, device=self.dev)]
             r = self._fit(spline, rois, vec, max(self.iters * 3 // 4, 1), 'vectorial (overlaps rejected)')
             vec = r['psf']
-            self.report['deviance_threshold'] = float(thr)
         s0 = vec0.to_spline(R, zr, **self.grid)
         s_vec = vec.to_spline(R, zr, **self.grid)
         sc, off = z_scale(s_vec, s0)
-        self.report.update(method=self.method, n_spots=len(sp), n_train=len(tr), n_test=len(te), n_rejected=n_rej,
-                           frames_read=sp.frames_read, at_limit=r['report']['at_limit'], z_scale=sc, z_offset_um=off,
-                           warnings=[])
+        self.report.update(n_rejected=n_rej, at_limit=r['report']['at_limit'], z_scale=sc, z_offset_um=off,
+                           focus_um=float(vec.focus_um), wavelength_um=float(vec.optics.wavelength_um))
         cands = {'start': s0, 'vectorial': s_vec}
-        result = vec
+        result, result_spline = vec, s_vec
         if self.refine and not self._stopped():
             s_ref = vec.to_spline(R, zr, **self.grid)          # a separate grid object: the fit overwrites its knots
             K_vec = s_ref.knots.clone()
@@ -334,16 +440,35 @@ class InSituEstimator(Estimator):
             sc_r, off_r = z_scale(rr['psf'], s_vec)
             self.report['refine'] = dict(z_scale_vs_vectorial=sc_r, z_offset_um_vs_vectorial=off_r,
                                          at_limit=rr['report']['at_limit'])
-            self.report['warnings'].append(FREE_KNOT_WARNING)
+            warnings.append(FREE_KNOT_WARNING)
         if len(te):
-            ho = compare_heldout(cands, sp.rois[torch.as_tensor(te, device=self.dev)])
+            ho = compare_heldout(cands, rois_te)
             self.report['heldout'] = ho
             if 'refined' in cands:
                 better = ho['refined']['nll_per_px'] < ho['vectorial']['nll_per_px']
                 self.report['refine']['kept'] = bool(better)
                 if better:
-                    result = cands['refined']
+                    result = result_spline = cands['refined']
+            ds = result_spline.fit(rois_te, var=None if sp.var is None or sp.var.dim() == 0 else
+                                   sp.var[torch.as_tensor(te, device=sp.var.device)],
+                                   pixel_um=vec.pixel_um)
+            c2 = float(ds['chi2'].median())
+            self.report['heldout_chi2_median'] = c2
+            if not 0.7 < c2 < 1.4:
+                warnings.append(f'held-out median chi2 per px {c2:.2f} (about 1 expected): check the camera gain / '
+                                f'offset / excess_noise')
         self.report['chosen'] = type(result).__name__
         self.report['seconds'] = time.time() - self._t0
-        self.data = dict(spots=sp, train=tr, test=te, spline=s_vec, vectorial=vec)
+        result.provenance = dict(estimator='InSituEstimator', settings=self._settings(), report=self.report)
+        self.data = dict(spots=sp, train=tr, test=te, vectorial=vec, vectorial_spline=s_vec, psf=result,
+                         spline=result_spline)
         return result
+
+    def _settings(self):
+        keep = ('focus_um', 'roisize', 'z_range', 'nspots', 'nheldout', 'method', 'iters', 'reject_overlap',
+                'deviance_k', 'deviance_rule', 'refine', 'threshold', 'isolation', 'tile', 'chunk', 'sample',
+                'zernike_indices', 'npupil', 'scan_focus_um', 'scan_wavelength_um', 'scan_iters')
+        d = {k: getattr(self, k) for k in keep}
+        d['camera'] = None if self.camera is None else self.camera.to_dict()
+        d['detect_kw'] = dict(self.detect_kw)
+        return d

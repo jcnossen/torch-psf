@@ -56,6 +56,29 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 | `ZStackEstimator(...)` | adds `emitter_z_um` (starting bead centre height; **default** bead_diameter_um / 2, else 0), `fit_na`, `fit_n_med`, `drift_order` (**default** 3, passed to fit_beads; drift is on by default as before) |
 | `Dataset.estimate_drift` stored `meta['drift_info']` = dict(method, n, version) | stores `meta['drift']` = the run record: method, entry point (`dme.dme_prior.dme_prior_estimate`), version, package path, parameters (n_frames, dims, n_rows, time, row rule), `dme_info` (the choices DME made), result per axis (ptp_px, rms_px); `return_info=True` also returns it. DME is found through `DME_PATH` (a checkout) if set, else the installed package. `set_drift(info=)` stores into `meta['drift']` |
 
+### 2026-11-14: real-data follow-ups (defaults changed: marked **default**)
+
+| old | new |
+|---|---|
+| `TiffMovie`: frames = TIFF pages; an ImageJ TIFF > 4 GB (one IFD, frames contiguous) read as 1 frame; part files found by replacing the first '.tif' anywhere in the path | ImageJ / single-IFD files: frame count and memory map from the first image series; multi-page files (Andor SOLIS): one frame per page, read through one strided memory map when the page data are evenly spaced uncompressed blocks (else page by page); parts = `<base>_X1<ext>`, ... next to the file. Same pixels, faster reads |
+| `extract_spots(...)` read chunks from the start of the range | adds `sample='sequential'` (as before) or `'spread'` (bit-reversed chunk order: with `max_spots` the chunks read are spread over the whole range; spots returned in frame order); `Spots.frame_ranges` = the chunks read; an empty result is an empty Spots |
+| `InSituEstimator`: spots from the first 500-frame chunks of the range until 2 (nspots + nheldout) | **default** `sample='spread'`, `chunk=50`: spots from chunks spread over the whole range. report: `frames_requested`, `frames_read`, `frame_span`, `n_chunks`, `spots_per_frame`; a warning when fewer training spots than nspots were found |
+| overlap rejection above 1 + deviance_k sqrt(2 / P^2) (exact Poisson only); `report['deviance_threshold']` | **default** `deviance_rule='median'`: rejected above median + deviance_k x max(1.4826 MAD, median sqrt(2 / P^2)) (robust to a gain error or EMCCD statistics, which scale all deviances); `'poisson'` = the earlier rule. `report['deviance']` = rule, median, scale, threshold, rejected_fraction, quantiles; warnings when more than `warn_rejected` (0.25) are rejected or the median deviance is > 1.3 |
+| `Camera(type='emccd')`: a label; the excess noise had to be folded into the gain by hand | `Camera.excess_noise` (F^2; default 1 = no change): `to_photons` divides by it and `variance` by its square, so fits / CRLB / deviances use Poisson-equivalent photons (= photoelectrons / F^2; EMCCD: true gain with excess_noise=2, or gain / 2 with 1) |
+| (new) | `torch_psf.calibrate.photon_transfer(movie, frames, nblocks, block, mask_radius, threshold, offset_adu, excess_noise)` (also `tp.photon_transfer`) -> (Camera, report): offset and gain from background pixels (spots masked by detection, 4-sigma clip, consecutive-frame differences) |
+| no gain check in the reports | `chi2_median` (median over spots of the mean (d - mu)^2 / (mu + var) per pixel; ~1 if the camera model is right) in `Dataset.meta` of `PSF.fit` / `PSF.localize`, `fit_beads` / `ZStackEstimator.report` (`chi2_median`, `heldout_chi2_median`), `InSituEstimator.report['heldout_chi2_median']` (held-out spots fitted with the returned PSF; warning outside 0.7 .. 1.4) |
+| `InSituEstimator` start from optics: Noll 5..21, npupil 64 fixed | `zernike_indices`, `npupil`, `oversample_pupil` (as ZStackEstimator) |
+| focus / wavelength by hand | `InSituEstimator(scan_focus_um=[...], scan_wavelength_um=[...], scan_iters=None)`: each combination fitted (scan_iters, default iters / 2), the lowest held-out NLL is used; `report['scan']`; warning when the best value is at the edge |
+| `PSF.localize` passed only detection options to fit; progress per 5000-frame block | `iters`, `zstarts`, `batch` passed to `fit`; progress after every chunk |
+| `CubicSplinePSF.to_spline(other roisize)` raised | `CubicSplinePSF.resized(roisize)` (the same knots, shared; a larger ROI than the knots cover lowers xy_limit) and `to_spline(roisize)` = `resized` |
+| `est.data['spline']` = the spline of the vectorial fit, also when the refined spline was returned | **changed**: `data['spline']` = the spline of the returned PSF (refined if kept); `data['vectorial_spline']` = the vectorial fit's spline; `data['psf']` = the returned PSF; `data['vectorial']` as before |
+| `psf.save` stored the provenance passed to it | `PSF.provenance` (dict): the estimators set it to `{estimator, settings, report}` (ZStackEstimator: `{estimator, model, dz_um, report}`); `save(provenance=None)` writes it, `PSF.load` reads it back. The command line no longer passes `provenance=dict(report=...)` itself (the file still has `provenance.report`) |
+| `Dataset.frc`: full complex128 FFTs of the whole field | float32 histograms and real FFTs (same result to 1e-8; ~4x less memory); `region=(x0, y0, x1, y1)` px and `mask` (rows) options |
+| (new) | `Dataset.load_smlm(path, pixel_nm, frame_base=1, offset_px=0.5)` and `Dataset.load('x.smlm', pixel_nm=...)`: ShareLoc .smlm (binary table; ThunderSTORM conventions) |
+| `detect_spots(noise='mad')`: one noise level per chunk | adds `noise='mad_frame'` (per-frame MAD; for movies whose density / background changes within a chunk) |
+
+Not done: partial ROIs at the image border (detections closer than (P - 1) / 2 + 2 px to the edge are still dropped), an image-plane blur term in the in-situ fit.
+
 ### 2026-11-14: imports (no behaviour change; files identical)
 
 | old | new |

@@ -21,7 +21,7 @@ from torch_psf.config import Camera
 from torch_psf.fit import fisher, crlb, localize, at_limit
 from torch_psf.movie import open_movie
 from torch_psf.spots import Spots, extract_spots
-from torch_psf.dataset import Dataset
+from torch_psf.dataset import Dataset, _plain
 
 FORMAT, VERSION = 'torch-psf', '0.1.0'
 
@@ -34,6 +34,7 @@ class PSF:
     type_name = None         # psf.json `type` of the subclass
     _registry = {}           # type_name -> class
     z_range = None
+    provenance = None        # dict written to / read from the PSF file (estimators put their report here)
     pixel_um = None          # lateral pixel size (um); needed to express z in px when fitting a 3D model
     dev = torch.device('cpu')
 
@@ -150,6 +151,8 @@ class PSF:
                              f'pass pixel_um=... or set psf.pixel_um')
         th, cr = cat('theta', (0, 5)), cat('crlb', (0, 5))
         meta = dict(method=f'torch_psf {type(self).__name__}.fit', n_dims=self.n_dims)
+        if out['chi2']:
+            meta['chi2_median'] = float(cat('chi2', (0,)).median())      # ~1 if the camera gain / noise model is right
         if px:
             meta['pixel_nm'] = 1000.0 * float(px)
         pos = [cat('xy', (0, 2))]
@@ -163,14 +166,15 @@ class PSF:
                             at_limit=cat('lim', (0,)).bool()), meta)
 
     def localize(self, movie, camera=None, frames=None, threshold=6.0, chunk=500, block=5000, progress=None,
-                 stop=None, pixel_um=None, **detect_kw):
+                 stop=None, pixel_um=None, iters=30, zstarts=5, batch=4000, **detect_kw):
         """Localize a movie: detection -> spot ROIs (roisize = self.roisize) -> fit, in blocks of `block` frames.
 
         movie: path (.tif / .npy), array [T, H, W] or reader (torch_psf.movie). camera: Camera or calibration json path
         (None: the movie is in photons). frames: (f0, f1). threshold: x noise of the band-pass filtered frame.
-        progress(frames_done, frames_total, n_locs), stop() -> bool: callbacks. detect_kw: detect_spots options
-        (sigma, nms, noise, isolation, median). Returns a Dataset (image coordinates; ids 0..n-1; meta image_size,
-        n_frames)."""
+        progress(frames_done, frames_total, n_locs) (after every chunk), stop() -> bool: callbacks. iters, zstarts,
+        batch: passed to fit (zstarts=1 for near-2D data is ~5x faster). detect_kw: detect_spots options (sigma, nms,
+        noise, isolation, median). Returns a Dataset (image coordinates; ids 0..n-1; meta image_size, n_frames,
+        chi2_median)."""
         if camera is not None and not isinstance(camera, Camera):
             camera = Camera.from_json(camera)
         mv = open_movie(movie)
@@ -178,9 +182,13 @@ class PSF:
         out = []
         for b0 in range(f0, f1, block):
             b1 = min(b0 + block, f1)
-            sp = extract_spots(mv, self.roisize, camera, (b0, b1), chunk, self.dev, threshold=threshold, **detect_kw)
+            nloc = sum(len(o) for o in out)
+            prog = None if progress is None else (lambda done, tot, n, b0=b0, nloc=nloc:
+                                                  progress(b0 - f0 + done, f1 - f0, nloc))
+            sp = extract_spots(mv, self.roisize, camera, (b0, b1), chunk, self.dev, threshold=threshold,
+                               progress=prog, **detect_kw)
             if len(sp):
-                out.append(self.fit(sp, pixel_um=pixel_um))
+                out.append(self.fit(sp, pixel_um=pixel_um, iters=iters, zstarts=zstarts, batch=batch))
             if progress is not None:
                 progress(b1 - f0, f1 - f0, sum(len(o) for o in out))
             if stop is not None and stop():
@@ -188,6 +196,8 @@ class PSF:
         if out:
             ds = Dataset.concatenate(out)
             ds['id'] = torch.arange(len(ds), dtype=torch.int64)
+            if len(ds):
+                ds.meta['chi2_median'] = float(ds['chi2'].median())
         else:
             ds = self.fit(torch.zeros(0, self.roisize, self.roisize), pixel_um=pixel_um)
         ds.meta.update(image_size=[int(v) for v in mv.shape[-2:]], n_frames=int(f1),
@@ -207,12 +217,13 @@ class PSF:
     def save(self, path, camera=None, provenance=None, source=None):
         """Write the model to a PSF json (format 'torch-psf': type, optics, model parameters; see the subclass) plus an
         .npz next to it when there are arrays (pupil maps, knots). source: for a spline, the vectorial model it was
-        built from (its parameters are stored too). camera: optional Camera. Returns the json dict."""
+        built from (its parameters are stored too). camera: optional Camera. provenance: dict stored with the model
+        (default: self.provenance, which the estimators set to their settings and report). Returns the json dict."""
         d, arrays = self._file_dict(source)
         d = dict(format=FORMAT, version=VERSION, type=self.type_name, **d)
         if camera is not None:
             d['camera'] = camera.to_dict()
-        d['provenance'] = provenance or {}
+        d['provenance'] = _plain(provenance if provenance is not None else (self.provenance or {}))
         path = str(path)
         if arrays:
             npz = os.path.splitext(path)[0] + '.npz'
@@ -251,8 +262,11 @@ class PSF:
         d, arrays, typ = PSF.read_file(path)
         if typ not in PSF._registry:
             raise ValueError(f'unknown PSF type {typ!r} (known: {sorted(PSF._registry)})')
-        return PSF._registry[typ]._from_file(d, arrays, roisize=roisize, device=device, angle=angle, npupil=npupil,
-                                             oversample=oversample)
+        psf = PSF._registry[typ]._from_file(d, arrays, roisize=roisize, device=device, angle=angle, npupil=npupil,
+                                            oversample=oversample)
+        if d.get('provenance'):
+            psf.provenance = d['provenance']
+        return psf
 
     # ------------------------------------------------------------------ cubic spline
     def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8):

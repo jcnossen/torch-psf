@@ -159,6 +159,16 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
         rep['height_um'] = float(height)
     with torch.no_grad():
         ph = photons(slice(None)).detach()
+        # gain / statistics check: median over bead planes of the mean (d - mu)^2 / mu per pixel (~1 if Poisson)
+        c2 = []
+        for i in range(nb):
+            mu = model(torch.tensor([i], device=dev))
+            c2.append(((d[i].reshape(-1, P, P) - mu) ** 2 / mu.clamp_min(1e-6)).flatten(1).mean(1))
+        c2 = torch.stack(c2)
+        tr = torch.ones(nb, dtype=torch.bool, device=c2.device) if w is None else (w > 0)
+        rep['chi2_median'] = float(c2[tr].median())
+        if not bool(tr.all()):
+            rep['heldout_chi2_median'] = float(c2[~tr].median())
     return _result(psf, rep, hist, dict(xy=xy.detach(), photons=ph, bg=bg.detach(),
                                         drift=None if dr is None else dr.detach(),
                                         dz_scale=None if log_s is None else float(torch.exp(log_s)),

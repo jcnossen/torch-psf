@@ -34,6 +34,7 @@ import importlib
 import json
 import os
 import sys
+import zipfile
 import h5py
 import numpy as np
 import torch
@@ -436,16 +437,23 @@ class Dataset:
             img = gaussian_filter(img, sigma_nm / pixel_nm)
         return (img, (x0, x0 + nx / s, y0, y0 + ny / s)) if return_extent else img
 
-    def frc(self, block=300, pixel_nm=5.0, return_curve=False):
+    def frc(self, block=300, pixel_nm=5.0, return_curve=False, region=None, mask=None):
         """Fourier ring correlation resolution (nm) between the localizations of even and odd blocks of `block` frames:
         histograms on a square grid of pixel_nm (covering both halves), FRC per integer ring, 5-ring moving average,
         resolution at the first ring (>= 3) below 1/7 (nan if none). Needs meta['pixel_nm']. return_curve: also the ring
-        frequencies (1/nm) and the curve."""
+        frequencies (1/nm) and the curve. region: (x0, y0, x1, y1) px, only the localizations inside; mask: bool [n],
+        only these rows (e.g. without fiducials, which correlate between the halves). Memory: float32 histograms and
+        real FFTs (a 5000^2 grid needs ~0.5 GB)."""
         px = self.pixel_nm
         if px is None:
             raise ValueError("meta['pixel_nm'] is not set")
         p = self.fields['pos'].cpu().numpy()
         f = self.fields['frame'].cpu().numpy()
+        sel = np.ones(len(p), bool) if mask is None else np.asarray(_tensor(mask).cpu().numpy(), bool)
+        if region is not None:
+            x0, y0, x1, y1 = region
+            sel &= (p[:, 0] >= x0) & (p[:, 0] < x1) & (p[:, 1] >= y0) & (p[:, 1] < y1)
+        p, f = p[sel], f[sel]
         h = (f // block) % 2 == 0
         xa, ya, xb, yb = p[h, 0], p[h, 1], p[~h, 0], p[~h, 1]
         s = px / pixel_nm
@@ -454,13 +462,21 @@ class Dataset:
         n = int((hi - lo) * s)
         n += n % 2
         rng = [[lo, lo + n / s], [lo, lo + n / s]]
-        hist = lambda x, y: np.histogram2d(y, x, bins=n, range=rng)[0]
-        A, B = np.fft.fftshift(np.fft.fft2(hist(xa, ya))), np.fft.fftshift(np.fft.fft2(hist(xb, yb)))
-        yy, xx = np.indices(A.shape) - n // 2
-        rr = np.hypot(xx, yy).astype(int)
-        num = np.bincount(rr.ravel(), (A * B.conj()).real.ravel())
-        da = np.bincount(rr.ravel(), (np.abs(A) ** 2).ravel())
-        db = np.bincount(rr.ravel(), (np.abs(B) ** 2).ravel())
+        hist = lambda x, y: np.histogram2d(y, x, bins=n, range=rng)[0].astype(np.float32)
+        A = np.fft.rfft2(hist(xa, ya)).astype(np.complex64)
+        B = np.fft.rfft2(hist(xb, yb)).astype(np.complex64)
+        # rings over the half plane of the real FFT; columns 1 .. n/2 - 1 stand for two coefficients each
+        ky = np.round(np.fft.fftfreq(n, 1.0 / n))[:, None]
+        kx = np.arange(A.shape[1], dtype=np.float64)[None, :]
+        rr = np.hypot(ky, kx).astype(np.int32).ravel()
+        w = np.full(A.shape[1], 2.0, np.float32)
+        w[0] = 1.0
+        w[-1] = 1.0
+        w = np.broadcast_to(w[None, :], A.shape).ravel()
+        num = np.bincount(rr, w * (A * B.conj()).real.ravel())
+        da = np.bincount(rr, w * (np.abs(A) ** 2).ravel())
+        db = np.bincount(rr, w * (np.abs(B) ** 2).ravel())
+        del A, B
         c = np.convolve(num / np.sqrt(da * db + 1e-12), np.ones(5) / 5, 'same')
         below = np.nonzero(c[3:n // 2] < THRESHOLD_FRC)[0]
         res = float('nan') if len(below) == 0 else float(n * pixel_nm / (below[0] + 3))
@@ -506,7 +522,8 @@ class Dataset:
 
     @classmethod
     def load(cls, path, **kw):
-        """By extension: .hdf5 / .h5 (this format, or a Picasso file: one with a 'locs' table), .csv (ThunderSTORM)."""
+        """By extension: .hdf5 / .h5 (this format, or a Picasso file: one with a 'locs' table), .csv (ThunderSTORM),
+        .smlm (ShareLoc; needs pixel_nm)."""
         ext = os.path.splitext(str(path))[1].lower()
         if ext in ('.hdf5', '.h5'):
             with h5py.File(path, 'r') as f:
@@ -514,6 +531,8 @@ class Dataset:
             return cls.load_picasso(path, **kw) if picasso else cls.load_hdf5(path)
         if ext == '.csv':
             return cls.load_csv(path, **kw)
+        if ext == '.smlm':
+            return cls.load_smlm(path, **kw)
         raise ValueError(f'unknown file type {ext!r}')
 
     def save_hdf5(self, path):
@@ -687,6 +706,45 @@ class Dataset:
         for k, v in R.items():
             F[k.split(' [')[0]] = v
         return cls(F, dict(source=os.path.abspath(str(path)), format='thunderstorm csv', pixel_nm=float(pixel_nm)))
+
+    @classmethod
+    def load_smlm(cls, path, pixel_nm, frame_base=1, offset_px=0.5):
+        """A ShareLoc.XYZ .smlm file (zip: manifest.json + a binary table) -> Dataset in px. Positions in nm with the
+        ThunderSTORM conventions of most ShareLoc tables (frames from 1, first pixel centre at 0.5 px; override with
+        frame_base / offset_px). Columns: x, y (z) -> pos; uncertainty_* -> crlb; intensity_* -> photons; offset_* ->
+        bg; frame, id, chi2; the rest are kept under their names. The first table of the file is read."""
+        z = zipfile.ZipFile(str(path))
+        m = json.loads(z.read('manifest.json'))
+        f = next(q for q in m['files'] if q.get('type', 'table') == 'table')
+        fmt = m['formats'][f['format']]
+        if fmt.get('mode', 'binary') != 'binary':
+            raise ValueError(f"only binary .smlm tables are supported (mode {fmt.get('mode')!r})")
+        dt = np.dtype([(h, d) for h, d in zip(fmt['headers'], fmt['dtype'])])
+        a = np.frombuffer(z.read(f['name']), dtype=dt, count=int(f['rows']))
+        R = {h: a[h].astype(np.float64) for h in fmt['headers']}
+        pick = lambda pred: next((R.pop(h) for h in list(R) if pred(h.lower())), None)
+        x, y = R.pop('x'), R.pop('y')
+        zz = pick(lambda h: h in ('z', 'z_nm', 'z_nm_'))
+        pos = [x / pixel_nm - offset_px, y / pixel_nm - offset_px] + ([zz / pixel_nm] if zz is not None else [])
+        F = dict(pos=np.stack(pos, 1), frame=np.round(R.pop('frame')).astype(np.int32) - frame_base)
+        ux = pick(lambda h: h.startswith('uncertainty_x'))
+        uy = pick(lambda h: h.startswith('uncertainty_y'))
+        uz = pick(lambda h: h.startswith('uncertainty_z'))
+        u = pick(lambda h: h.startswith('uncertainty'))
+        if ux is None and u is not None:
+            ux = uy = u
+        if ux is not None:
+            F['crlb'] = np.stack([ux, uy] + ([uz if uz is not None else np.zeros_like(ux)] if zz is not None
+                                             else []), 1) / pixel_nm
+        for pre, dst in (('intensity', 'photons'), ('offset', 'bg')):
+            v = pick(lambda h, pre=pre: h.startswith(pre))
+            if v is not None:
+                F[dst] = v
+        if 'id' in R:
+            F['id'] = R.pop('id').astype(np.int64)
+        for k, v in R.items():
+            F[k.rstrip('_')] = v
+        return cls(F, dict(source=os.path.abspath(str(path)), format='shareloc smlm', pixel_nm=float(pixel_nm)))
 
 
 def _read_yaml(path):

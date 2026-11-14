@@ -31,8 +31,10 @@ def filter_frames(frames, sigma=(2.0, 6.0), median=False):
 def detect_spots(frames, threshold=6.0, sigma=(2.0, 6.0), nms=9, noise='mad', border=0, isolation=None, median=False):
     """Local maxima of the band-pass filtered frames [T, H, W] (photons, on any device).
 
-    threshold: in units of the noise of the filtered image: 'std' (per frame standard deviation) or 'mad' (robust,
-    1.4826 x median absolute deviation over the whole chunk). nms: size of the max-pool window (px). border: peaks
+    threshold: in units of the noise of the filtered image: 'std' (per frame standard deviation), 'mad' (robust,
+    1.4826 x median absolute deviation over the whole chunk) or 'mad_frame' (the same per frame: for movies whose
+    density or background changes within a chunk, e.g. dense blinking early in a dSTORM movie, where one noise level
+    for the chunk raises the threshold of the sparse frames). nms: size of the max-pool window (px). border: peaks
     closer than this to the frame edge are dropped. isolation: if given (px), peaks with another peak within this
     Chebyshev distance in the same frame are dropped (both of them).
     Returns dict(frame, y, x, score) of long / float tensors (frame relative to frames[0]); score = filtered value /
@@ -43,6 +45,9 @@ def detect_spots(frames, threshold=6.0, sigma=(2.0, 6.0), nms=9, noise='mad', bo
         sig = f.flatten(1).std(1)[:, None, None]
     elif noise == 'mad':
         sig = 1.4826 * (f - f.median()).abs().median()
+    elif noise == 'mad_frame':
+        ff = f.flatten(1)
+        sig = 1.4826 * (ff - ff.median(1, keepdim=True).values).abs().median(1).values[:, None, None]
     else:
         raise ValueError(noise)
     mx = Fn.max_pool2d(f[:, None], nms, 1, nms // 2)[:, 0]

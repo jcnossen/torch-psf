@@ -26,7 +26,8 @@ super-resolution image coloured by z. (g) Sections of an astigmatic and a tetrap
 ```python
 import torch, torch_psf as tp
 
-camera = tp.Camera(gain_e_per_adu=0.5, offset_adu=100.0, readnoise_e=1.5)
+camera = tp.Camera(gain_e_per_adu=0.5, offset_adu=100.0, readnoise_e=1.5)   # or measured from the movie:
+# camera, _ = tp.photon_transfer('movie.tif', excess_noise=2.0)               # (EMCCD: excess noise factor F^2 = 2)
 psf = tp.InSituEstimator(start=tp.PSF.load('beads.json'), camera=camera).estimate('movie.tif')   # PSF from the data
 spline = psf.to_spline(roisize=13, z_range=(0.0, 0.8))                         # fast form of the same PSF
 locs = spline.localize('movie.tif', camera, frames=(0, 1000))                   # Dataset: pos, crlb, photons, bg, ...
@@ -132,7 +133,8 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `estimators.py` | `ZStackEstimator`, `InSituEstimator`. |
 | `insitu/` | the estimation steps (bead fit, knot-route fits, free knots, tracks), held-out checks. |
 | `dataset.py` | `Dataset`: the localizations (dict of tensors; format in [docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)). |
-| `config.py`, `movie.py`, `io.py` | `Optics`, `Camera` (scalars or per-pixel maps), movie readers, PSF files. |
+| `config.py`, `movie.py`, `io.py` | `Optics`, `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs), movie readers (TIFF incl. ImageJ > 4 GB and multi-part, memory-mapped), PSF files. |
+| `calibrate.py` | `photon_transfer`: camera offset and gain from the background pixels of a movie. |
 | `__main__.py`, `viewer.py` | the command line, the viewer server. |
 
 **PSF file**: one JSON (`format: "torch-psf"`, `type`, `optics`, `zernike_noll`, `zernike_waves`, `focus_um`, optional

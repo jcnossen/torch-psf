@@ -184,11 +184,22 @@ class CubicSplinePSF(PSF):
         self.dev = self.knots.device
         return self
 
+    def resized(self, roisize, device=None):
+        """The same spline (the same knots, shared, not copied) for roisize x roisize ROIs. The knots tabulate the PSF
+        independently of the ROI size; a larger ROI than the knots cover reduces the offset limit (xy_limit), a
+        smaller one keeps it."""
+        s = CubicSplinePSF(roisize, self.z_range, oversample=self.S, dz_um=self.hz, zpad=self.zpad, xy_limit=self.xmax,
+                           device=self.dev if device is None else device, dtype=self.dtype, knots=self.knots,
+                           knot_u0_px=self.u0, knot_z0_um=self.z0, pixel_um=self.pixel_um)
+        s.provenance = self.provenance
+        return s
+
     def to_spline(self, roisize=None, z_range=None, **kw):
-        """A cubic spline is already a spline: returns self (other arguments are not supported)."""
-        if (roisize not in (None, self.roisize)) or (z_range is not None and tuple(z_range) != self.z_range) or kw:
-            raise ValueError('re-tabulating a spline is not supported; build it from the source model')
-        return self
+        """A cubic spline is already a spline: returns self, or resized(roisize) for another ROI size (other
+        arguments are not supported)."""
+        if (z_range is not None and tuple(z_range) != self.z_range) or kw:
+            raise ValueError('re-tabulating a spline on another grid is not supported; build it from the source model')
+        return self if roisize in (None, self.roisize) else self.resized(roisize)
 
     # ------------------------------------------------------------------ knots from a vectorial model
     def _vec_positions(self):
