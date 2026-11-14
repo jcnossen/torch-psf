@@ -6,12 +6,12 @@ tracked).
 
 Cases:
   movie.tif + movie.json       a seeded movie (torch_psf.simulate.simulate_movie, astigmatic vectorial PSF via its
-                               ConvSplinePSF), its optics and truth
+                               ConvCubicSplinePSF), its optics and truth
   detect.json                  torch_psf.spots.extract_spots on it (chunk = 100 frames, threshold 6, border h + 2):
                                frame, corner, score per spot, and the noise / median of each chunk
-  localize.npz / .json         the spline knots (ConvSplinePSF.from_vectorial), the ROIs of the first 600 detections,
+  localize.npz / .json         the spline knots (VectorialPSF.to_spline), the ROIs of the first 600 detections,
                                torch_psf.fit.localize (theta, nll) and crlb, and the table columns
-                               (torch_psf.pipeline.localize_spots)
+                               (theta, nll, crlb, chi2 as the localization table of PSF.fit)
 """
 import argparse, json, os, sys
 import numpy as np
@@ -26,12 +26,11 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, a.torch_psf)
 import torch, tifffile
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import ConvSplinePSF
+from torch_psf.spline import ConvCubicSplinePSF
 from torch_psf.simulate import simulate_movie
 from torch_psf.spots import extract_spots
 from torch_psf.detect import filter_frames
-from torch_psf.fit import localize, crlb
-from torch_psf.pipeline import localize_spots
+from torch_psf.fit import localize, crlb, model_and_jacobian, at_limit
 
 os.makedirs(a.out, exist_ok=True)
 dev = a.device
@@ -45,7 +44,7 @@ vec = VectorialPSF(P, zernike_indices=NOLL, npupil=64, oversample=2, device=dev,
 with torch.no_grad():
     for j, v in ZC.items():
         vec.zcoef[NOLL.index(j)] = v
-spl = ConvSplinePSF.from_vectorial(vec, P, ZR, **GRID)
+spl = vec.to_spline(P, ZR, **GRID)
 
 movie, truth = simulate_movie(spl.render, P, T=300, H=96, W=112, nsites=120, p_on=0.01, mean_on=3.0, bg=20.0,
                               photons=3000.0, z_range=(0.1, 0.7), seed=3, device=dev)
@@ -71,21 +70,25 @@ n = min(600, len(sp))
 s = sp.subset(slice(0, n))
 th, nll = localize(spl, s.rois)
 cr = crlb(spl, th)
-tab = localize_spots(s, spl)
+mu, _ = model_and_jacobian(spl, th)
+h = (P - 1) // 2
+tab = dict(frame=s.frame.cpu().numpy(), x=(s.corner[:, 0] + h + th[:, 0]).cpu().numpy(), y=(s.corner[:, 1] + h + th[:, 1]).cpu().numpy(),
+           z=th[:, 2].cpu().numpy(), chi2=((s.rois - mu) ** 2 / mu.clamp_min(1e-6)).flatten(1).mean(1).cpu().numpy(),
+           at_limit=at_limit(th, spl).cpu().numpy().astype(np.uint8))
 np.savez(os.path.join(a.out, 'localize.npz'), knots=spl.knots.cpu().numpy(), rois=s.rois.cpu().numpy(),
          theta=th.cpu().numpy(), nll=nll.cpu().numpy(), crlb=cr.cpu().numpy(),
-         **{'tab_' + k: (tab[k].astype(np.uint8) if tab[k].dtype == bool else tab[k]) for k in tab.dtype.names})
+         **{'tab_' + k: v for k, v in tab.items()})
 json.dump(dict(n=n, z0=spl.z0, hz=spl.hz, S=spl.S, nz=spl.nz, nv=spl.nv, nu=spl.nu, xmax=spl.xmax, c=spl.c,
                z_limits=spl.z_limits), open(os.path.join(a.out, 'localize.json'), 'w'), indent=1)
 print('localized', n, 'median |x - truth| etc. not checked here')
 
 # ---------------------------------------------------------------------------------------------- in-situ fit
 # a reference movie (simulate_reference_movie, astigmatic preset: Zernikes {5: 0.02, 6: 0.10, 11: 0.03}, focus 0.4 um,
-# z 0 .. 0.8 um, camera gain 0.5 e-/ADU, offset 100, read noise 1.5 e-) and estimate_psf_insitu from a start PSF with
-# only Noll 6 = 0.07
+# z 0 .. 0.8 um, camera gain 0.5 e-/ADU, offset 100, read noise 1.5 e-) and InSituEstimator from a start PSF with
+# only Noll 6 = 0.07 (defaults: overlap rejection on, deviance_k 3, second pass with 3/4 of the iterations)
 from torch_psf.simulate import simulate_reference_movie
-from torch_psf.pipeline import estimate_psf_insitu
-from torch_psf.insitu import knot_gradient, split_checkerboard
+from torch_psf.estimators import InSituEstimator
+from torch_psf.insitu import knot_gradient, split_checkerboard, fit_zernike_knots
 from torch_psf.spline import emitter_height_pos_fn
 INS = dict(T=1500, H=96, W=96, emitters_per_frame=8.0, seed=5)
 r = simulate_reference_movie('astigmatic', device=dev, **INS)
@@ -95,21 +98,21 @@ start = VectorialPSF(15, zernike_indices=NOLL, npupil=64, oversample=3, device=d
                      pixel_um=0.108, NA=1.49, wavelength_um=0.68, n_imm=1.518, n_med=1.33)
 with torch.no_grad():
     start.zcoef[NOLL.index(6)] = 0.07
-hist = []
-est = estimate_psf_insitu(r['movie_adu'], psf=start, camera=r['camera'], roisize=15, z_range=(0.0, 0.8), nspots=3000,
-                          nheldout=1500, iters=40, device=dev, log=lambda it, nll, s, zc: hist.append(dict(it=it, nll=nll, zcoef=zc.tolist())))
-rep = est.report
+estm = InSituEstimator(start=start, camera=r['camera'], roisize=15, z_range=(0.0, 0.8), nspots=3000, nheldout=1500, iters=40,
+                       device=dev)
+psf_fit = estm.estimate(r['movie_adu'])
+rep = estm.report
 json.dump(dict(params=r['params'], optics=dict(pixel_um=0.108, NA=1.49, wavelength_um=0.68, n_imm=1.518, n_med=1.33),
                noll=NOLL, truth_zernike={str(j): float(truth_vec.zcoef[truth_vec.zidx.index(j)]) for j in NOLL if j in truth_vec.zidx},
                start_zernike={'6': 0.07}, focus_um=0.4, z_range=[0.0, 0.8], roisize=15, nspots=3000, nheldout=1500, iters=40,
-               final_zernike=est.psf.zcoef.tolist(), history=hist,
+               final_zernike=psf_fit.zcoef.tolist(),
                report={k: v for k, v in rep.items() if isinstance(v, (int, float, str, dict, list)) or v is None}),
           open(os.path.join(a.out, 'insitu.json'), 'w'), indent=1, default=float)
-print('insitu: spots', rep.get('n_spots'), 'train', rep.get('n_train'), 'final', np.round(est.psf.zcoef.tolist(), 4).tolist())
+print('insitu: spots', rep.get('n_spots'), 'train', rep.get('n_train'), 'rejected', rep.get('n_rejected'), 'final', np.round(psf_fit.zcoef.tolist(), 4).tolist())
 print('heldout', rep.get('heldout'), 'z_scale', rep.get('z_scale'), 'at_limit', rep.get('at_limit'))
 
 # the gradient at the start: spline grid of estimate_psf_insitu (zpad 5), theta by localize, knot gradient, VJP
-spl5 = ConvSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
+spl5 = ConvCubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 big = start.resized(spl5.Pl)
 pf = emitter_height_pos_fn(0.4)
 spl5.knots = spl5.knots_from_vectorial(big, pf, chunk=spl5.nz)
@@ -124,3 +127,16 @@ np.savez(os.path.join(a.out, 'insitu_grad.npz'), knots=spl5.knots.cpu().numpy(),
          theta=th.cpu().numpy(), gK=gK.cpu().numpy(), gz=gz.cpu().numpy(), nll=np.float64(nll0),
          train_frame=sp.frame[tr].cpu().numpy(), train_corner=sp.corner[tr].cpu().numpy())
 print('gradient: nll', nll0, 'gz', np.round(gz.cpu().numpy(), 2).tolist())
+
+# fit_zernike_knots alone on these training ROIs (no overlap rejection), with the Zernikes of every iteration
+hist = []
+spl5b = ConvCubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
+fz = fit_zernike_knots(spl5b, d, start, iters=40, log=lambda it, nll, sec, zc: hist.append(dict(it=it, nll=nll, zcoef=zc.tolist())))
+json.dump(dict(final_zernike=fz['psf'].zcoef.tolist(), history=hist), open(os.path.join(a.out, 'insitu_fit.json'), 'w'), indent=1)
+print('fit_zernike_knots only:', np.round(fz['psf'].zcoef.tolist(), 4).tolist())
+
+# the spot deviance of the overlap rejection (insitu.spot_deviance) on these ROIs with the start spline
+from torch_psf.insitu import spot_deviance
+dv, thd = spot_deviance(spl5, d)
+np.savez(os.path.join(a.out, 'insitu_deviance.npz'), deviance=dv.astype(np.float32), theta=thd.cpu().numpy())
+print('deviance: median', float(np.median(dv)), 'above 1.283:', int((dv > 1 + 3 * np.sqrt(2 / 225)).sum()))

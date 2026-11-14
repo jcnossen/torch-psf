@@ -242,6 +242,7 @@ export function startApp(root: HTMLElement) {
     optics: optics(), gain: n('o-gain'), offset: n('o-offset'), readnoise_e: n('o-rn'), focus_um: n('m-focus'), zlo: n('m-zlo'), zhi: n('m-zhi'),
     roisize: Math.round(n('m-roi')), threshold: n('m-thr'), isolation: Math.round(n('m-iso')), chunk: Math.round(n('m-chunk')), maxFrames: Math.round(n('m-frames')),
     npupil: 64, oversample: 3, noll: psf.noll, zcoef: psf.zcoef, nspots: Math.round(n('m-nspots')), nheldout: Math.round(n('m-nheld')), iters: Math.round(n('m-iters')), tile: 16,
+    rejectOverlap: n('m-devk') > 0, devianceK: n('m-devk'),
   });
 
   // --- progress, stop
@@ -327,6 +328,7 @@ export function startApp(root: HTMLElement) {
     $('p-insitu').hidden = false;
     const rows: [string, string][] = [
       ['spots (fit / held out)', `${r.n_train} / ${r.n_test} of ${r.n_spots}, from ${r.frames_read} of ${r.frames_total} frames`],
+      ['overlapping spots rejected', r.deviance_threshold === null ? 'off' : `${r.n_rejected} (deviance per pixel > ${r.deviance_threshold.toFixed(3)}), then a second pass`],
       ['iterations', `${r.iterations}${r.partial ? ' (stopped early)' : ''}, ${r.seconds.toFixed(1)} s`],
       ['held-out NLL / px, fitted - start', r.heldout ? `${r.heldout.diff.toFixed(4)} (negative: the fitted PSF explains spots it was not fitted to better)` : 'no held-out spots'],
       ['z scale vs the start PSF', `${r.z_scale.toFixed(3)} (offset ${(1000 * r.z_offset_um).toFixed(0)} nm)`],
@@ -578,11 +580,12 @@ const TEMPLATE = `
           ${num('m-roi', 'ROI (px, odd)', 15, '2')}${num('m-thr', 'detection threshold (x noise)', 6)}${num('m-iso', 'isolation (px, 0 = off)', 0, '1')}
           ${num('m-nspots', 'spots for the fit', 8000, '1')}${num('m-nheld', 'held-out spots', 4000, '1')}${num('m-iters', 'iterations', 80, '1')}
           ${num('m-chunk', 'frames per chunk', 500, '1', 'the detection noise is estimated per chunk (torch_psf default 500)')}${num('m-frames', 'max frames (0 = all)', 0, '1')}
+          ${num('m-devk', 'overlap rejection k (0 = off)', 3, 'any', 'after the first pass, spots with a Poisson deviance per pixel above 1 + k sqrt(2 / P^2) are dropped and the fit is repeated (torch_psf InSituEstimator deviance_k)')}
           <label>start PSF <select id="m-psf"><option value="guess">generic astigmatic (Noll 6 = 0.08)</option><option value="view">the PSF in the 3D view</option><option value="insitu">the last in-situ estimate</option><option value="json">a PSF json file</option></select></label>
           <input id="m-psfjson" type="file" accept=".json" hidden><span id="m-psfinfo" class="note"></span>
         </div>
         <div class="buttons"><button id="m-loc" title="localize with the start PSF (or the last estimate), without estimating the PSF">Localize only</button></div>
-        <p class="note">Defaults of torch_psf.estimate_psf_insitu / localize_movie; every step is a port of the Python code and is tested against it.</p>
+        <p class="note">Defaults of torch_psf InSituEstimator / PSF.localize; every step is a port of the Python code and is tested against it.</p>
       </details>
     </div>
     <div id="tab-stack" hidden>

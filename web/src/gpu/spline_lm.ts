@@ -24,6 +24,7 @@ export interface LocResult {
   nll: Float32Array;     // [N]
   crlb: Float32Array;    // [N, 5]
   chi2: Float32Array;    // [N]
+  deviance: Float32Array; // [N] Poisson deviance per pixel (torch_psf.insitu.spot_deviance)
 }
 
 /** torch.quantile(x, q) with linear interpolation. */
@@ -69,8 +70,8 @@ export class SplineLocalizer {
   async run(rois: Float32Array, N: number, theta0: Float32Array, o: { iters?: number; fixed?: number[]; var?: number } = {}): Promise<LocResult> {
     const g = this.g, P2 = g.roisize ** 2;
     const mk = (size: number, usage = SU | CD) => this.dev.createBuffer({ size: Math.max(16, size), usage });
-    const bR = mk(N * P2 * 4), bT = mk(N * 20), bO = mk(N * 48, SU | CS), bU = mk(80, GPUBufferUsage.UNIFORM | CD);
-    const rb = this.dev.createBuffer({ size: Math.max(16, N * 48), usage: GPUBufferUsage.MAP_READ | CD });
+    const bR = mk(N * P2 * 4), bT = mk(N * 20), bO = mk(N * 52, SU | CS), bU = mk(80, GPUBufferUsage.UNIFORM | CD);
+    const rb = this.dev.createBuffer({ size: Math.max(16, N * 52), usage: GPUBufferUsage.MAP_READ | CD });
     try {
       this.dev.queue.writeBuffer(bR, 0, rois.buffer, rois.byteOffset, N * P2 * 4);
       this.dev.queue.writeBuffer(bT, 0, theta0.buffer, theta0.byteOffset, N * 20);
@@ -96,15 +97,15 @@ export class SplineLocalizer {
         pass.dispatchWorkgroups(Math.min(per, N - first));
         pass.end();
         if (first + per < N) this.dev.queue.submit([e.finish()]);
-        else { e.copyBufferToBuffer(bO, 0, rb, 0, N * 48); this.dev.queue.submit([e.finish()]); }
+        else { e.copyBufferToBuffer(bO, 0, rb, 0, N * 52); this.dev.queue.submit([e.finish()]); }
       }
       await rb.mapAsync(GPUMapMode.READ);
       const out = new Float32Array(rb.getMappedRange().slice(0));
       rb.unmap();
-      const r: LocResult = { theta: new Float32Array(N * 5), nll: new Float32Array(N), crlb: new Float32Array(N * 5), chi2: new Float32Array(N) };
+      const r: LocResult = { theta: new Float32Array(N * 5), nll: new Float32Array(N), crlb: new Float32Array(N * 5), chi2: new Float32Array(N), deviance: new Float32Array(N) };
       for (let n = 0; n < N; n++) {
-        for (let k = 0; k < 5; k++) { r.theta[n * 5 + k] = out[n * 12 + k]; r.crlb[n * 5 + k] = out[n * 12 + 6 + k]; }
-        r.nll[n] = out[n * 12 + 5]; r.chi2[n] = out[n * 12 + 11];
+        for (let k = 0; k < 5; k++) { r.theta[n * 5 + k] = out[n * 13 + k]; r.crlb[n * 5 + k] = out[n * 13 + 6 + k]; }
+        r.nll[n] = out[n * 13 + 5]; r.chi2[n] = out[n * 13 + 11]; r.deviance[n] = out[n * 13 + 12];
       }
       return r;
     } finally { for (const b of [bR, bT, bO, bU, rb]) b.destroy(); }
@@ -164,7 +165,7 @@ export class SplineLocalizer {
       const r = await this.run(rois, N, this.initialTheta(rois, N, z), o);
       if (!best) { best = r; continue; }
       for (let n = 0; n < N; n++) if (r.nll[n] < best.nll[n]) {
-        best.nll[n] = r.nll[n]; best.chi2[n] = r.chi2[n];
+        best.nll[n] = r.nll[n]; best.chi2[n] = r.chi2[n]; best.deviance[n] = r.deviance[n];
         for (let q = 0; q < 5; q++) { best.theta[n * 5 + q] = r.theta[n * 5 + q]; best.crlb[n * 5 + q] = r.crlb[n * 5 + q]; }
       }
     }

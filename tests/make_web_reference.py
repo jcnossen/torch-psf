@@ -1,7 +1,7 @@
 """Reference data for the web tests (web/test/), GENERATED on the fly into web/test/.cache/ (not tracked).
 web/test/run_tests.py runs this script when the cache is missing or this file has changed.
 
-The reference is torch_psf itself (torch_psf.vectorial.VectorialPSF, torch_psf.spline.ConvSplinePSF), imported from
+The reference is torch_psf itself (torch_psf.vectorial.VectorialPSF, torch_psf.spline.ConvCubicSplinePSF), imported from
 this repository; no other package and no calibration / fit result is used: all test PSFs are generated from known
 parameters (the web app's tetrapod-like and astigmatic presets).
 
@@ -10,7 +10,7 @@ parameters (the web app's tetrapod-like and astigmatic presets).
 Outputs:
   forward.json / forward.npz   forward cases: PSF images [B, R, R] and the Jacobian [B, 21, R, R] (x px, y px, focus um,
                                z_e um, Zernike Noll 5..21 waves; forward-mode AD)
-  knots.json / knots.npz       spline knots of torch_psf ConvSplinePSF (knots_from_vectorial) for the astigmatic preset
+  knots.json / knots.npz       spline knots of torch_psf ConvCubicSplinePSF (knots_from_vectorial) for the astigmatic preset
   tiff/*.tif, tiff.json/.npz   TIFF reader cases (compressions, BigTIFF, tiles, dtypes, byte order, multi-part)
   stack_<name>.tif, <name>.json  simulated bead z-stacks (3 beads, Poisson noise) of the presets 'astig' and 'tetrapod'
   fit_ref.json                 the Python fit of the web's bead model (web/src/fit/beads.ts) on both simulated stacks and
@@ -253,10 +253,10 @@ def make_sim(name):
 
 # ---------------------------------------------------------------- spline knots
 def make_knots():
-    from torch_psf.spline import ConvSplinePSF, emitter_height_pos_fn
+    from torch_psf.spline import ConvCubicSplinePSF, emitter_height_pos_fn
     o = dict(roisize=13, pixel_um=0.1, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68, npupil=64, oversample=3)
     zc = np.array([ASTIG_Z.get(j, 0.0) for j in ZIDX], np.float32)
-    sp = ConvSplinePSF(o['roisize'], (0.0, 0.4), oversample=2, dz_um=0.04, zpad=3, xy_limit=3.0, device=dev)
+    sp = ConvCubicSplinePSF(o['roisize'], (0.0, 0.4), oversample=2, dz_um=0.04, zpad=3, xy_limit=3.0, device=dev)
     m = vec(dict(o, roisize=sp.Pl))
     with torch.no_grad():
         m.zcoef.copy_(torch.tensor(zc, device=dev))

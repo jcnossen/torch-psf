@@ -36,7 +36,10 @@ export interface MovieForm {
   zpad?: number;                                          // spline knot planes beyond the z range (default 2)
 }
 
-export interface InsituForm extends MovieForm { nspots: number; nheldout: number; iters: number; tile: number; }
+export interface InsituForm extends MovieForm {
+  nspots: number; nheldout: number; iters: number; tile: number;
+  rejectOverlap?: boolean; devianceK?: number;            // torch_psf InSituEstimator(reject_overlap=True, deviance_k=3)
+}
 export type MovieSourceSpec = 'demo' | File[];
 
 export type Req =

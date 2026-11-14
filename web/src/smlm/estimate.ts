@@ -1,7 +1,10 @@
-// SMLM movie -> in-situ vectorial PSF: a port of torch_psf.pipeline.estimate_psf_insitu (defaults: ROI 15 px, spline
-// oversample 2, dz 0.04 um, zpad 5, xy_limit 3; spots for the fit / held out split by a checkerboard of 16 px tiles;
-// fit_zernike_knots route K; held-out check = compare_heldout of the start and the fitted spline; z_scale of the fitted
-// knots against the start knots; fraction of fitted spots at the offset limit).
+// SMLM movie -> in-situ vectorial PSF: a port of torch_psf.estimators.InSituEstimator (method 'zernike', refine off;
+// defaults: ROI 15 px, spline oversample 2, dz 0.04 um, zpad 5, xy_limit 3; spots for the fit / held out split by a
+// checkerboard of 16 px tiles; fit_zernike_knots route K; overlap rejection: after the first pass each training spot is
+// re-localized with the first-pass spline and dropped if its Poisson deviance per pixel exceeds 1 + k sqrt(2 / P^2)
+// (k = 3), then a second pass with 3/4 of the iterations starts from the first-pass result; held-out check =
+// compare_heldout of the start and the fitted spline; z_scale of the fitted knots against the start knots; fraction of
+// fitted spots at the offset limit).
 import { Detector, extractRois } from '../gpu/detect';
 import { SplineLocalizer, splineGrid } from '../gpu/spline_lm';
 import { StopToken, Eta, Progress } from '../core/task';
@@ -11,7 +14,8 @@ import type { InsituForm } from '../ui/protocol';
 
 export interface InsituReport {
   zcoef: number[]; zcoef_start: number[]; noll: number[]; iterations: number; partial: boolean; seconds: number;
-  n_spots: number; n_train: number; n_test: number; frames_read: number; frames_total: number;
+  n_spots: number; n_train: number; n_test: number; n_rejected: number; deviance_threshold: number | null;
+  frames_read: number; frames_total: number;
   heldout: { start: number; fitted: number; diff: number } | null;   // mean NLL per pixel (constant dropped)
   z_scale: number; z_offset_um: number; at_limit: number; history: InsituIter[];
 }
@@ -59,13 +63,36 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   // 3. fit (route K) on the estimate_psf_insitu grid
   const g = splineGrid(P, form.zlo, form.zhi, 2, 0.04, 5, 3.0) as KnotGridFull;
   const cfg = { ...form.optics, roisize: 0, npupil: form.npupil, oversample: form.oversample, zernike_noll: form.noll };
-  const fit = await fitZernikeKnots(dev, dTr, tr.length, cfg, form.zcoef, g, form.focus_um, {
-    iters: form.iters, tok, log: (hh) => progress({ stage: 'fit', done: hh.it + 1, total: form.iters,
-      info: { nll_per_px: hh.nll / (tr.length * P2), zcoef: hh.zcoef.map((v) => v.toFixed(4)).join(' ') }, elapsed_s: hh.seconds }) });
-  const partial = fit.history.length < form.iters;
+  const reject = form.rejectOverlap ?? true, k = form.devianceK ?? 3.0;
+  const it2 = Math.max(Math.floor(form.iters * 3 / 4), 1);
+  const total = form.iters + (reject ? it2 : 0);
+  const logFit = (offset: number, nRoi: number, stage: string) => (hh: InsituIter) => progress({ stage, done: offset + hh.it + 1, total,
+    info: { nll_per_px: hh.nll / (nRoi * P2), zcoef: hh.zcoef.map((v) => v.toFixed(4)).join(' ') }, elapsed_s: hh.seconds });
+  const tFit0 = performance.now();
+  let fit = await fitZernikeKnots(dev, dTr, tr.length, cfg, form.zcoef, g, form.focus_um, { iters: form.iters, tok, log: logFit(0, tr.length, 'fit') });
+  let partial = fit.history.length < form.iters;
+  const K0 = fit.K0;
+  let nRej = 0, thr: number | null = null, nFit = tr.length, history = fit.history;
+  if (reject && !tok.stopEarly) {
+    // spot_deviance with the first-pass PSF tabulated as a spline (localized afresh: zstarts, 30 iterations)
+    const K1a = (await knotsAndJacobian(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um)).knots;
+    const loc = new SplineLocalizer(dev, g, K1a);
+    let dv: Float32Array;
+    try { dv = (await loc.localize(dTr, tr.length)).deviance; } finally { loc.destroy(); }
+    thr = 1 + k * Math.sqrt(2 / P2);
+    const keep: number[] = [];
+    for (let i = 0; i < tr.length; i++) if (dv[i] < thr) keep.push(i);
+    nRej = tr.length - keep.length; nFit = keep.length;
+    const dKeep = new Float32Array(keep.length * P2);
+    keep.forEach((i, q) => dKeep.set(dTr.subarray(i * P2, (i + 1) * P2), q * P2));
+    const fit2 = await fitZernikeKnots(dev, dKeep, keep.length, cfg, fit.zcoef, g, form.focus_um, { iters: it2, tok, log: logFit(form.iters, keep.length, 'fit (overlaps rejected)') });
+    partial = partial || fit2.history.length < it2;
+    history = [...fit.history, ...fit2.history];
+    fit = { ...fit2, K0 };
+  }
   // 4. report: at_limit, z_scale, held-out NLL of the start and the fitted spline
   let lim = 0;
-  for (let i = 0; i < tr.length; i++) if (Math.max(Math.abs(fit.theta[i * 5]), Math.abs(fit.theta[i * 5 + 1])) > g.xmax - 0.06) lim++;
+  for (let i = 0; i < nFit; i++) if (Math.max(Math.abs(fit.theta[i * 5]), Math.abs(fit.theta[i * 5 + 1])) > g.xmax - 0.06) lim++;
   progress({ stage: 'report', done: 0, total: 2 });
   const K1 = (await knotsAndJacobian(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um)).knots;
   const zs = await zScale(dev, K1, fit.K0, g);
@@ -79,7 +106,8 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     const a = await nllPx(fit.K0), b = await nllPx(K1);
     heldout = { start: a, fitted: b, diff: b - a };
   }
-  return { zcoef: fit.zcoef, zcoef_start: [...form.zcoef], noll: form.noll, iterations: fit.history.length, partial, seconds: fit.seconds,
-    n_spots: n, n_train: tr.length, n_test: te.length, frames_read: done, frames_total: mv.n, heldout,
-    z_scale: zs.scale, z_offset_um: zs.offset, at_limit: lim / tr.length, history: fit.history };
+  return { zcoef: fit.zcoef, zcoef_start: [...form.zcoef], noll: form.noll, iterations: history.length, partial,
+    seconds: (performance.now() - tFit0) / 1000,
+    n_spots: n, n_train: tr.length, n_test: te.length, n_rejected: nRej, deviance_threshold: thr, frames_read: done, frames_total: mv.n, heldout,
+    z_scale: zs.scale, z_offset_um: zs.offset, at_limit: lim / Math.max(1, nFit), history };
 }

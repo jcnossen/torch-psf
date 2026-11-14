@@ -3,7 +3,10 @@
 // One workgroup per spot; the threads share the pixels, the normal equations are reduced in workgroup memory and
 // thread 0 does the 5 x 5 solve. Same damping schedule as lm_poisson: H + lam diag(H), lam x 0.3 after an accepted
 // step, x 5 after a rejected one (clamped to 1e-4 .. 1e6); theta clamped as clamp_theta (margin 0.05).
-// Output per spot: theta[5], nll, crlb[5] (at the final theta), chi2 (mean squared normalized residual).
+// Output per spot: theta[5], nll, crlb[5] (at the final theta), chi2 (mean squared normalized residual), deviance per
+// pixel (torch_psf.insitu.spot_deviance: 2 sum(d log(d / mu) - (d - mu)) / P^2).
+// Outside the knot z range z is clamped and d/dz is that of the spline at the clamped position (torch_psf >= the class
+// redesign: a fit that starts outside still sees a slope towards the inside).
 
 struct U {
   N: u32, P: u32, S: u32, nz: u32,
@@ -17,11 +20,11 @@ struct U {
 @group(0) @binding(1) var<storage, read> knots: array<f32>;
 @group(0) @binding(2) var<storage, read> rois: array<f32>;
 @group(0) @binding(3) var<storage, read> theta0: array<f32>;
-@group(0) @binding(4) var<storage, read_write> outp: array<f32>;  // [N, 12]
+@group(0) @binding(4) var<storage, read_write> outp: array<f32>;  // [N, 13]
 
 const WG: u32 = 128u;
-const NR: u32 = 22u;                     // reduced values: gr[5], H[15] (upper triangle), nll, chi2
-var<workgroup> red: array<f32, 2816>;    // NR x WG
+const NR: u32 = 23u;                     // reduced values: gr[5], H[15] (upper triangle), nll, chi2, deviance
+var<workgroup> red: array<f32, 2944>;    // NR x WG
 var<workgroup> th: array<f32, 5>;
 var<workgroup> tn: array<f32, 5>;
 var<workgroup> flag: u32;
@@ -36,14 +39,12 @@ fn dcr(t: f32) -> vec4f {
   return vec4f(-0.5 + 2.0 * t - 1.5 * t2, -5.0 * t + 4.5 * t2, 0.5 + 4.0 * t - 4.5 * t2, -t + 1.5 * t2);
 }
 
-struct Ax { base: i32, wz: vec4f, wy: vec4f, wx: vec4f, dz: vec4f, dy: vec4f, dx: vec4f, zin: f32 };
+struct Ax { base: i32, wz: vec4f, wy: vec4f, wx: vec4f, dz: vec4f, dy: vec4f, dx: vec4f };
 
 fn axes(x: f32, y: f32, z: f32) -> Ax {
   var a: Ax;
   let S = f32(u.S);
-  var tz = (z - u.z0) / u.hz;
-  a.zin = select(0.0, 1.0, tz >= 1.0 && tz <= f32(u.nz) - 2.0);
-  tz = clamp(tz, 1.0, f32(u.nz) - 2.0 - 1e-4);
+  let tz = clamp((z - u.z0) / u.hz, 1.0, f32(u.nz) - 2.0 - 1e-4);
   let ty = u.oS0 - clamp(y, -u.xmax, u.xmax) * S;
   let tx = u.oS0 - clamp(x, -u.xmax, u.xmax) * S;
   let iz = floor(tz); let iy = floor(ty); let ix = floor(tx);
@@ -69,7 +70,7 @@ fn render(a: Ax, i: u32, j: u32) -> vec4f {
     v += a.wz[c] * pv; gx += a.wz[c] * px; gy += a.wz[c] * py; gz += a.dz[c] * pv;
   }
   let Sf = f32(S);
-  return vec4f(v, -Sf * gx, -Sf * gy, a.zin * gz / u.hz);
+  return vec4f(v, -Sf * gx, -Sf * gy, gz / u.hz);
 }
 
 fn clampth(t: ptr<function, array<f32, 5>>) {
@@ -85,7 +86,7 @@ fn isfixed(k: u32) -> bool { return ((u.fixed >> k) & 1u) != 0u; }
 
 // accumulate gr, H, nll, chi2 of this thread's pixels at theta t (shared array tn or th) into red[*, lid]
 fn evaluate(spot: u32, t: array<f32, 5>, lid: u32) {
-  var acc: array<f32, 22>;
+  var acc: array<f32, 23>;
   for (var q = 0u; q < NR; q++) { acc[q] = 0.0; }
   let a = axes(t[0], t[1], t[2]);
   let P = u.P;
@@ -111,6 +112,8 @@ fn evaluate(spot: u32, t: array<f32, 5>, lid: u32) {
     acc[20] += nl;
     let r2 = d - mu0;
     acc[21] += r2 * r2 / max(mu0 + u.rvar, 1e-6);
+    let dd = d + u.rvar; let mm = mu0 + u.rvar;
+    acc[22] += 2.0 * (select(0.0, dd * log(max(dd, 1e-9) / max(mm, 1e-6)), dd > 0.0) - (dd - mm));
   }
   for (var q2 = 0u; q2 < NR; q2++) { red[q2 * WG + lid] = acc[q2]; }
   workgroupBarrier();
@@ -165,7 +168,7 @@ fn lm(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li: vec3u,
   for (var k = 0u; k < 5u; k++) { t[k] = theta0[spot * 5u + k]; }
   clampth(&t);
   evaluate(spot, t, lid);
-  var gr: array<f32, 5>; var H: array<f32, 15>; var nll = red[20u * WG]; var chi2 = red[21u * WG];
+  var gr: array<f32, 5>; var H: array<f32, 15>; var nll = red[20u * WG]; var chi2 = red[21u * WG]; var dev = red[22u * WG];
   for (var k = 0u; k < 5u; k++) { gr[k] = red[k * WG]; }
   for (var q = 0u; q < 15u; q++) { H[q] = red[(5u + q) * WG]; }
   var lam = u.lam0;
@@ -190,7 +193,7 @@ fn lm(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li: vec3u,
     evaluate(spot, tnew, lid);
     let nn = red[20u * WG];
     if (nn < nll) {
-      t = tnew; nll = nn; chi2 = red[21u * WG];
+      t = tnew; nll = nn; chi2 = red[21u * WG]; dev = red[22u * WG];
       for (var k = 0u; k < 5u; k++) { gr[k] = red[k * WG]; }
       for (var q = 0u; q < 15u; q++) { H[q] = red[(5u + q) * WG]; }
       lam = lam * 0.3;
@@ -204,7 +207,7 @@ fn lm(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li: vec3u,
     // Cramer-Rao bound: Fisher = H (J J / (mu + var), mu clamped at 1e-6) at the final theta, all 5 parameters
     var Fm: array<f32, 25>;
     for (var k = 0u; k < 5u; k++) { for (var l = 0u; l < 5u; l++) { Fm[k * 5u + l] = H[hidx(k, l)]; } }
-    let o = spot * 12u;
+    let o = spot * 13u;
     for (var k = 0u; k < 5u; k++) {
       var e = array<f32, 5>(0.0, 0.0, 0.0, 0.0, 0.0); e[k] = 1.0;
       let col = solve5(Fm, e);
@@ -213,5 +216,6 @@ fn lm(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li: vec3u,
     }
     outp[o + 5u] = nll;
     outp[o + 11u] = chi2 / f32(u.P * u.P);
+    outp[o + 12u] = dev / f32(u.P * u.P);
   }
 }

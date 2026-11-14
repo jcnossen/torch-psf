@@ -161,10 +161,11 @@ test('insitu: fit_zernike_knots on the torch_psf training ROIs (40 iterations) r
   const zc0 = meta.noll.map((j: number) => meta.start_zernike[String(j)] ?? 0);
   const N = z.rois.shape[0];
   const r = await fitZernikeKnots(device, new Float32Array(z.rois.data as Float32Array), N, cfg, zc0, g, meta.focus_um, { iters: meta.iters });
-  const fin: number[] = meta.final_zernike, tru = meta.noll.map((j: number) => meta.truth_zernike[String(j)] ?? 0);
+  const ref = await fetchJson('smlm/insitu_fit.json');
+  const fin: number[] = ref.final_zernike, tru = meta.noll.map((j: number) => meta.truth_zernike[String(j)] ?? 0);
   const rms = (a: number[], b: number[]) => Math.sqrt(a.reduce((s, v, i) => s + (v - b[i]) ** 2, 0) / a.length);
   // the first Adam steps are sign(gradient) x lr, so the history must agree closely at the start
-  const h1 = r.history[3].zcoef, p1: number[] = meta.history[3].zcoef;
+  const h1 = r.history[3].zcoef, p1: number[] = ref.history[3].zcoef;
   const msg = `${N} ROIs, ${r.history.length} iterations in ${r.seconds.toFixed(1)} s; zcoef rms vs torch_psf after 3 steps ${rms(h1, p1).toExponential(1)}, ` +
     `final ${rms(r.zcoef, fin).toExponential(1)} w; vs truth: web ${rms(r.zcoef, tru).toFixed(4)}, torch_psf ${rms(fin, tru).toFixed(4)} w; ` +
     `web Noll 5/6/11: ${[5, 6, 11].map((j) => r.zcoef[meta.noll.indexOf(j)].toFixed(4)).join(' / ')}`;
@@ -172,7 +173,7 @@ test('insitu: fit_zernike_knots on the torch_psf training ROIs (40 iterations) r
   return msg;
 });
 
-test('insitu: whole estimate (movie -> spots -> split -> fit -> held-out, z scale) = torch_psf estimate_psf_insitu', async () => {
+test('insitu: whole estimate (movie -> spots -> split -> fit -> overlap rejection -> 2nd pass -> held-out, z scale) = torch_psf InSituEstimator', async () => {
   const meta = await fetchJson('smlm/insitu.json');
   const { device } = await getDevice();
   const files = [new File([await fetchBuf('smlm/insitu_movie.tif')], 'insitu_movie.tif')];
@@ -184,10 +185,27 @@ test('insitu: whole estimate (movie -> spots -> split -> fit -> held-out, z scal
   }, new StopToken(), () => {});
   const rp = meta.report, fin: number[] = meta.final_zernike;
   const rms = Math.sqrt(r.zcoef.reduce((s, v, i) => s + (v - fin[i]) ** 2, 0) / fin.length);
-  const hp = rp.heldout ? rp.heldout.fitted.nll_per_px_vs_first : NaN;
-  const msg = `spots ${r.n_spots} (torch_psf ${rp.n_spots}), train ${r.n_train} (${rp.n_train}), test ${r.n_test} (${rp.n_test}); ` +
+  const hp = rp.heldout ? rp.heldout.vectorial.nll_per_px_vs_first : NaN;
+  const msg = `spots ${r.n_spots} (torch_psf ${rp.n_spots}), train ${r.n_train} (${rp.n_train}), test ${r.n_test} (${rp.n_test}), rejected ${r.n_rejected} (${rp.n_rejected}); ` +
     `zcoef rms vs torch_psf ${rms.toExponential(1)} w; held-out NLL/px fitted - start ${r.heldout?.diff.toFixed(5)} (${hp.toFixed(5)}); ` +
     `z scale ${r.z_scale.toFixed(4)} (${rp.z_scale.toFixed(4)}); at limit ${r.at_limit.toFixed(4)} (${rp.at_limit.toFixed(4)}); ${r.seconds.toFixed(1)} s`;
-  check(r.n_spots === rp.n_spots && r.n_train === rp.n_train && rms < 2e-3 && Math.abs((r.heldout?.diff ?? 0) - hp) < 2e-3 && Math.abs(r.z_scale - rp.z_scale) < 0.01, msg);
+  check(r.n_spots === rp.n_spots && r.n_train === rp.n_train && Math.abs(r.n_rejected - rp.n_rejected) <= 3 && rms < 2e-3 && Math.abs((r.heldout?.diff ?? 0) - hp) < 2e-3 && Math.abs(r.z_scale - rp.z_scale) < 0.01, msg);
+  return msg;
+});
+
+test('insitu: spot deviance per pixel = torch_psf insitu.spot_deviance (start spline)', async () => {
+  const z = await parseNpz(await fetchBuf('smlm/insitu_grad.npz'));
+  const dz = await parseNpz(await fetchBuf('smlm/insitu_deviance.npz'));
+  const { device } = await getDevice();
+  const g = splineGrid(15, 0, 0.8, 2, 0.04, 5, 3.0);
+  const loc = new SplineLocalizer(device, g, new Float32Array(z.knots.data as Float32Array));
+  const N = z.rois.shape[0];
+  const r = await loc.localize(new Float32Array(z.rois.data as Float32Array), N);
+  loc.destroy();
+  const ref = dz.deviance.data as Float32Array, thr = 1 + 3 * Math.sqrt(2 / 225);
+  let md = 0, flip = 0;
+  for (let i = 0; i < N; i++) { md = Math.max(md, Math.abs(r.deviance[i] - ref[i])); if ((r.deviance[i] > thr) !== (ref[i] > thr)) flip++; }
+  const msg = `${N} spots; max |deviance web - torch_psf| ${md.toExponential(1)}; spots on different sides of the 1.283 threshold: ${flip}`;
+  check(md < 1e-3 && flip <= 2, msg);
   return msg;
 });
