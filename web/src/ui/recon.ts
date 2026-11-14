@@ -15,6 +15,7 @@ export class Recon {
   n = 0;
   constructor(public H: number, public W: number, public pixel_um: number) {}
   add(rows: Float32Array) { this.chunks.push(rows); this.n += rows.length / NCOL; }
+  chunkList(): Float32Array[] { return this.chunks; }
   rows(): Float32Array {
     const out = new Float32Array(this.n * NCOL);
     let o = 0; for (const c of this.chunks) { out.set(c, o); o += c.length; }

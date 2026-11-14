@@ -67,7 +67,12 @@ fitted vectorial spline and smooth, alternating localization and a torch.optim.L
 knots), with its z scale relative to the vectorial fit and the warning that free knots can warp z. On the demo, which
 is simulated from the vectorial model itself, it is (correctly) not kept. The Zernike bars update during the fit (start, fitted and, for the
 demo, the truth). The fitted PSF is then shown in the 3D view (z = emitter height at the focal plane), the movie is
-localized with it and the Reconstruction panel renders the localizations (colour = z; csv export). The fit starts from
+localized with it and the Reconstruction panel shows them as a point cloud (colour = z; csv export): rendered at
+screen resolution for the current view, each localization a Gaussian sized in nm (its CRLB, capped, or one fixed
+blur) integrated over the screen pixel, additive; pan, zoom and orbit (rotate about z, tilt to a side view, z
+exaggeration); a global display maximum so the brightness does not jump; above a point cap while dragging, a fixed
+hash-ranked subset weighted to keep the brightness (the principles of webSMLM's point-cloud renderer and its
+tilt / rotate view). The fit starts from
 a generic astigmatic PSF (Noll 6 = 0.08) unless another start is chosen under Advanced (the PSF in the 3D view, the last
 estimate, or a PSF json). On the demo it recovers the truth to about 0.001 waves rms in about a minute on a laptop iGPU. "Localize only" (Advanced) localizes with the start PSF without estimating it.
 

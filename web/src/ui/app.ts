@@ -12,6 +12,7 @@ import type { FitForm, FitSummary, VolumeSpec, Req, MovieForm, InsituForm, Movie
 import { InsituReport, FREE_KNOT_WARNING } from '../smlm/estimate';
 import { splineGrid } from '../gpu/spline_lm';
 import { Recon } from './recon';
+import { PointCloudView } from './pointcloud';
 import { locsToCsv, MovieSummary, NCOL } from '../smlm/movie';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -270,13 +271,24 @@ export function startApp(root: HTMLElement) {
 
   // --- reconstruction
   let lastDraw = 0, drawTimer = 0;
-  const drawRecon = () => {
-    if (!recon) return;
-    const r = recon.render($('recon') as HTMLCanvasElement, { pixel_nm: n('r-px'), blur_px: n('r-blur'), colorZ: $<HTMLInputElement>('r-colorz').checked, zlo: n('m-zlo'), zhi: n('m-zhi'), maxCrlbNm: n('r-crlb') });
-    $('r-label').textContent = `${r.shown} of ${recon.n} localizations, ${r.w} x ${r.h} pixels of ${n('r-px')} nm` + ($<HTMLInputElement>('r-colorz').checked ? `; colour = z from ${n('m-zlo')} (blue) to ${n('m-zhi')} um (red)` : '');
-    lastDraw = performance.now();
+  // point-cloud view (pointcloud.ts): world-unit Gaussian splats at screen resolution, pan / zoom / orbit
+  const cloud = new PointCloudView($('recon') as HTMLCanvasElement, () => recon ? recon.chunkList() : [],
+    () => ({ W: recon?.W ?? 1, H: recon?.H ?? 1, pixel_nm: 1000 * (recon?.pixel_um ?? 0.1), n: recon?.n ?? 0 }),
+    () => ({ mode: $<HTMLSelectElement>('r-mode').value as 'precision' | 'fixed', blurNm: n('r-blur'), capNm: 60, maxCrlbNm: n('r-crlb'),
+      colorZ: $<HTMLInputElement>('r-colorz').checked, zlo: n('m-zlo'), zhi: n('m-zhi'), zExag: n('r-zex') }));
+  (window as any).__cloud = cloud;
+  cloud.onChange = () => {
+    $<HTMLInputElement>('r-tilt').value = String(Math.round(cloud.tilt)); $<HTMLInputElement>('r-rot').value = String(Math.round(cloud.rot));
+    const L = cloud.last;
+    $('r-label').textContent = recon ? `${recon.n} localizations; ${L.drawn < L.inView ? `drawing ${L.drawn} of ${L.inView} while moving; ` : ''}${L.nmPerPx.toFixed(1)} nm per screen pixel` +
+      ($<HTMLInputElement>('r-colorz').checked ? `; colour = z from ${n('m-zlo')} (blue) to ${n('m-zhi')} um (red)` : '') : '';
   };
-  for (const id of ['r-px', 'r-blur', 'r-crlb', 'r-colorz']) $(id).addEventListener('change', drawRecon);
+  const drawRecon = () => { if (!recon) return; cloud.invalidate(); lastDraw = performance.now(); };
+  for (const id of ['r-mode', 'r-blur', 'r-crlb', 'r-colorz']) $(id).addEventListener('change', drawRecon);
+  $<HTMLInputElement>('r-tilt').oninput = () => { cloud.tilt = n('r-tilt'); cloud.request(); };
+  $<HTMLInputElement>('r-rot').oninput = () => { cloud.rot = n('r-rot'); cloud.request(); };
+  $<HTMLInputElement>('r-zex').oninput = () => { $('r-zex-v').textContent = n('r-zex').toFixed(1); cloud.request(); };
+  $('r-reset').onclick = () => cloud.reset();
   onLocs = (rows) => {
     recon?.add(rows);
     for (let o = 0; o < rows.length; o += NCOL) { const f = rows[o]; const L = locsByFrame.get(f) ?? []; L.push(rows[o + 1], rows[o + 2]); locsByFrame.set(f, L); }
@@ -295,7 +307,7 @@ export function startApp(root: HTMLElement) {
     if (form.roisize % 2 !== 1 || form.roisize < 5) { $('mtext').textContent = 'The ROI size must be odd (>= 5).'; return; }
     running = 'movie'; busy(true);
     startZ = kind === 'estimate' ? [...psf.zcoef] : null;
-    recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear();
+    recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear(); cloud.reset();
     $('p-recon').hidden = false;
     $('mtext').textContent = 'starting...';
     try {
@@ -571,11 +583,19 @@ const TEMPLATE = `
   </details>
   <details class="panel" data-key="recon" open id="p-recon" hidden><summary><h2>Reconstruction</h2></summary>
     <div class="bar">
-      ${num('r-px', 'pixel (nm)', 20)}${num('r-blur', 'blur (pixels)', 0.7)}${num('r-crlb', 'max CRLB x (nm, 0 = all)', 0)}
+      <label>splat <select id="r-mode"><option value="precision">precision (CRLB)</option><option value="fixed">fixed blur</option></select></label>
+      ${num('r-blur', 'blur / min. sigma (nm)', 8)}${num('r-crlb', 'max CRLB x (nm, 0 = all)', 0)}
       <label><input id="r-colorz" type="checkbox" checked> colour by z</label>
       <button id="r-csv" title="ThunderSTORM csv (nm, frames from 1), as torch_psf Dataset.save_csv">localizations .csv</button>
     </div>
-    <div class="recon-wrap"><canvas id="recon" width="10" height="10"></canvas></div>
+    <canvas id="recon" class="cloud"></canvas>
+    <div class="bar">
+      <label>tilt <input id="r-tilt" type="range" min="0" max="180" step="1" value="0"></label>
+      <label>rotate <input id="r-rot" type="range" min="0" max="360" step="1" value="0"></label>
+      <label>z exaggeration <input id="r-zex" type="range" min="1" max="5" step="0.5" value="1"><span id="r-zex-v">1.0</span></label>
+      <button id="r-reset">Reset view</button>
+    </div>
+    <p class="note">Drag to pan, wheel to zoom, shift-drag (or right-drag) to orbit: rotate about z and tilt (0 = top view, 90 = side view).</p>
     <p id="r-label" class="note"></p>
     <table id="l-table"></table>
   </details>
