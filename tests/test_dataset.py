@@ -109,3 +109,16 @@ def test_estimate_drift():
                              crlb=torch.full((n, 2), 0.05), meta=dict(pixel_nm=100.0, n_frames=F))
     d = ds.estimate_drift()
     assert float((d - d.mean(0) - (true - true.mean(0))).abs().max()) < 0.05
+
+
+def test_fit_needs_a_pixel_size_for_3d():
+    from torch_psf import AstigmaticGaussianPSF, GaussianPSF
+    a = AstigmaticGaussianPSF(11, gamma_um=0.2, device='cpu')
+    th = torch.tensor([[0.1, -0.1, 0.2, 2000.0, 10.0]]).repeat(50, 1)
+    rois = torch.poisson(a.expected(th))
+    with pytest.raises(ValueError):
+        a.fit(rois)
+    ds = a.fit(rois, pixel_um=0.1)
+    assert ds.pixel_nm == 100.0 and abs(float(ds.pos[:, 2].median()) - 2.0) < 0.5      # 0.2 um = 2 px of 0.1 um
+    g = GaussianPSF(11, device='cpu')
+    assert g.fit(torch.poisson(g.expected(th))).n_dims == 2                          # 2D: no pixel size needed

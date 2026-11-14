@@ -39,10 +39,11 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 
 | old | new |
 |---|---|
-| localization table (numpy structured array `table.LOC_DTYPE`: frame, x, y, z, photons, bg, crlb_x / y / z / photons / bg, loglik, chi2, at_limit) | `torch_psf.Dataset` (dict of tensors): `pos` [n, D] px (x, y, z; **z in px** of the lateral pixel size when the model knows it, else um with `meta['z_unit'] = 'um'`), `crlb` [n, D] (same units), `frame`, `n_frames` (1), `id`, `photons`, `bg`, `crlb_photons`, `crlb_bg`, `loglik`, `chi2`, `at_limit`; meta `pixel_nm`, `image_size`, `n_frames`, `method` |
+| localization table (numpy structured array `table.LOC_DTYPE`: frame, x, y, z, photons, bg, crlb_x / y / z / photons / bg, loglik, chi2, at_limit) | `torch_psf.Dataset` (dict of tensors): `pos` [n, D] px (x, y, z; **z in px** of the lateral pixel size, always), `crlb` [n, D] (same units), `frame`, `n_frames` (1), `id`, `photons`, `bg`, `crlb_photons`, `crlb_bg`, `loglik`, `chi2`, `at_limit`; meta `pixel_nm`, `image_size`, `n_frames`, `method` |
 | `PSF.fit` / `PSF.localize` return the table | they return a Dataset (`fit(..., pixel_um=None)`, `localize(..., pixel_um=None)` override the pixel size used for z) |
 | `table.to_csv` | `Dataset.save('x.csv')` (ThunderSTORM) or `.hdf5` (docs/DATASET_FORMAT.md); `save_picasso` |
 | `ConvCubicSplinePSF` | has `pixel_um` (set by `VectorialPSF.to_spline`, stored in the spline file) |
+| (follow-up) z unit | one unit per Dataset: z in px of the lateral pixel size, always. Every model has `pixel_um` (constructor argument of ConvCubicSplinePSF, `from_zstack`, GaussianPSF, AstigmaticGaussianPSF; VectorialPSF has it anyway); fitting / localizing a 3D model without one raises ValueError (pass `pixel_um=` to fit / localize or set it on the model) |
 
 ## Dataset (`torch_psf.dataset.Dataset`; format: docs/DATASET_FORMAT.md)
 

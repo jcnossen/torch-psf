@@ -65,12 +65,14 @@ class ConvCubicSplinePSF(PSF):
     z0 = z of knot plane 0, zs = z of all planes, nz / nv / nu = knot array shape."""
 
     def __init__(self, roisize, z_range, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, device=None,
-                 dtype=torch.float32, knots=None, knot_u0_px=None, knot_z0_um=None):
+                 dtype=torch.float32, knots=None, knot_u0_px=None, knot_z0_um=None, pixel_um=None):
         """roisize may be odd or even (pixel offsets from the ROI centre are j - (roisize - 1) / 2). To wrap a stored
         knot array of another geometry, pass knots [nz, n, n] (n a multiple of oversample) and optionally its origin:
         knot_u0_px = lateral offset (px) of knot index 0 from the PSF centre (default -(c S + S - 1) / S with
         c = (n / S - 1) / 2, the layout this class builds), knot_z0_um = z of knot plane 0 (default
-        z_range[0] - zpad dz_um). The offset limit is reduced to what the stored knots support."""
+        z_range[0] - zpad dz_um). The offset limit is reduced to what the stored knots support. pixel_um: lateral pixel
+        size (um), needed by fit / localize (z is stored in px)."""
+        self.pixel_um = None if pixel_um is None else float(pixel_um)
         zlo, zhi = float(z_range[0]), float(z_range[1])
         S, hz, xmax = int(oversample), float(dz_um), float(xy_limit)
         self.roisize, self.S, self.hz = roisize, S, hz
@@ -171,9 +173,8 @@ class ConvCubicSplinePSF(PSF):
 
     def to(self, device):
         s = ConvCubicSplinePSF(self.roisize, self.z_range, oversample=self.S, dz_um=self.hz, zpad=self.zpad,
-                               xy_limit=self.xmax, device=device, dtype=self.dtype)
+                               xy_limit=self.xmax, device=device, dtype=self.dtype, pixel_um=self.pixel_um)
         s.knots = self.knots.to(s.dev)
-        s.pixel_um = self.pixel_um
         return s
 
     def to_spline(self, roisize=None, z_range=None, **kw):
@@ -251,10 +252,11 @@ class ConvCubicSplinePSF(PSF):
 
     # ------------------------------------------------------------------ constructors
     @classmethod
-    def from_zstack(cls, zstack, z0_um, dz_um, roisize, device=None, normalize=False):
+    def from_zstack(cls, zstack, z0_um, dz_um, roisize, pixel_um=None, device=None, normalize=False):
         """Spline with oversample 1 whose knots are a measured (or simulated) z-stack [nz, H, W] of an emitter centred
         on the middle pixel (H = W odd), plane k at z = z0_um + k dz_um. The offset limit follows from the stack size:
-        xy_limit = (W - 1) / 2 - 2 - (roisize - 1) / 2. normalize: scale each plane to sum 1."""
+        xy_limit = (W - 1) / 2 - 2 - (roisize - 1) / 2. normalize: scale each plane to sum 1. pixel_um: lateral pixel
+        size (um) of the stack (required for fit / localize)."""
         z0, hz = z0_um, dz_um
         zs = torch.as_tensor(zstack, dtype=torch.float32)
         if device is not None:
@@ -267,7 +269,7 @@ class ConvCubicSplinePSF(PSF):
         if normalize:
             zs = zs / zs.sum((1, 2), keepdim=True)
         return cls(roisize, (z0, z0 + (nz - 1) * hz), oversample=1, dz_um=hz, zpad=0, xy_limit=xmax, device=zs.device,
-                   knots=zs.contiguous())
+                   knots=zs.contiguous(), pixel_um=pixel_um)
 
     def to_dict(self):
         """Grid description (without the knots) for the PSF file."""

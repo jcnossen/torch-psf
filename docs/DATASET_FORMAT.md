@@ -17,7 +17,7 @@ Core fields (always present after construction; `id` and `n_frames` get defaults
 | `id` | int64 | [n] | | localization id; the same id in related datasets links the rows (default 0 .. n-1) |
 | `frame` | int32 | [n] | frames | first frame of the localization |
 | `n_frames` | int32 | [n] | frames | frames it covers: 1 for single-frame fits, the window length of multi-frame methods, the on-time of linked blinks (default 1). Last frame = frame + n_frames - 1 |
-| `pos` | float64 | [n, D] | px | x, y (and z): pixel centres at integer coordinates, x = column, y = row; z relative to the focal plane of the PSF, in px of the lateral pixel size (`metadata.pixel_nm`) unless `metadata.z_unit` says otherwise |
+| `pos` | float64 | [n, D] | px | x, y (and z): pixel centres at integer coordinates, x = column, y = row; z relative to the focal plane of the PSF, in px of the lateral pixel size (`metadata.pixel_nm`): one unit for all axes |
 | `crlb` | float32 | [n, D] | px | precision (one standard deviation) per axis: a Cramér-Rao bound or a calibrated uncertainty |
 | `photons` | float32 | [n] | photons | total signal of the localization |
 | `bg` | float32 | [n] | photons / px / frame | background |
@@ -38,7 +38,7 @@ Any other field (any dtype, shape [n, ...], e.g. per-frame intensities [n, frame
 ## Metadata
 
 A free dictionary of JSON-serializable values. Common keys: `pixel_nm` (camera pixel size in the sample, nm),
-`image_size` [h, w] (px), `n_frames` (frames of the movie), `n_dims`, `z_unit` ('um' when z is not in px),
+`image_size` [h, w] (px), `n_frames` (frames of the movie), `n_dims`,
 `method`, `source`, `region` / `origin` (set by crop), `drift_info`.
 
 ## Drift

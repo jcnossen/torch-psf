@@ -14,8 +14,8 @@ Fields (every field has its own dtype and shape [n, ...]):
   n_frames  [n] int32        frames it covers (1 for single-frame fits; the window of multi-frame methods; the on-time
                              of linked blinks); last frame = end_frame = frame + n_frames - 1
   pos       [n, D] float64   position in px: x, y (and z), pixel centres at integer coordinates, x = column. z is in px of
-                             the lateral pixel size (meta['pixel_nm']), relative to the focal plane of the PSF
-                             (convert with z_um / pos_nm)
+                             the lateral pixel size (meta['pixel_nm']; one unit for all axes), relative to the focal
+                             plane of the PSF (pos_nm converts)
   crlb      [n, D] float32   precision (one sigma) per axis, px
   photons   [n] float32      total signal (photons)
   bg        [n] float32      background (photons / px / frame)
