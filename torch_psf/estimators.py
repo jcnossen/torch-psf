@@ -195,7 +195,8 @@ class ZStackEstimator(Estimator):
         for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um', 'chi2_median', 'heldout_chi2_median'):
             if k in r['report']:
                 self.report[k] = r['report'][k]
-        self.data = dict(rois=d, stack_id=sid, focus_um=focus, xy=r['xy'], photons=r['photons'], bg=r['bg'])
+        self.data = dict(rois=d, stack_id=sid, focus_um=focus, xy=r['xy'], photons=r['photons'], bg=r['bg'],
+                         model=r['model'], chi2=r['chi2'])
         if self.model == 'vectorial':
             self.report['seconds'] = time.time() - self._t0
             return psf
@@ -290,7 +291,9 @@ class InSituEstimator(Estimator):
     at_limit, z_scale / z_offset_um (fit vs start), scan, heldout (NLL per pixel of start / vectorial / refined),
     chosen, heldout_chi2_median (held-out spots fitted with the chosen PSF: ~1 if the camera gain and noise model are
     right), warnings. data: spots, train, test, vectorial (the fitted VectorialPSF), vectorial_spline (its spline),
-    psf (the returned PSF), spline (the spline of the returned PSF, ready for localization)."""
+    psf (the returned PSF), spline (the spline of the returned PSF, ready for localization); with reject_overlap also
+    the first-fit overlap test of the training spots: deviance [n_train] (numpy; rejected where >= the threshold),
+    deviance_theta [n_train, 5] (their fits) and deviance_psf (the first-fit spline)."""
 
     def __init__(self, start=None, optics=None, camera=None, focus_um=None, roisize=15, z_range=(0.0, 0.8),
                  nspots=8000, nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0,
@@ -407,9 +410,11 @@ class InSituEstimator(Estimator):
         r = self._fit(spline, rois, vec0, self.iters, 'vectorial', var)
         vec = r['psf']
         n_rej = 0
+        first = None
         if self.reject_overlap and not self._stopped():
             s1 = vec.to_spline(R, zr, **self.grid)
-            dv, _ = spot_deviance(s1, rois, var)
+            dv, th1 = spot_deviance(s1, rois, var)
+            first = dict(deviance=dv, deviance_theta=th1.detach(), deviance_psf=s1)
             thr, med, scale = self._deviance_threshold(dv)
             keep = dv < thr
             n_rej = int((~keep).sum())
@@ -467,7 +472,7 @@ class InSituEstimator(Estimator):
         self.report['seconds'] = time.time() - self._t0
         result.provenance = dict(estimator='InSituEstimator', settings=self._settings(), report=self.report)
         self.data = dict(spots=sp, train=tr, test=te, vectorial=vec, vectorial_spline=s_vec, psf=result,
-                         spline=result_spline)
+                         spline=result_spline, **(first or {}))
         return result
 
     def _settings(self):
