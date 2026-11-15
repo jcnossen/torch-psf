@@ -17,21 +17,34 @@ PSF json schema (format 'torch-psf', version '0.1.0'):
   camera          optional Camera dict; provenance: free-form
 A plain calibration json (no 'format') with the vectorial keys at the top level (pixelsize_um, wavelength_um, NA,
 n_imm, n_med, zernike_noll, zernike_waves, focus_um, psf_blur_px2, ...) is read as a vectorial PSF.
+
+psf.zip (version '0.2.0', docs/PSF_FORMAT.md; torch_psf.psfzip): psf.json with a `channels` list (each channel the
+0.1.0 keys of its model plus mapping / field / crop), .npy arrays, zstack.tif, preview.png, fit_report.pdf. save_zip
+writes it; load / PSF.load read it like a json.
 """
 import json
 from torch_psf.optics import Optics
 from torch_psf.camera import Camera
 from torch_psf.psf import PSF, FORMAT, VERSION   # noqa: F401
 from torch_psf.spline import CubicSplinePSF
+from torch_psf import psfzip
+from torch_psf.psfzip import PSFZip, save_zip   # noqa: F401
 
 
 def save(path, psf, source=None, camera=None, provenance=None):
-    """psf.save(path, ...): write a PSF model (json plus an .npz for arrays). Returns the json dict."""
+    """psf.save(path, ...): write a PSF model (json plus an .npz for arrays); a path ending in .zip writes a psf.zip
+    (save_zip with its defaults). Returns the json dict."""
+    if str(path).lower().endswith('.zip'):
+        return save_zip(path, psf, camera=camera, provenance=provenance, source=source)
     return psf.save(path, camera=camera, provenance=provenance, source=source)
 
 
-def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
-    """PSF.load(path, ...): read a PSF json or a plain calibration json and return the model."""
+def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None, channel=None):
+    """PSF.load(path, ...): read a PSF json, a psf.zip or a plain calibration json and return the model. channel
+    (index or name): one channel of a psf.zip with independent channels (PSFZip.read gives all of them, with their
+    mappings and field dependence)."""
+    if channel is not None:
+        return PSFZip.read(path, roisize=roisize, device=device).channel(channel).model
     return PSF.load(path, roisize=roisize, device=device, angle=angle, npupil=npupil, oversample=oversample)
 
 
@@ -41,11 +54,17 @@ def load_spline_source(path, device=None):
 
 
 def load_camera(path, load_maps=True):
-    """Camera block of a calib / torch-psf json (relative map paths resolved against the json's directory), or None."""
+    """Camera block of a calib / torch-psf json (relative map paths resolved against the json's directory) or of a
+    psf.zip (per-pixel maps from the zip), or None."""
+    if psfzip.is_psf_zip(path):
+        return psfzip.camera_from_meta(*psfzip.read_zip(path))
     return Camera.from_json(path, load_maps=load_maps)
 
 
 def load_optics(path):
-    with open(path) as f:
-        d = json.load(f)
+    if psfzip.is_psf_zip(path):
+        d = psfzip.read_zip(path)[0]
+    else:
+        with open(path) as f:
+            d = json.load(f)
     return Optics.from_dict(d.get('optics', d))

@@ -235,8 +235,12 @@ class PSF:
 
     @staticmethod
     def read_file(path):
-        """(parsed json, arrays or None, type name) of a PSF json or a plain calibration json (path or parsed dict;
-        array files of a dict are resolved against the current directory)."""
+        """(parsed json, arrays or None, type name) of a PSF json, a psf.zip (single-channel or coupled; the 0.1.0
+        dict of its model, torch_psf.psfzip.read_legacy) or a plain calibration json (path or parsed dict; array files
+        of a dict are resolved against the current directory)."""
+        from torch_psf import psfzip             # lazy: psfzip imports this module
+        if psfzip.is_psf_zip(path):
+            return psfzip.read_legacy(path)
         if isinstance(path, dict):
             d, base = path, '.'
         else:
@@ -253,7 +257,9 @@ class PSF:
 
     @staticmethod
     def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
-        """Read a PSF json (type 'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian') or a plain calibration json and
+        """Read a PSF json (type 'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian' | 'fourpi' | 'fourpi_spline'), a
+        psf.zip (docs/PSF_FORMAT.md; independent multi-channel files: torch_psf.io.load(path, channel=c)) or a plain
+        calibration json and
         return the model of that type; path may also be the parsed dict (array files are then resolved against the
         current directory). roisize: for vectorial / Gaussian models (default: the stored one, or 15 for a
         calibration json). angle: for calibrations with per-pattern-angle PSF terms: 0 / 1 = that angle, None = the

@@ -159,6 +159,8 @@ torch_psf/
   that the study reached, and the bead fit recovers its own set.
 
 ### io: one PSF file
+- Current format: `psf.zip`, specified in [PSF_FORMAT.md](PSF_FORMAT.md) (channels, mappings, field dependence,
+  z-stack, preview, fit report). The json + npz described below is its version 0.1.0 and is still read and written.
 - `save_psf(path.json, psf)`: JSON with `format: "torch-psf"`, `version`, `type` ('vectorial' | 'spline' |
   'gaussian'), the `optics` block (Optics names), `zernike_noll`, `zernike_waves`, `apod`, `saf`, `focus_um`,
   `psf_blur_px2`, `psf_dipole_M`, `diattenuation`, and an optional `camera` block. Arrays (pupil maps, spline knots and

@@ -195,7 +195,8 @@ class ZStackEstimator(Estimator):
         for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um', 'chi2_median', 'heldout_chi2_median'):
             if k in r['report']:
                 self.report[k] = r['report'][k]
-        self.data = dict(rois=d, stack_id=sid, focus_um=focus, xy=r['xy'], photons=r['photons'], bg=r['bg'])
+        self.data = dict(rois=d, stack_id=sid, focus_um=focus, xy=r['xy'], photons=r['photons'], bg=r['bg'],
+                         model=r['model'], chi2=r['chi2'])
         if self.model == 'vectorial':
             self.report['seconds'] = time.time() - self._t0
             return psf
