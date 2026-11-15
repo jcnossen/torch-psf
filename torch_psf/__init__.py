@@ -1,7 +1,8 @@
 """torch-psf: a PSF library for single-molecule localization microscopy, in PyTorch.
 
 The PSF is the main object: PSF (base class) with render, expected, fisher / crlb, fit (ROIs -> localizations),
-localize (movie -> localizations), save / PSF.load and to_spline; the models VectorialPSF, CubicSplinePSF,
+localize (movie -> localizations), save / PSF.load (also psf.zip: io.save_zip, docs/PSF_FORMAT.md) and to_spline;
+the models VectorialPSF, CubicSplinePSF,
 GaussianPSF and AstigmaticGaussianPSF, and the multi-channel coherent 4Pi models
 FourPiPSF and FourPiSplinePSF (torch_psf.fourpi; images [N, C, P, P]). PSFs are estimated with ZStackEstimator (bead z-stacks) and InSituEstimator
 (from the SMLM movie itself).
@@ -14,7 +15,8 @@ default: cuda if available, else cpu. Lower-level pieces: torch_psf.fit (incl. s
 (torch_psf.dataset).
 
 Module layers (each imports only from the layers before it): optics, zernike, fit -> detect, movie, spots, dataset,
-camera -> psf (the base class) -> vectorial, spline, gaussian -> fourpi -> io, estimation, simulate -> estimators -> viewer,
+camera -> psf (the base class) -> vectorial, spline, gaussian -> fourpi -> psfzip, psfreport, io, estimation, simulate ->
+estimators -> viewer,
 __main__. The model classes register themselves by their psf.json type name when they are defined
 (PSF.__init_subclass__), and this __init__ imports all of them, so PSF.load knows every type whenever torch_psf is
 imported; importing a submodule alone (e.g. `from torch_psf.psf import PSF`) runs this __init__ first and so

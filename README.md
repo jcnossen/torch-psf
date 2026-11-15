@@ -1,5 +1,9 @@
 # torch-psf
 
+**Web viewer:** [jcnossen.github.io/torch-psf](https://jcnossen.github.io/torch-psf/) runs the PSF fit in the browser (WebGPU), without installation.
+
+<a href="https://jcnossen.github.io/torch-psf/"><img src="web/docs/result.png" width="320" alt="torch-psf web viewer: a bead-fit result"></a>
+
 A PSF library for single-molecule localization microscopy (SMLM), in plain PyTorch, batched on the GPU. The PSF is
 the main object: every model renders the PSF with its x / y / z derivatives, and the base class `PSF` gives each of
 them the Cramér-Rao bound, maximum-likelihood fitting of spots, localization of whole movies, files and conversion to
@@ -136,12 +140,17 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `optics.py` | `Optics` (pixel size, NA, wavelength, refractive indices). |
 | `camera.py` | `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs); `photon_transfer`: camera offset and gain from the background pixels of a movie. |
 | `movie.py`, `io.py` | movie readers (TIFF incl. ImageJ > 4 GB and multi-part, memory-mapped), PSF files. |
+| `psfzip.py`, `psfreport.py` | the psf.zip writer / reader (channels, mappings, field dependence, z-stack, preview) and its fit report. |
 | `__main__.py`, `viewer.py` | the command line, the viewer server. |
 
-**PSF file**: one JSON (`format: "torch-psf"`, `type`, `optics`, `zernike_noll`, `zernike_waves`, `focus_um`, optional
-blur / dipole terms, spline grid) plus an `.npz` next to it for arrays (pupil maps, knots). The web app exports the
-same schema. `PSF.load` also reads a plain calibration json with the keys at the top level (`pixelsize_um`,
-`wavelength_um`, `NA`, `n_imm`, `n_med`, `zernike_noll`, `zernike_waves`, `focus_um`, ...).
+**PSF file**: `psf.zip` (`torch_psf.io.save_zip(path, psf, camera=..., report=estimator)`; specification in
+[docs/PSF_FORMAT.md](docs/PSF_FORMAT.md)): `psf.json` with the optics, camera, provenance and a `channels` list (each
+channel a model of any type with its mapping to the reference channel and optional field dependence; 4Pi as one
+coupled model), the arrays as `.npy`, `zstack.tif` (the model rendered through z), `preview.png` and `fit_report.pdf`
+(an overview of the estimation). `PSF.load` reads it, the earlier format (one JSON with `format: "torch-psf"`, `type`,
+`optics`, `zernike_noll`, `zernike_waves`, `focus_um`, ..., plus an `.npz` for arrays; still written by `PSF.save` and
+by the web app) and a plain calibration json with the keys at the top level (`pixelsize_um`, `wavelength_um`, `NA`,
+`n_imm`, `n_med`, `zernike_noll`, `zernike_waves`, `focus_um`, ...).
 
 ## The convolutional spline
 

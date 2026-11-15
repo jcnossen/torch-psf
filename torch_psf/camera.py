@@ -41,20 +41,30 @@ class Camera:
     Poisson-equivalent ('effective') photons, var = mean, and the photon / background numbers they report are
     effective photons = photoelectrons / F^2. For an EMCCD give the true gain (photoelectrons per ADU, including the
     EM gain) with excess_noise=2, or equivalently the Poisson-equivalent gain (gain / 2, = 1 / the photon-transfer
-    slope) with excess_noise=1. photon_transfer (below) measures it from a movie."""
+    slope) with excess_noise=1. photon_transfer (below) measures it from a movie.
+
+    Kept for files (psf.zip): extra = the keys of the camera dict that are not fields (notes etc.), scalars = the
+    scalar offset / read noise / gain given before load_maps() replaced them by maps, map_extra = the other entries of
+    the maps npz."""
     gain_e_per_adu: Number = 1.0
     offset_adu: Number = 0.0
     readnoise_e: Number = 0.0
     type: str = 'scmos'
     maps: Optional[str] = None
     excess_noise: float = 1.0
+    extra: dict = dataclasses.field(default_factory=dict, repr=False, compare=False)
+    scalars: dict = dataclasses.field(default_factory=dict, repr=False, compare=False)
+    map_extra: dict = dataclasses.field(default_factory=dict, repr=False, compare=False)
+
+    _KEPT = ('extra', 'scalars', 'map_extra')
 
     @classmethod
     def from_dict(cls, d, base_dir=None, load_maps=True):
         """From a Camera dict or the camera block of a config / calibration json. A relative 'maps' path is resolved
         against base_dir (the directory of the calib file)."""
-        names = {f.name for f in dataclasses.fields(cls)}
+        names = {f.name for f in dataclasses.fields(cls)} - set(cls._KEPT)
         c = cls(**{k: v for k, v in d.items() if k in names and v is not None})
+        c.extra = {k: v for k, v in d.items() if k not in names and k not in cls._KEPT}
         if c.maps and base_dir is not None and not os.path.isabs(c.maps):
             c.maps = os.path.join(base_dir, c.maps)
         if load_maps and c.maps:
@@ -74,16 +84,25 @@ class Camera:
     def to_dict(self):
         out = {}
         for f in dataclasses.fields(self):
+            if f.name in self._KEPT:
+                continue
             v = getattr(self, f.name)
             if torch.is_tensor(v) or isinstance(v, np.ndarray):
                 v = '<map>' if np.ndim(v) else float(v)   # maps live in the npz
             out[f.name] = v
+        for k, v in (self.extra or {}).items():
+            out.setdefault(k, v)
         return out
 
     def load_maps(self, path=None):
         """Replace scalar offset / read noise by the per-pixel maps of the npz (keys offset_adu, readnoise_e)."""
         p = path or self.maps
         M = np.load(p)
+        for k in ('offset_adu', 'readnoise_e', 'gain_e_per_adu'):
+            v = getattr(self, k)
+            if k in M and np.ndim(v) == 0 and not (torch.is_tensor(v) and v.dim()):
+                self.scalars.setdefault(k, float(v))
+        self.map_extra = {k: M[k] for k in M.files if k not in ('offset_adu', 'readnoise_e')}
         if 'offset_adu' in M:
             self.offset_adu = M['offset_adu'].astype(np.float32)
         if 'readnoise_e' in M:

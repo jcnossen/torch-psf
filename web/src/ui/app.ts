@@ -528,6 +528,7 @@ export function startApp(root: HTMLElement) {
 
   // ================================================================ Estimate PSF / Localize
   let startZ: number[] | null = null;
+  let insituForm: InsituForm | null = null, insituRows: [string, string][] = [], beadRows: [string, string][] = [];
   onInsitu = (r) => { insitu = r; fillPresets(); showInsitu(r); if (r.refine?.kept) showRefinedVolume(); else showInsituVolume(); renderSteps(); };
   async function runMovie(kind: 'estimate' | 'localize') {
     if (!player) { $('mtext').textContent = 'No movie yet.'; return; }
@@ -537,6 +538,7 @@ export function startApp(root: HTMLElement) {
     if (form.roisize % 2 !== 1 || form.roisize < 5) { $('mtext').textContent = 'The ROI size must be odd (>= 5).'; return; }
     running = 'movie'; busy(true);
     startZ = kind === 'estimate' ? [...psf.zcoef] : null;
+    if (kind === 'estimate') insituForm = form;
     recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear(); locsDone = false;
     cloud?.start(player.W, player.H, 1000 * form.optics.pixel_um); cloud?.setFilter(n('r-crlb'));
     if (linked && cloud) { cloud.scale = mview.scale; cloud.cx = mview.cx; cloud.cy = mview.cy; }
@@ -633,6 +635,7 @@ export function startApp(root: HTMLElement) {
       rows.push(['vs the demo truth (rms over Noll 5-21)', `start ${e(r.zcoef_start).toFixed(4)} w, fitted ${e(r.zcoef).toFixed(4)} w`]);
     }
     $('i-table').innerHTML = kvRows(rows);
+    insituRows = rows;
     drawZernikeBars(r.zcoef, r.zcoef_start);
   }
   function drawZernikeBars(z: number[], start: number[] | null) {
@@ -652,6 +655,20 @@ export function startApp(root: HTMLElement) {
         n_train: insitu.n_train, n_test: insitu.n_test, iterations: insitu.iterations, partial: insitu.partial, heldout_nll_px_diff: insitu.heldout?.diff ?? null,
         z_scale_vs_start: insitu.z_scale, z_range_um: [n('m-zlo'), n('m-zhi')], gain_e_per_adu: n('o-gain'), offset_adu: n('o-offset') } });
     download(JSON.stringify(j, null, 1), 'psf_insitu.json', 'application/json');
+  };
+  $('i-pdf').onclick = async () => {
+    if (!insitu || !insituForm) return;
+    const st = $('i-status');
+    st.textContent = 'writing the report...';
+    try {
+      const R = await import('../report/fromapp'), r = insitu, f = insituForm;
+      const spec: VolumeSpec = { optics: f.optics, npupil: 64, noll: r.noll, zcoef: r.zcoef, nxy: 48, dxy_um: 0.04, zmin: f.zlo, zmax: f.zhi, nz: 41, ze_um: 0, focus_um: f.focus_um };
+      const vol = await call({ type: 'volume', spec });
+      const bytes = await R.makeFitReport(R.insituReportData(r, { form: f, results: insituRows, source: source === 'demo' ? 'simulated demo' : (source as File[]).map((x) => x.name).join(', '),
+        truth: truthZ ? DEFAULT_NOLL.map((j) => truthZ![j] ?? 0) : null, locs: recon?.rows() ?? null, volume: { data: vol.volume, spec } }));
+      download(bytes, 'fit_report.pdf', 'application/pdf');
+      st.textContent = `fit_report.pdf (${(bytes.length / 1024).toFixed(0)} kB)`;
+    } catch (e) { st.textContent = 'error: ' + (e as Error).message; }
   };
   function showLocs(s: MovieSummary) {
     const rows = recon!.rows(), N = rows.length / NCOL;
@@ -710,7 +727,7 @@ export function startApp(root: HTMLElement) {
     $('i-meta').textContent = `${r.beads.length} beads · ${r.iterations} iterations`;
     sel.value = 'fit';
     setVolume(r.volume, r.volumeSpec, beadNote(r));
-    $('res-table').innerHTML = kvRows([
+    const rows: [string, string][] = [
       ['beads (held out)', `${r.beads.length} (${r.beads.filter((b) => b.heldout).length})`],
       ['planes used / read', `${r.frames_used} / ${r.frames_total}${r.partial_read ? ' (reading stopped early)' : ''}`],
       ['iterations', `${r.iterations}${r.converged ? ' (converged)' : r.partial ? ' (stopped by user)' : ' (iteration limit)'} + ${r.heldout_iterations} held-out`],
@@ -718,7 +735,9 @@ export function startApp(root: HTMLElement) {
       ['NLL / px, held-out', r.nll_heldout_px === null ? 'none held out' : r.nll_heldout_px.toFixed(5)],
       ['z-step scale', r.dz_scale.toFixed(4)],
       ['time: read / fit', `${r.read_seconds.toFixed(2)} s / ${r.fit_seconds.toFixed(2)} s`],
-    ]);
+    ];
+    $('res-table').innerHTML = kvRows(rows);
+    beadRows = rows;
     drawZernikeSets($('zern') as HTMLCanvasElement, r.noll, [{ z: r.zcoef, color: '#2f6feb', label: 'fitted' }]);
     const bs = $<HTMLSelectElement>('bead');
     bs.innerHTML = r.beads.map((b, k) => `<option value="${k}">bead ${k + 1}${b.heldout ? ' (held out)' : ''}: stack ${b.stack + 1}, corner (${b.x0}, ${b.y0})</option>`).join('');
@@ -765,6 +784,19 @@ export function startApp(root: HTMLElement) {
     $('x-status').textContent = 'computing...';
     try { const r = await call({ type: 'export', kind, params: expParams() }); download(r.bytes, r.name); $('x-status').textContent = `${r.name} (${(r.bytes.length / 1024).toFixed(0)} kB)`; }
     catch (e) { $('x-status').textContent = 'error: ' + (e as Error).message; }
+  };
+  $('x-pdf').onclick = async () => {
+    const r = fitResult!, f = readForm();
+    $('x-status').textContent = 'writing the report...';
+    try {
+      const R = await import('../report/fromapp');
+      const bytes = await R.makeFitReport(R.beadReportData(r, { form: f, results: beadRows, settings: {
+        'stage sign / z step (\u00b5m)': [f.sign, f.dz_um], 'bead centre height (\u00b5m)': f.ze_um, 'camera gain (e/ADU) / offset (ADU)': [f.gain, f.offset],
+        'ROI size (px)': f.roisize, 'pupil sampling / oversampling': [f.npupil, f.oversample], 'fit z-step scale': f.fitDz, 'fit xy drift': f.fitDrift,
+        'held-out beads': f.holdout, 'max. iterations': f.maxIter } }));
+      download(bytes, 'fit_report.pdf', 'application/pdf');
+      $('x-status').textContent = `fit_report.pdf (${(bytes.length / 1024).toFixed(0)} kB)`;
+    } catch (e) { $('x-status').textContent = 'error: ' + (e as Error).message; }
   };
   $('x-knots').onclick = () => viaWorker('knots');
   $('x-tif').onclick = () => viaWorker('tif');
@@ -977,12 +1009,13 @@ const TEMPLATE = `
     <div data-mode="movie locs" class="btncol">
       <button id="r-csv" title="ThunderSTORM csv (nm, frames from 1), as torch_psf Dataset.save_csv">Localizations (.csv)</button><p class="hint">CSV in the ThunderSTORM format${cite('thunderstorm')}.</p>
       <button id="i-json" data-mode="movie">PSF (torch-psf json)</button>
+      <button id="i-pdf" data-mode="movie" title="PDF report of the in-situ PSF estimate">Fit report (PDF)</button><p id="i-status" class="hint" data-mode="movie"></p>
     </div>
     <div data-mode="stack">
       ${field('e-focus', 'Imaging focus', 0.0, 'µm', 'any', 'focal-plane position above the coverslip for the exported PSF / spline')}
       ${field('e-roi', 'Spline ROI', 13, 'px', '1')}
       <div class="field"><span class="fl">Spline z range</span><span class="pair"><span class="inp"><input id="e-zmin" type="number" step="any" value="0"></span><span class="inp"><input id="e-zmax" type="number" step="any" value="0.8"><i>µm</i></span></span></div>
-      <div class="btncol"><button id="x-json">PSF (torch-psf json)</button><button id="x-knots">Spline knots (.npz)</button><button id="x-tif">Model z-stack (.tif)</button></div>
+      <div class="btncol"><button id="x-json">PSF (torch-psf json)</button><button id="x-knots">Spline knots (.npz)</button><button id="x-tif">Model z-stack (.tif)</button><button id="x-pdf" title="PDF report of the bead fit">Fit report (PDF)</button></div>
       <p id="x-status" class="hint"></p>
     </div>
   </section>

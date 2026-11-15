@@ -40,7 +40,8 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
     steps) and are scored
     (report: heldout_nll_per_px). log(it, nll, seconds, zcoef), stop(): progress / early stop.
     Returns dict(psf, report, history, xy [nbeads, 2] px rel. to the ROI centre, photons [nbeads, nk],
-    bg [nbeads, nk], drift [nstacks, drift_order, 2] px (polynomial coefficients for t = plane index / half the
+    bg [nbeads, nk], model [nbeads, nk, P, P] (the fitted expected images), chi2 [nbeads, nk] (mean (d - mu)^2 / mu
+    per pixel), drift [nstacks, drift_order, 2] px (polynomial coefficients for t = plane index / half the
     stack, t in [-1, 1]) or None, dz_scale, height_um, bead_diameter_um)."""
     d, focus, vec, emitter_z = stack, focus_um, vectorial, emitter_z_um
     nb, nk, P = d.shape[0], d.shape[1], d.shape[-1]
@@ -160,16 +161,17 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
     with torch.no_grad():
         ph = photons(slice(None)).detach()
         # gain / statistics check: median over bead planes of the mean (d - mu)^2 / mu per pixel (~1 if Poisson)
-        c2 = []
+        c2, mus = [], []
         for i in range(nb):
             mu = model(torch.tensor([i], device=dev))
+            mus.append(mu.reshape(nk, P, P))
             c2.append(((d[i].reshape(-1, P, P) - mu) ** 2 / mu.clamp_min(1e-6)).flatten(1).mean(1))
         c2 = torch.stack(c2)
         tr = torch.ones(nb, dtype=torch.bool, device=c2.device) if w is None else (w > 0)
         rep['chi2_median'] = float(c2[tr].median())
         if not bool(tr.all()):
             rep['heldout_chi2_median'] = float(c2[~tr].median())
-    return _result(psf, rep, hist, dict(xy=xy.detach(), photons=ph, bg=bg.detach(),
+    return _result(psf, rep, hist, dict(xy=xy.detach(), photons=ph, bg=bg.detach(), model=torch.stack(mus), chi2=c2,
                                         drift=None if dr is None else dr.detach(),
                                         dz_scale=None if log_s is None else float(torch.exp(log_s)),
                                         height_um=None if height is None else float(height),

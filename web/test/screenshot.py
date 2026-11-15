@@ -96,7 +96,7 @@ def drive_app(pg, base, outdir):
     compress(os.path.join(outdir, 'result.png'), width=900, colors=96)
     files = {}
     pg.evaluate("window.__setStep('export')")
-    for btn in ['x-json', 'x-knots', 'x-tif']:
+    for btn in ['x-json', 'x-knots', 'x-tif', 'x-pdf']:
         with pg.expect_download() as dl:
             pg.click('#' + btn)
         d = dl.value
@@ -110,3 +110,7 @@ def drive_app(pg, base, outdir):
     t = tifffile.imread(files['x-tif'])
     print('exports: json', j['format'], len(j['zernike_waves']), 'Zernikes; knots', z['knots'].shape, float(z['hz']),
           '; model tif', t.shape, t.dtype, f'sum of the middle plane {t[len(t) // 2].sum():.3f}')
+    pdf = open(files['x-pdf'], 'rb').read()
+    if not (pdf.startswith(b'%PDF-') and pdf.rstrip().endswith(b'%%EOF')):
+        raise RuntimeError('fit_report.pdf is not a PDF')
+    print(f'fit report: {len(pdf) // 1024} kB, {pdf.count(b"/Type /Page ")} pages')
