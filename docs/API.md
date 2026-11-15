@@ -9,6 +9,15 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 
 ## Changes
 
+### 2026-11-15: multi-channel PSFs (additive; zero-offset 4Pi renders bit-identical)
+
+`MultiChannelPSF` (new, `torch_psf.multichannel`) is the base class of the multi-channel models: `ChannelsPSF` (new;
+independent channels) and `FourPiPSF` / `FourPiSplinePSF` (now its subclasses). The 4Pi models gain `fit`,
+`fit_theta`, `fisher`, `crlb`, `covariance`, `mu_and_jacobian` (before: `NotImplementedError`) and per-channel
+`channel_offsets`; `FourPiSplinePSF.render(..., knots=)`; `PSFZip.multichannel()`. Unchanged: `FourPiPSF.render(pos,
+grad, phi, M)`, `forward`, `expected(theta [N, 5], phi)`, `state` / `from_state` (key `channel_offsets` only when
+nonzero), `to_spline`, the psf.zip layout. See [Multi-channel PSFs](#multi-channel-psfs-torch_psfmultichannel).
+
 ### 2026-11-15: module renames (breaking for submodule imports; no aliases; no behaviour change)
 
 The top-level names are unchanged (`from torch_psf import Optics, Camera, photon_transfer, ...`). Only imports from the
@@ -141,8 +150,9 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
 ├── VectorialPSF(roisize, pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices, npupil, oversample,
 │                focus_um, z_range)  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
 │                from_optics, optics, to_spline(..., pos_fn))
-└── CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
-                 knots_from_model, knots_from_vectorial, vjp_vectorial, from_zstack
+├── CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
+│                knots_from_model, knots_from_vectorial, vjp_vectorial, from_zstack
+└── MultiChannelPSF: ChannelsPSF, FourPiPSF, FourPiSplinePSF   images [N, C, P, P] (see Multi-channel PSFs)
 
 Estimator (torch_psf.estimators)             report (dict), history (list), data (dict), progress / stop hooks
 ├── ZStackEstimator(model='vectorial' | 'spline' | 'astig_gauss', start=None, optics=None, camera=None, roisize=21,
@@ -158,6 +168,52 @@ detection (`extract_spots`), checkerboard split (training / held-out), `fit_zern
 overlap rejection and a second pass, optional refinement (`fit_free_knots` with ref = the vectorial knots, lam_ref
 3000, lam_s 1000; kept only if the held-out NLL per pixel improves; a z-warping warning is added), held-out
 comparison (`compare_heldout` of start / vectorial / refined), `z_scale` of the result against the start.
+
+## Multi-channel PSFs (`torch_psf.multichannel`)
+
+```
+PSF
+└── MultiChannelPSF (abstract)               render_channels(pos_c [N, C, 3], extra [N, k] | None, grad=False)
+      n_channels, extra_params, n_params,          -> [N, C, P, P]   [the only abstract method]
+      param_names, channel_offsets [C, 2],   render(pos, grad=False, offsets=None, **extra), expected(theta, offsets)
+      intensity_ratio [C],                   mu_and_jacobian(theta, offsets) -> (mu, J [N, 4 + C + k, C, P, P])
+      set_channel_offsets(v, trainable),     fisher / covariance / crlb(theta, var, offsets, fixed)
+      channel_positions(pos, offsets)        fit_theta(rois [N, C, P, P], theta0, var, offsets, fixed, ...) -> (theta, nll)
+                                             fit(rois, ..., offsets=None, fixed=()) -> Dataset
+                                             localize(movie): NotImplementedError (needs the channel mapping)
+    ├── ChannelsPSF(models, channel_offsets=None, intensity_ratio=None, names=None)   independent channels
+    ├── FourPiPSF (also a torch.nn.Module)                   extra_params ('phi',)
+    └── FourPiSplinePSF                                      extra_params ('phi',); render(..., knots=)
+```
+
+- **theta** = `[x, y, z, I, bg_0 .. bg_{C-1}, *extra]` (4 + C + k columns): x, y (px) of the emitter relative to the
+  centre of the reference ROI, z (um), I (photons), one background per channel (photons / px), then the extra
+  emitter parameters by name (4Pi: `phi`, the global 4Pi phase, rad). 2D models keep the z column, held fixed (as
+  `PSF`); `crlb` gives NaN there. `theta(pos, intensity, bg, **extra)` builds it.
+- **Channel positions**: channel c renders the emitter at `pos_c = (x + dx_c + ox_c, y + dy_c + oy_c, z)` with
+  `channel_offsets[c] = (dx, dy)` (px; fixed image offset of the channel's model, default zeros; a buffer, or a
+  parameter after `set_channel_offsets(v, trainable=True)`) and the optional per-spot offsets `offsets [N, C, 2]` (e.g.
+  ROI-corner differences from a channel mapping when the ROIs are cut per channel).
+- **Model**: `mu[:, c] = I intensity_ratio[c] g_c(pos_c; extra) + bg_c`; `render` includes `intensity_ratio` (default
+  ones; for 4Pi the channel transmissions `tau` are already in `g`).
+- **Fit** (`fit_theta`): `torch_psf.fit.lm_poisson` on all channels jointly (the same Levenberg-Marquardt, read-noise
+  shift and float64 step as `localize`). Clamp: every channel position inside `xy_limit - 0.05`, z in `z_limits`,
+  I >= 1, bg >= 1e-3. Starts: x, y = minus the mean channel offset, bg_c = 0.2 quantile of ROI c, I = signal / summed
+  model image; a 3D model without theta0 starts at `zstarts` heights times `default_extra_starts()` (4Pi: phi = 0,
+  pi / 2, pi, 3 pi / 2), the lowest NLL wins. `fixed`: names (`'x'`, `'z'`, `'I'`, `'bg'` = all backgrounds,
+  `'bg1'`, `'phi'`) or indices, held at their start. The 4Pi phase is returned in (-pi, pi]. `fit` returns a
+  Dataset: pos (reference frame; image coordinates with `corners` of the reference ROI), crlb, photons, bg (mean over
+  channels) and crlb_bg (of that mean), bg_channels / crlb_bg_channels [N, C], `phi` / `crlb_phi`, theta, loglik,
+  chi2, at_limit.
+- **4Pi**: `FourPiPSF` channel offsets are the same image shift of both arms (a phase ramp on both pupil fields, in
+  each arm's frame), computed with one pupil evaluation per spot and one image transform per channel; with all
+  offsets zero the earlier single evaluation runs (renders bit-identical). `to_spline` bakes the offsets into the
+  tables (the spline's own offsets are zero); `FourPiSplinePSF.channel_offsets` shift each channel's table
+  evaluation instead (stored in its torch-psf json, not in psf.zip, which refuses them). The earlier calls keep their
+  meaning: `render(pos, grad, phi, M)`, `forward(pos, M, phi_extra, intensity, bg)`, `expected(theta [N, 5], phi)`
+  (one background).
+- **psf.zip**: `PSFZip.read(path).multichannel()` = the coupled model, or a `ChannelsPSF` of the channel models with
+  their `intensity_ratio` (offsets zero; the channel `mapping` gives per-spot offsets). The format is unchanged.
 
 ## Detection and spots (`torch_psf.detect`, `torch_psf.spots`)
 
