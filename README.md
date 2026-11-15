@@ -10,8 +10,8 @@ them the Cramér-Rao bound, maximum-likelihood fitting of spots, localization of
 a cubic spline.
 
 - **models**: `VectorialPSF` (vectorial pupil function with Zernike aberrations), `CubicSplinePSF` (a 3D cubic
-  spline evaluated with one strided, grouped `conv2d` per batch of spots), `GaussianPSF` (2D) and
-  `AstigmaticGaussianPSF` (3D calibration curves);
+  spline evaluated with one strided, grouped `conv2d` per batch of spots), `GaussianPSF` (2D),
+  `AstigmaticGaussianPSF` (3D calibration curves) and `FourPiPSF` / `FourPiSplinePSF` (two-objective interference);
 - **fitting**: Poisson maximum likelihood (Levenberg-Marquardt, optional sCMOS read noise) and the Cramer-Rao bound;
 - **pipeline**: spot detection on movies, ROI extraction, and the localizations as a `Dataset` (filters, drift, rendering,
   FRC, HDF5 / Picasso / ThunderSTORM files);
@@ -47,7 +47,7 @@ psf.save('insitu.json')
 
 ```bash
 git clone https://github.com/jcnossen/torch-psf.git && cd torch-psf
-pip install -e .                  # numpy, scipy, torch, tifffile; [test] adds pytest, [viewer] scikit-image
+pip install -e .                  # numpy, scipy, torch, tifffile, h5py, matplotlib; [test] adds pytest, [viewer] scikit-image
 ```
 
 A GPU is optional: every function takes `device=` and defaults to `cuda` when available, else `cpu`.
@@ -132,12 +132,15 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `psf.py` | `PSF`: the base class (statistics, fitting, localization, files, to_spline). |
 | `spline.py` | `CubicSplinePSF`: Catmull-Rom (cubic) knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_zstack`. |
 | `gaussian.py` | `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D), pixel-integrated. |
+| `fourpi.py` | `FourPiPSF`: coherent two-objective (4Pi) PSF with C interference channels; `FourPiSplinePSF`: its spline table with the 4Pi phase as an analytic dependence. |
+| `zernike.py` | Zernike polynomials (Noll index and normalization). |
 | `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`; `solve_linear` (variable projection: closed-form per-frame intensities and backgrounds of a track). |
 | `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `link_tracks`, `Tracks` / `extract_tracks`. |
 | `estimators.py` | `ZStackEstimator`, `InSituEstimator`. |
 | `estimation/` | the PSF estimation steps (`beads`: bead fit; `knots`: knot-route fits, free knots; `tracks`: variable projection on tracks; `heldout`: held-out checks; `zscale`). |
 | `dataset.py` | `Dataset`: the localizations (dict of tensors; format in [docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)). |
 | `optics.py` | `Optics` (pixel size, NA, wavelength, refractive indices). |
+| `simulate.py` | simulated data with known truth: isolated emitters, bead z-stacks, blinking SMLM movies, filaments. |
 | `camera.py` | `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs); `photon_transfer`: camera offset and gain from the background pixels of a movie. |
 | `movie.py`, `io.py` | movie readers (TIFF incl. ImageJ > 4 GB and multi-part, memory-mapped), PSF files. |
 | `psfzip.py`, `psfreport.py` | the psf.zip writer / reader (channels, mappings, field dependence, z-stack, preview) and its fit report. |
@@ -147,34 +150,9 @@ the `web/` project (`scripts/build_viewer.sh`).
 [docs/PSF_FORMAT.md](docs/PSF_FORMAT.md)): `psf.json` with the optics, camera, provenance and a `channels` list (each
 channel a model of any type with its mapping to the reference channel and optional field dependence; 4Pi as one
 coupled model), the arrays as `.npy`, `zstack.tif` (the model rendered through z), `preview.png` and `fit_report.pdf`
-(an overview of the estimation). `PSF.load` reads it, the earlier format (one JSON with `format: "torch-psf"`, `type`,
-`optics`, `zernike_noll`, `zernike_waves`, `focus_um`, ..., plus an `.npz` for arrays; still written by `PSF.save` and
-by the web app) and a plain calibration json with the keys at the top level (`pixelsize_um`, `wavelength_um`, `NA`,
-`n_imm`, `n_med`, `zernike_noll`, `zernike_waves`, `focus_um`, ...).
-
-## The convolutional spline
-
-- **The PSF values are the parameters.** The spline is stored as its knot values, one number per knot, so the PSF can
-  be optimized directly or back-propagated through. A conventional coefficient-table spline (64 coefficients per
-  voxel) is differentiable in the emitter position only.
-- **No custom GPU kernel.** One evaluation is an indexed gather of knot windows plus one `conv2d` with groups and
-  stride; the gradient on the knots comes from autograd.
-- **Fast.** On an RTX 3090 with 15 x 15 patches: 7.1 million spots per second for the value, 4.1 million with the
-  x / y / z derivatives, 2.6 million with the gradient on the PSF values (paper draft, `study/insitu/bench_*.py`).
-- **In-situ fits at the cost of a spline.** The Zernike gradient through the knots is 21 times cheaper than evaluating
-  the vectorial model per emitter at 10^4 emitters and 40 times at 10^5; it agrees with it to 0.2 %.
-
-### Things to know
-
-- **Offset limit.** A spline supports emitter offsets up to `xy_limit` px from the ROI centre (default 3); the fitter
-  clamps there. For ROIs centred on detections of defocused spots use 3 px or more, and check `at_limit` in the
-  reports and the `at_limit` field of the localizations.
-- **What blinking data cannot determine.** A lateral shift of the PSF with z, the z scale and the absolute brightness
-  are not fixed by blinking data alone. A pupil model ties them to the PSF shape; free knots keep whatever their
-  starting model had and can improve the held-out likelihood and the repeat precision while warping z (paper draft,
-  section 4.7). In-situ reports therefore give `z_scale` against the starting PSF, and free-knot fits carry a warning.
-- **Spline accuracy.** With oversample 2 and 40 nm in z the spline differs from the pupil model by about 0.2 %
-  (relative L2); with oversample 1 by about 2 %.
+(an overview of the estimation); the web app writes and reads the same file. `PSF.load` also reads the earlier
+single-JSON format (still written by `PSF.save`) and plain calibration json files;
+`python -m torch_psf.psfzip calib.json` converts those to psf.zip.
 
 ## Tests
 
@@ -189,16 +167,9 @@ the entry points and the viewer API. Tests that need a GPU to be fast are skippe
 
 ## Browser version
 
-`web/` holds a browser app (TypeScript + WebGPU) that fits a vectorial PSF to a bead z-stack without installation; see
-[web/README.md](web/README.md).
-
-## The paper and the studies
-
-The method and its evaluation are in the paper draft [docs/paper/insitu_spline_psf.pdf](docs/paper/insitu_spline_psf.pdf)
-(*Differentiable spline for efficient in-situ estimation of point spread functions*, J. Cnossen, draft). The simulation
-study is `study/insitu/` (`python study/insitu/run_all.py 0` runs one seed; figures and tables by `make_figs.py` and
-`make_paper.py`); the real-data tests are in `study/realdata/` (EPFL SMLM challenge 2016 data, not included; see the
-READMEs there). Both import `torch_psf`.
+`web/` holds the browser app (TypeScript + WebGPU, [jcnossen.github.io/torch-psf](https://jcnossen.github.io/torch-psf/)):
+in-situ PSF estimation and localization of SMLM movies, bead z-stack fits, a localization viewer and psf.zip export,
+without installation; see [web/README.md](web/README.md).
 
 ## License
 
