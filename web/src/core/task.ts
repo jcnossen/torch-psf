@@ -22,6 +22,8 @@ export interface Progress {
   info?: Record<string, number | string>;
   elapsed_s?: number;
   eta_s?: number;
+  /** a frame the task has just finished and its spot positions (camera px), for the live movie view */
+  view?: { frame: number; x: number[]; y: number[] };
 }
 
 /** Moving-average rate estimator for the ETA. */

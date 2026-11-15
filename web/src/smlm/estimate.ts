@@ -68,7 +68,10 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
       roiParts.push(extractRois(fr, mv.H, mv.W, f0, d, P));
       for (let i = 0; i < d.x.length; i++) { cx0.push(d.x[i]); cy0.push(d.y[i]); cf.push(d.frame[i]); }
       n += d.x.length; done += f1 - f0; nChunks++;
-      progress({ stage: 'spots', done: Math.min(n, maxSpots), total: maxSpots, info: { frames: done }, ...eta.update(Math.min(n, maxSpots), maxSpots) });
+      let vf = -1; for (let i = 0; i < d.frame.length; i++) if (d.frame[i] > vf) vf = d.frame[i];   // the chunk's last frame with spots
+      const view = vf < 0 ? undefined : { frame: vf, x: [] as number[], y: [] as number[] };
+      if (view) for (let i = 0; i < d.frame.length; i++) if (d.frame[i] === vf) { view.x.push(d.x[i]); view.y.push(d.y[i]); }
+      progress({ stage: 'spots', done: Math.min(n, maxSpots), total: maxSpots, info: { frames: done }, view, ...eta.update(Math.min(n, maxSpots), maxSpots) });
     }
   } finally { det.destroy(); }
   if (tok.signal === 'enough') tok.signal = 'run';          // "enough" applied to the spot collection
