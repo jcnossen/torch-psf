@@ -1104,12 +1104,12 @@ const TEMPLATE = `
  <div class="side-foot" id="runbox">
   <div class="foot" data-mode="movie">
     <div class="progress"><div id="mbar"></div></div><p id="mtext" class="hint">Estimate PSF collects isolated spots, fits a vectorial PSF to them, then localizes the movie with it.</p>
-    <div class="btnrow idle"><button id="back" class="back" title="previous step">←</button><button id="next" class="primary"></button><button id="m-run" title="Estimate the PSF and localize the movie">Run all</button></div>
+    <div class="btnrow idle"><button id="back" class="back" title="previous step">Back</button><button id="next" class="primary"></button><button id="m-run" title="Estimate the PSF and localize the movie">Run all</button></div>
     <div class="btnrow running"><button id="m-enough" title="stop now and keep the current estimate">Stop early</button><button id="m-abort">Abort</button></div>
   </div>
   <div class="foot" data-mode="stack">
     <div class="progress"><div id="pbar"></div></div><p id="ptext" class="hint"></p>
-    <div class="btnrow idle"><button id="sback" class="back" title="previous step">←</button><button id="snext" class="primary"></button><button id="run">Fit PSF</button></div>
+    <div class="btnrow idle"><button id="sback" class="back" title="previous step">Back</button><button id="snext" class="primary"></button><button id="run">Fit PSF</button></div>
     <div class="btnrow running"><button id="enough">Use what we have</button><button id="abort">Abort</button></div>
   </div>
  </div>
