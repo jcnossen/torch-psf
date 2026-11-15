@@ -92,13 +92,14 @@ export class SplineLocalizer {
   }
 
   /** One LM run from theta0 [N, 5] (lm_poisson; iters 30, lam0 1). var: scalar read-noise variance (e^2). */
-  async run(rois: Float32Array, N: number, theta0: Float32Array, o: { iters?: number; fixed?: number[]; var?: number } = {}): Promise<LocResult> {
+  /** sharedRois: the ROIs already on the GPU (localize() uploads them once for all z starts; not destroyed here) */
+  async run(rois: Float32Array, N: number, theta0: Float32Array, o: { iters?: number; fixed?: number[]; var?: number } = {}, sharedRois?: GPUBuffer): Promise<LocResult> {
     const g = this.g, P2 = g.roisize ** 2;
     const mk = (size: number, usage = SU | CD) => this.dev.createBuffer({ size: Math.max(16, size), usage });
-    const bR = mk(N * P2 * 4), bT = mk(N * 20), bO = mk(N * 52, SU | CS), bU = mk(80, GPUBufferUsage.UNIFORM | CD);
+    const bR = sharedRois ?? mk(N * P2 * 4), bT = mk(N * 20), bO = mk(N * 52, SU | CS), bU = mk(80, GPUBufferUsage.UNIFORM | CD);
     const rb = this.dev.createBuffer({ size: Math.max(16, N * 52), usage: GPUBufferUsage.MAP_READ | CD });
     try {
-      this.dev.queue.writeBuffer(bR, 0, rois.buffer, rois.byteOffset, N * P2 * 4);
+      if (!sharedRois) this.dev.queue.writeBuffer(bR, 0, rois.buffer, rois.byteOffset, N * P2 * 4);
       this.dev.queue.writeBuffer(bT, 0, theta0.buffer, theta0.byteOffset, N * 20);
       const [zmin, zmax] = this.zLimits;
       const oS0 = (-((g.roisize - 1) >> 1) - (-(((Math.ceil((g.roisize - 1) / 2 + g.xmax) + 2) * g.S + g.S - 1) / g.S))) * g.S;
@@ -133,7 +134,7 @@ export class SplineLocalizer {
         r.nll[n] = out[n * 13 + 5]; r.chi2[n] = out[n * 13 + 11]; r.deviance[n] = out[n * 13 + 12];
       }
       return r;
-    } finally { for (const b of [bR, bT, bO, bU, rb]) b.destroy(); }
+    } finally { for (const b of [bT, bO, bU, rb]) b.destroy(); if (!sharedRois) bR.destroy(); }
   }
 
   /** torch_psf.estimation.knot_gradient: d NLL / d knots [nz, nv, nu] at fixed theta [N, 5] summed over the ROIs, and the
@@ -187,10 +188,20 @@ export class SplineLocalizer {
     const zs = o.zstarts ?? 5, { zlo, zhi } = this.g;
     let best: LocResult | null = null;
     const th0 = this.initialTheta(rois, N, 0);           // the same for every start but z
+    // all starts are submitted before any readback is awaited (run() submits synchronously): one GPU round trip per
+    // call instead of zstarts; the results are combined in start order, as before
+    const P2 = this.g.roisize ** 2;
+    const bR = this.dev.createBuffer({ size: Math.max(16, N * P2 * 4), usage: SU | CD });   // the ROIs, once for all starts
+    this.dev.queue.writeBuffer(bR, 0, rois.buffer, rois.byteOffset, N * P2 * 4);
+    const runs: Promise<LocResult>[] = [];
     for (let k = 1; k <= zs; k++) {
       const z = Math.fround(zlo + (zhi - zlo) * k / (zs + 1));
       const th = th0.slice(); for (let n = 0; n < N; n++) th[n * 5 + 2] = z;
-      const r = await this.run(rois, N, th, o);
+      runs.push(this.run(rois, N, th, o, bR));
+    }
+    let results: LocResult[];
+    try { results = await Promise.all(runs); } finally { bR.destroy(); }
+    for (const r of results) {
       if (!best) { best = r; continue; }
       for (let n = 0; n < N; n++) if (r.nll[n] < best.nll[n]) {
         best.nll[n] = r.nll[n]; best.chi2[n] = r.chi2[n]; best.deviance[n] = r.deviance[n];
