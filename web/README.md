@@ -103,9 +103,13 @@ Flate-compressed with `CompressionStream('deflate')`, uncompressed without it) a
 Sections, each left out without data: settings and results tables, spot / bead counts (accepted, rejected, held out),
 loss convergence (in situ: per pass, relative to the pass minimum), Zernike coefficients (bars with error bars when
 given, start and demo truth), histograms (in situ: photons, background, z, CRLB of the movie's localizations), pupil
-amplitude and aberration phase, PSF xy slices and the xz section (log scale), example ROIs (beads: data / model /
-difference at the middle plane) and Zernike-over-field maps. `makeFitReport(data: FitReportData)` in
-`src/report/fitreport.ts` is the entry point; the report code is loaded on demand (a separate 33 kB chunk).
+amplitude and aberration phase, PSF xy slices and the xz section (log scale), the ROI quality range (one page: a
+histogram of a per-ROI score q with the acceptance cutoff, then data / model / difference of the 3 best ROIs, the 3
+last accepted just below the cutoff and the 3 first rejected just above; in situ: q = first-pass deviance per pixel and
+the overlap rejection threshold, only the ~9 shown ROIs leave the worker; beads: q = chi2 per pixel of a bead, no
+rejection, a reference line median + 3 x 1.4826 MAD), example ROIs (beads: data / model / difference at the middle
+plane, held-out beads first) and Zernike-over-field maps. `makeFitReport(data: FitReportData)` in
+`src/report/fitreport.ts` is the entry point; the report code is loaded on demand (a separate 39 kB chunk).
 
 ![result](docs/result.png)
 
@@ -168,6 +172,7 @@ checked in between.
 | bead fit, one-bead real crop vs the Python fit (no held-out bead; z-step scale fixed) | Zernikes 0.0000 w rms, focus 0.05 nm, PSF L2 7e-5, NLL 4e-7 rel. | same |
 | spline knots vs torch_psf's `CubicSplinePSF` (knots_from_vectorial) | max rel. error 2e-6 | |
 | PDF writer and fit report (synthetic data, all sections; empty and partial reports) | header, xref offsets, stream lengths, page count, Flate streams inflate to the image sizes; the report is saved to `test/out/fit_report_test.pdf` | |
+| ROI quality range (synthetic bands, bead chi2 with reference line, in-situ estimate of a small demo movie) | bands around the cutoff, rejected count = n_rejected, the deviance of the shown data / model reproduces q (max rel. 4e-6); `test/out/quality_range_insitu.pdf`, `quality_range_beads.pdf` | 2e-2 |
 | SMLM movie: spot detection vs torch_psf `extract_spots` / `detect_spots` (seeded simulated movie, 300 frames, chunks of 100) | identical spots and order (718 / 718), noise rel. 2e-6 | |
 | SMLM movie: spline localization vs torch_psf `fit.localize` / `crlb` (same knots, 600 spots) | xy 99 % 4e-3 px, z 99 % 1e-3 um, CRLB 1e-3 rel. (float32 vs float64 solves) | 1e-2 px, 3e-3 um |
 | SMLM movie: whole pipeline (ADU, detection, knots, localization) vs the torch_psf localization table | same spots and frames; xy 99 % 4e-3 px | 1e-2 px |

@@ -5,6 +5,7 @@ import type { InsituReport } from '../smlm/estimate';
 import type { FitSummary, InsituForm, VolumeSpec } from '../ui/protocol';
 import { NCOL } from '../smlm/movie';
 import { FitReportData, ReportImage, SettingValue, makeFitReport } from './fitreport';
+import { QualityRange, QualityRoi, qualityBands, referenceCutoff } from './quality';
 
 export { makeFitReport };
 
@@ -91,10 +92,41 @@ export function insituReportData(r: InsituReport, c: InsituContext): FitReportDa
     ] : [],
     pupil: pupilMaps(f.optics, r.noll, r.zcoef),
     psf: c.volume ? volumeSlices(c.volume.data, c.volume.spec, 'z') : undefined,
+    quality: r.quality ?? null,
     notes: [
       ...(hasLocs ? ['Histograms: all localizations of the movie with the fitted PSF.'] : []),
       ...r.warnings,
     ],
+  };
+}
+
+/** Quality range of a bead fit: q = chi2 per px of a bead ((d - mu)^2 / mu over its planes and pixels); the fit rejects
+ *  no beads, so the cutoff is a reference line (median + 3 x 1.4826 MAD, with at least 3 beads). Images: the plane
+ *  with the sharpest model. */
+export function beadQuality(r: FitSummary): QualityRange | null {
+  const R = r.R, R2 = R * R, nb = r.beads.length;
+  if (!nb) return null;
+  const q = new Float32Array(nb);
+  r.beads.forEach((b, k) => {
+    let s = 0;
+    for (let i = 0; i < b.nz * R2; i++) { const m = Math.max(r.model[k][i], 1e-6), e = r.data[k][i] - r.model[k][i]; s += (e * e) / m; }
+    q[k] = s / (b.nz * R2);
+  });
+  const cut = nb >= 3 ? referenceCutoff(q) : null;
+  const bd = qualityBands(q, (i) => cut === null || q[i] < cut);
+  const roi = (k: number): QualityRoi => {
+    const b = r.beads[k], md = r.model[k];
+    let j = 0, best = -Infinity;
+    for (let p = 0; p < b.nz; p++) { let mx = -Infinity; for (let i = 0; i < R2; i++) mx = Math.max(mx, md[p * R2 + i]); if (mx > best) { best = mx; j = p; } }
+    return { q: q[k], rank: bd.rank[k], data: r.data[k].slice(j * R2, (j + 1) * R2), model: md.slice(j * R2, (j + 1) * R2), width: R, height: R,
+      label: `bead ${k + 1} (stack ${b.stack + 1}${b.heldout ? ', held out' : ''}), plane ${j + 1} of ${b.nz} (sharpest)` };
+  };
+  let nAbove = 0; if (cut !== null) for (const v of q) if (!(v < cut)) nAbove++;
+  return {
+    q, cutoff: cut, cutoffKind: cut === null ? null : 'reference', qLabel: 'chi2 per px of a bead (mean over its planes)', unit: 'beads',
+    notes: [`q = chi2 per px of a bead, (data - model)^2 / model over its planes and pixels (about 1 when the model explains the data); images: the plane with the sharpest model.`,
+      ...(cut !== null ? [`The bead fit rejects no beads. Reference line (not a rejection): median + 3 x 1.4826 MAD = ${cut.toFixed(3)}; ${nAbove} of ${nb} beads lie above it (none rejected).`] : [])],
+    best: bd.best.map(roi), lastAccepted: bd.lastAccepted.map(roi), firstRejected: bd.firstRejected.map(roi),
   };
 }
 
@@ -110,6 +142,7 @@ export function beadReportData(r: FitSummary, c: BeadContext): FitReportData {
     zernike: { noll: r.noll, values: r.zcoef },
     pupil: pupilMaps(c.form.optics, r.noll, r.zcoef, c.form.npupil),
     psf: volumeSlices(r.volume, r.volumeSpec, 'defocus'),
+    quality: beadQuality(r),
     examples: ex.map(({ b, k }) => {
       const j = b.nz >> 1, s = j * R * R;
       return { label: `bead ${k + 1}${b.heldout ? ' (held out)' : ''}, plane ${j} of ${b.nz}`, data: r.data[k].subarray(s, s + R * R), model: r.model[k].subarray(s, s + R * R), width: R, height: R };
