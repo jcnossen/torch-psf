@@ -28,8 +28,9 @@ export async function openSource(src: File[] | MovieSource, progress?: (p: Progr
   return TiffMovie.open(src, (msg) => progress?.({ stage: 'header', done: 0, total: 1, info: { msg } }));
 }
 
-/** frames per localization batch (emitted to the live views) */
-const EMIT_FRAMES = 50;
+/** frames of the first localization batch emitted to the live views; the batch doubles (up to the noise chunk) while a
+ *  batch takes less than EMIT_MS, so a long movie runs at full-chunk batches and the views still update ~every 0.2 s */
+const EMIT_FRAMES = 50, EMIT_MS = 200;
 
 export async function localizeMovie(device: GPUDevice, source: File[] | MovieSource, form: MovieForm, tok: StopToken,
   progress: (p: Progress) => void, emit: (rows: Float32Array) => void): Promise<MovieSummary> {
@@ -47,7 +48,7 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
   const det = new Detector(device, mv.H, mv.W, chunk, { threshold: form.threshold, border: h + 2, isolation: form.isolation > 0 ? form.isolation : null });
   const eta = new Eta();
   const t0 = performance.now();
-  let n = 0, nLimit = 0, done = 0, partial = false;
+  let n = 0, nLimit = 0, done = 0, partial = false, emitFrames = EMIT_FRAMES;
   const varE = form.readnoise_e > 0 ? Math.fround(form.readnoise_e * form.readnoise_e / (form.excessNoise ?? 1) ** 2) : 0;
   try {
     for (let f0 = 0; f0 < nFrames; f0 += chunk) {
@@ -60,12 +61,13 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
       if ((form.excessNoise ?? 1) !== 1) { const F2 = form.excessNoise!; for (let i = 0; i < fr.length; i++) fr[i] = Math.fround(fr[i] / F2); }
       const d = await det.detect(fr, T, f0);
       const N = d.frame.length;
-      // localized and emitted in sub-batches of EMIT_FRAMES frames (detections are in frame order), so the live views
+      // localized and emitted in sub-batches of emitFrames frames (detections are in frame order), so the live views
       // update while a noise chunk is processed; every spot is fitted on its own, so the results do not depend on it
       let a = 0;
       while (a < N) {
         tok.check();
-        const fEnd = d.frame[a] - (d.frame[a] - f0) % EMIT_FRAMES + EMIT_FRAMES;
+        const tb = performance.now();
+        const fEnd = d.frame[a] + emitFrames;
         let b = a; while (b < N && d.frame[b] < fEnd) b++;
         const M = b - a;
         const rois = extractRois(fr, mv.H, mv.W, f0, d, P, a, M);
@@ -84,6 +86,7 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
         emit(rows);
         n += M;
         a = b;
+        if (performance.now() - tb < EMIT_MS) emitFrames = Math.min(chunk, 2 * emitFrames);
         const fd = Math.min(f1, fEnd);
         progress({ stage: 'localize', done: fd, total: nFrames, info: { localizations: n }, ...eta.update(fd, nFrames) });
       }

@@ -257,10 +257,10 @@ export function startApp(root: HTMLElement) {
   const locsByFrame = new Map<number, number[]>();
   const detsByFrame = new Map<number, number[]>();     // spots detected for the PSF fit (rings in another colour)
   // while a run is going the movie shows the frame the worker finished last, with its spots / localizations
-  let follow = false, followAt = 0, followNext = -1, followTimer = 0;
+  let follow = false, followAt = 0, followNext = -1, followTimer = 0, followLast = -1;
   function followFrame(t: number) {
     if (!follow) return;
-    followNext = t;
+    followNext = t; followLast = t;
     const wait = 250 - (performance.now() - followAt);
     if (wait <= 0) { followAt = performance.now(); showFrame(t); followNext = -1; }
     else if (!followTimer) followTimer = window.setTimeout(() => { followTimer = 0; if (followNext >= 0) followFrame(followNext); }, wait);
@@ -575,7 +575,7 @@ export function startApp(root: HTMLElement) {
     startZ = kind === 'estimate' ? [...psf.zcoef] : null;
     if (kind === 'estimate') insituForm = form;
     recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear(); detsByFrame.clear(); locsDone = false;
-    setPlaying(false); follow = true; followAt = 0;
+    setPlaying(false); follow = true; followAt = 0; followLast = -1;
     $('r-empty').hidden = false;
     $('r-empty').textContent = kind === 'estimate' ? 'Fills in at the last stage of Estimate PSF: localizing the movie with the fitted PSF.' : 'Fills in live while the movie is localized.';
     cloud?.start(player.W, player.H, 1000 * form.optics.pixel_um); cloud?.setFilter(n('r-crlb'));
@@ -585,7 +585,9 @@ export function startApp(root: HTMLElement) {
     try {
       const src: MovieSourceSpec = source;
       const r = kind === 'estimate' ? await call({ type: 'estimate', source: src, form, localize: true }) : await call({ type: 'movie', source: src, form: form as MovieForm });
-      follow = false; drawRecon(); setPlaying(false); showFrame(frameNow);
+      // the last frame the run reported (a throttled update may still be pending), else the current one
+      follow = false; clearTimeout(followTimer); followTimer = 0; followNext = -1;
+      drawRecon(); setPlaying(false); showFrame(followLast >= 0 ? followLast : frameNow);
       const s = r.summary as MovieSummary | null;
       if (s) { showLocs(s); locsDone = true; }
       $('mbar').style.width = '100%';
