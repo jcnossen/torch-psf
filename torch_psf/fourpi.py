@@ -292,7 +292,8 @@ class FourPiPSF(torch.nn.Module, PSF):
         if self.asym:
             meta['asym'] = True
         s = dict(meta=meta, zt=_list(t.zcoef), zb=_list(b.zcoef), phi=_list(self.phi), tau=_list(self.tau),
-                 a=float(self.a), gamma=float(self.gamma), d_bot=_list(self.d_bot), blur_px2=float(self.blur_px2))
+                 a=float(self.a.detach()), gamma=float(self.gamma.detach()), d_bot=_list(self.d_bot),
+                 blur_px2=float(self.blur_px2.detach()))
         if self.asym:
             s['depth'] = _list(self.depth)
         return s
