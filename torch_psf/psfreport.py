@@ -24,6 +24,7 @@ Inputs: report = an estimator (its report, history, data), a dict {report, histo
 report dict; without one, provenance['report'] / ['settings'] of the PSF (the estimators put them there).
 """
 import io as _io
+import os
 import time
 import warnings
 import numpy as np
@@ -260,7 +261,9 @@ def s_summary(ctx):
         blocks.append(('Warnings', [f'- {w}' for w in ctx.rep['warnings']]))
     if not ctx.rep and not ctx.history and not ctx.data:
         blocks.append(('Note', ['No estimator data: this report has the model pages only.']))
-    return _text_pages(f'PSF report  ({time.strftime("%Y-%m-%d %H:%M")})', blocks)
+    sde = os.environ.get('SOURCE_DATE_EPOCH')       # no wall-clock time: the zip stays byte-reproducible
+    title = 'PSF report' + (f'  ({time.strftime("%Y-%m-%d %H:%M", time.gmtime(int(sde)))} UTC)' if sde else '')
+    return _text_pages(title, blocks)
 
 
 def s_spots(ctx):

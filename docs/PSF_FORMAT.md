@@ -221,13 +221,15 @@ string, 0-d allowed; readers that do not need them skip dtypes they cannot parse
 
 Scalars are JSON numbers (float64). Optics scalars that the model holds as float32 are written as the shortest
 decimal of that float32 (1.33, not 1.3300000429). Arrays in the JSON are float64 decimals of the stored values.
-Writers should make the zip byte-reproducible: fixed member times (torch-psf: 1980-01-01), no creation date in the
-PDF.
+Writers should make the zip byte-reproducible: fixed member times (torch-psf: 1980-01-01), no creation date or wall-clock
+time stamp in the PDF (torch-psf dates the report only when SOURCE_DATE_EPOCH is set), no creation time in
+provenance.
 
 ### zstack.tif
 
 Always present, for every model type. ImageJ hyperstack, float32, axes **ZCYX** (Z planes, C channels, Y rows, X
-columns; C and Z may be 1), ImageJ metadata `spacing` = z step (um), `unit` = um, resolution = 1 / sample spacing
+columns; C and Z may be 1: with C = 1 the ImageJ description has no `channels=`, so readers that squeeze singleton
+axes, e.g. tifffile's default series, report ZYX; read with squeeze=False for ZCYX), ImageJ metadata `spacing` = z step (um), `unit` = um, resolution = 1 / sample spacing
 (px per um), `Info` = JSON {format, version, psf_type, z_um, channels, sample_px}. `psf.json` `zstack`: `{file, axes:
 "ZCYX", shape [Z, C, Y, X], dtype, z_um [Z], sample_px, sample_um, channels [names], position {x: 0, y: 0}, params
 (e.g. {phi: 0} for 4Pi), value}`.
@@ -322,23 +324,11 @@ A 4Pi spline: `"psf_type": "fourpi_spline"`, `"emitter_params": [..., "phi"]`, c
 
 ## Web app
 
-What the TypeScript writer / reader (`web/src/io/`) needs; not implemented yet:
-
-- **psf.json**: extend `psfjson.ts` from the vectorial 0.1.0 JSON to the 0.2.0 `channels` layout (a vectorial channel's
-  `model` is the current `PsfJson` without `format` / `version` / `type` / `provenance` / `arrays`). Read: accept 0.1.0
-  JSON and 0.2.0 zips.
-- **zip container**: `npy.ts` has `writeNpy` and an uncompressed zip writer inside `writeNpz`, and `parseNpz` (inflate
-  reader). Factor the zip writer out to take arbitrary `{name: Uint8Array}` members (psf.json, `.npy`, TIFF, PNG,
-  PDF), stored (no compression) is fine; `parseNpz` becomes a generic member reader filtered to `.npy`.
-- **zstack.tif**: `tifwrite.ts` `writeTiffStack(data, n, H, W, extra)` writes a float32 stack; it needs the ImageJ
-  hyperstack description (`images=Z*C`, `channels=C`, `slices=Z`, `hyperstack=true`, `spacing`, `unit=um`), the
-  resolution tags and the Info JSON, and the renderer at 1 / k px sampling (k x k shifted renders).
-- **preview.png**: draw the slices into a canvas, `canvas.toBlob('image/png')`.
-- **fit_report.pdf** (open question): (a) a minimal PDF writer in TS (text + embedded PNG images of canvas-rendered
-  plots: one image per page is a few hundred lines, no dependency); (b) a library such as jsPDF (adds a dependency to
-  the static app); (c) the browser's print-to-PDF of a report HTML page (not scriptable into the zip); (d) write the
-  report as `fit_report.html` (or PNG pages) from the web app and keep PDF for Python. (a) or (b) keep one member
-  name for both writers; (d) would make the member optional per writer and needs a spec change.
+The TypeScript writer / reader (`web/src/io/psfzip.ts`, `zip.ts`, `imagejtif.ts`; `web/src/psf/makezip.ts`) writes a
+one-channel psf.zip (vectorial, or spline with the vectorial model as `source`) from the bead and in-situ fits, with
+zstack.tif, preview.png and the client-side fit_report.pdf, and reads channel 0 (vectorial, or the `source` of a
+spline channel) of any psf.zip. Not read yet: pupil maps, blur, dipole terms, mappings, field dependence (listed in
+the import's info line). Cross-checked against torch_psf in `tests/test_web_psfzip.py` / `web/test/test_psfzip.ts`.
 
 ## Open points
 

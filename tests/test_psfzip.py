@@ -423,3 +423,16 @@ def test_fourpi_state_exact_and_knot_options(tmp_path):
         assert torch.allclose(srb.render(POS, phi=phi), ref, atol=1e-6)
         assert (s16.render(POS, phi=phi) - ref).abs().max() < 2e-3 * ref.abs().max()
     assert os.path.getsize(tmp_path / 'srb.zip') < os.path.getsize(tmp_path / 's16.zip') < os.path.getsize(tmp_path / 's32.zip')
+
+
+def test_zip_reproducible_across_minutes(tmp_path, monkeypatch):
+    """no wall-clock time in the zip (the fit-report title once carried one): a clock that changes on every call
+    must not change the bytes"""
+    import itertools
+    import time as _time
+    n = itertools.count()
+    monkeypatch.setattr(_time, 'strftime', lambda *a: f'2026-01-01 00:{next(n):02d}')
+    a, b = tmp_path / 'a.zip', tmp_path / 'b.zip'
+    save(a, GaussianPSF(11, 1.3, DEV, pixel_um=0.1))
+    save(b, GaussianPSF(11, 1.3, DEV, pixel_um=0.1))
+    assert a.read_bytes() == b.read_bytes()
