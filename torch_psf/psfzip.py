@@ -379,6 +379,17 @@ class PSFZip:
     def channel(self, c):
         return self.channels[_channel_index(self.meta, c)]
 
+    def multichannel(self):
+        """The file's PSF as a MultiChannelPSF (torch_psf.multichannel): a coupled (4Pi) model itself, else a ChannelsPSF
+        of the channel models (also for a single channel) with the channels' intensity_ratio and names. Channel
+        offsets are zero: the mapping of the channels (Channel.to_ref / from_ref) gives the per-spot offsets of ROIs
+        cut per channel (fit(..., offsets=)). Additive convenience; the file layout is unchanged."""
+        from torch_psf.multichannel import MultiChannelPSF, ChannelsPSF
+        if isinstance(self.psf, MultiChannelPSF):
+            return self.psf
+        return ChannelsPSF([c.model for c in self.channels], intensity_ratio=[c.intensity_ratio for c in self.channels],
+                           names=[c.name for c in self.channels])
+
     @property
     def acquisition(self):
         return self.meta.get('acquisition') or {}
@@ -536,6 +547,9 @@ def _channel_blocks(psf, source, names, spline_knots='float32'):
                  for c in range(psf.n_channels)]
         return chans, sb, arrays
     if t == 'fourpi_spline':
+        if psf.has_offsets():
+            raise ValueError('psf.zip has no field for FourPiSplinePSF channel offsets: bake them into the tables '
+                             '(FourPiPSF.to_spline of a source with channel_offsets)')
         if source is not None:
             sb, a = _model_block(source, 'source')
             arrays.update(a)
