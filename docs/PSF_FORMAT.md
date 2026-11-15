@@ -60,6 +60,7 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
 | `channels` | [dict] | yes | one entry per output channel (below) |
 | `source` | dict | no | the coupled model behind all channels (4Pi), `{type, model, arrays}` |
 | `patterns` | dict | no | pattern / modulation metadata (SIMFLUX, SIMCODE) |
+| `acquisition` | dict | no | sample / acquisition metadata that is not the PSF (TIRF depth, emitter height distribution, ...), free-form, kept verbatim |
 | `zstack` | dict | yes | description of `zstack.tif` |
 | `preview` | dict | yes | `{"file": "preview.png"}` |
 | `report` | dict | yes | `{"file": "fit_report.pdf", "sections": [...]}` (the sections written) |
@@ -184,6 +185,20 @@ other, "n_angles", "n_phases", "angles": [{"k_px": [kx, ky] (rad / px), "phases_
 tensor per pattern angle; a per-angle blur) is a parameter of the one PSF, not separate PSFs: it lives in the vectorial
 model (`psf_dipole_M_angle` [A, 3, 3], `psf_blur_angle_px2` [A, 3]) and is selected per frame by the known parameter
 `angle` (Python: `PSF.load(path, angle=a)`; `angle=None` = the average).
+
+### Acquisition (`acquisition`, optional)
+
+Free-form metadata of the sample and the acquisition that a user of the PSF may need but that is not part of it, e.g.
+SIMCODE's `tirf_depth_um`, `emitter_z_median_um`, `emitter_z_quantiles_um`, `emitter_z_range_um` (the height
+distribution a network is trained on). Readers keep it verbatim (Python: `PSFZip.read(p).acquisition`).
+
+### Converting calibration json files
+
+`python -m torch_psf.psfzip calib.json [...] [-o out]` (Python: `torch_psf.psfzip.convert_calibration`) converts a
+SIMCODE calib json or a torch-psf 0.1.0 PSF json + npz without loss: the PSF and the camera (with its maps) as usual;
+of the remaining top-level keys `source` / `psf_v2` go to `provenance`, a `pattern` dict to `patterns`
+(`type: "simcode"`, with `pattern_note` as `note`), everything else to `acquisition`; the complete original json is
+also kept in `provenance.converted_from` = {file, json}.
 
 ### Camera (`camera`, optional)
 
