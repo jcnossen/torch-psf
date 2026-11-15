@@ -24,15 +24,15 @@ export class VecEngine {
   readonly nA: number;           // atomic columns of the normal equations (D + 1)
   readonly nslot: number;
   readonly R: number;
-  private dev: GPUDevice;
-  private pipes: Record<string, GPUComputePipeline> = {};
-  private bufs: Record<string, GPUBuffer> = {};
+  protected dev: GPUDevice;
+  protected pipes: Record<string, GPUComputePipeline> = {};
+  protected bufs: Record<string, GPUBuffer> = {};
   private chunkJ: number;        // images per chunk with derivatives
-  private chunk1: number;        // images per chunk, value only
+  protected chunk1: number;      // images per chunk, value only
   private Btot = 0;              // capacity of the global per-image buffers
   private uni: GPUBuffer[] = [];
   readonly slotPairs: [number, number][];
-  private destroyed = false;
+  protected destroyed = false;
 
   constructor(dev: GPUDevice, cfg: VectorialConfig, dirs: Direction[], opts: { budgetMB?: number; maxChunk?: number } = {}) {
     this.dev = dev;
@@ -82,9 +82,14 @@ export class VecEngine {
     q.writeBuffer(this.bufs.G, 0, G);
     q.writeBuffer(this.bufs.slots, 0, slots);
     this.setZernike(new Float64Array(cfg.zernike_noll.length));
-    const mod = (src: string) => dev.createShaderModule({ code: common + '\n' + src });
-    for (const [k, src] of Object.entries({ phase: phaseSrc, dft1: dft1Src, dft2: dft2Src, bin: binSrc, ne: neSrc, nll: nllSrc })) {
-      this.pipes[k] = dev.createComputePipeline({ layout: 'auto', compute: { module: mod(src), entryPoint: 'main' }, label: k });
+    this.addPipelines({ phase: phaseSrc, dft1: dft1Src, dft2: dft2Src, bin: binSrc, ne: neSrc, nll: nllSrc });
+  }
+
+  /** Compute pipelines (entry point main) from kernel sources that use the shared uniform block of common.wgsl. */
+  protected addPipelines(srcs: Record<string, string>) {
+    for (const [k, src] of Object.entries(srcs)) {
+      const module = this.dev.createShaderModule({ code: common + '\n' + src, label: k });
+      this.pipes[k] = this.dev.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' }, label: k });
     }
   }
 
@@ -135,12 +140,14 @@ export class VecEngine {
     this.dev.queue.writeBuffer(this.bufs.data, 0, d);
   }
 
-  private uniform(i: number, v: { D: number; B: number; b0: number; theta0: number }): GPUBuffer {
-    while (this.uni.length <= i) this.uni.push(this.dev.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | CD }));
-    const ab = new ArrayBuffer(48), u32 = new Uint32Array(ab), f32 = new Float32Array(ab);
+  /** Uniform block i (common.wgsl). Uniforms are written when encoded: commands submitted together need distinct i. */
+  protected uniform(i: number, v: { D: number; B: number; b0: number; theta0: number; S?: number }): GPUBuffer {
+    while (this.uni.length <= i) this.uni.push(this.dev.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | CD }));
+    const ab = new ArrayBuffer(64), u32 = new Uint32Array(ab), f32 = new Float32Array(ab);
     u32.set([this.pd.N, this.pd.ns, this.R, this.cfg.oversample, v.D, v.B, v.b0, v.theta0]);
     f32[8] = this.pd.C; f32[9] = this.cfg.pixel_um;
     u32[10] = this.nA; u32[11] = this.nslot;
+    u32[12] = v.S ?? 0;
     this.dev.queue.writeBuffer(this.uni[i], 0, ab);
     return this.uni[i];
   }
@@ -153,7 +160,7 @@ export class VecEngine {
   }
 
   /** Encode the image pipeline for images b0 .. b0 + B - 1 with D directions (D = 1: value only). */
-  private encodeChunk(enc: GPUCommandEncoder, uslot: number, b0: number, B: number, D: number, what: 'ne' | 'nll' | 'none') {
+  protected encodeChunk(enc: GPUCommandEncoder, uslot: number, b0: number, B: number, D: number, what: 'ne' | 'nll' | 'none') {
     const { N, ns } = this.pd;
     const NN = N * N, RR = this.R * this.R;
     const u0 = this.uniform(2 * uslot, { D, B, b0, theta0: 0 });

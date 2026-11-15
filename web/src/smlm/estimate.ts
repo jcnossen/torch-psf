@@ -9,7 +9,8 @@ import { Detector, extractRois } from '../gpu/detect';
 import { SplineLocalizer, splineGrid } from '../gpu/spline_lm';
 import { StopToken, Eta, Progress } from '../core/task';
 import { openSource, MovieSource } from './movie';
-import { fitZernikeKnots, knotsAndJacobian, zScale, checkerboard, renderSpline, KnotGridFull, InsituIter } from './insitu';
+import { fitZernikeKnots, zScale, checkerboard, renderSpline, KnotGridFull, InsituIter } from './insitu';
+import { vectorialKnots } from '../gpu/knot_engine';
 import type { InsituForm } from '../ui/protocol';
 import { fitFreeKnots } from './refine';
 import { QualityRange, QualityRoi, qualityBands, median } from '../report/quality';
@@ -108,7 +109,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   let quality: QualityRange | null = null;
   if (reject && !tok.stopEarly) {
     // spot_deviance with the first-pass PSF tabulated as a spline (localized afresh: zstarts, 30 iterations)
-    const K1a = (await knotsAndJacobian(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um)).knots;
+    const K1a = await vectorialKnots(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um);
     const loc = new SplineLocalizer(dev, g, K1a);
     let dv: Float32Array, th1: Float32Array;
     try { const r1 = await loc.localize(dTr, tr.length, { var: rvar }); dv = r1.deviance; th1 = r1.theta; } finally { loc.destroy(); }
@@ -136,7 +137,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   let lim = 0;
   for (let i = 0; i < nFit; i++) if (Math.max(Math.abs(fit.theta[i * 5]), Math.abs(fit.theta[i * 5 + 1])) > g.xmax - 0.06) lim++;
   progress({ stage: 'report', done: 0, total: 2 });
-  const K1 = (await knotsAndJacobian(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um)).knots;
+  const K1 = await vectorialKnots(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um);
   const zs = await zScale(dev, K1, fit.K0, g);
   // optional refinement: free knots from the vectorial spline, on the (kept) training spots
   let refine: InsituReport['refine'] = null;
