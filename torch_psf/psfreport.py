@@ -584,7 +584,7 @@ def _quality(ctx):
                  f'(about 1 when the model explains the data); images: the plane with the sharpest model.']
         if cut is not None:
             notes.append(f'The ZStackEstimator rejects no beads. Reference line (not a rejection): median + 3 x 1.4826 '
-                         f'MAD = {cut:.3f}; {int((~acc).sum())} of {nb} beads lie above it and were used in the fit.')
+                         f'MAD = {cut:.3f}; {int((~acc).sum())} of {nb} beads lie above it (none rejected: the estimator rejects no beads).')
         bands = _bands(q, acc)
         return dict(q=q, accepted=acc, cutoff=cut, kind=None if cut is None else 'reference', notes=notes,
                     qlabel='chi2 per px of a bead (mean over its planes)', unit='beads',
@@ -684,7 +684,7 @@ def s_quality(ctx):
     qc = np.clip(q, lo, hi)
     ax.hist([qc[acc], qc[~acc]] if (~acc).any() else [qc], bins=bins, stacked=True,
             color=[SERIES[0], SERIES[1] if kind == 'rejection' else SERIES[3]][:2 if (~acc).any() else 1],
-            label=(['accepted', 'rejected'] if kind == 'rejection' else ['below the reference', 'above the reference (used)'])
+            label=(['accepted', 'rejected'] if kind == 'rejection' else ['below the reference', 'above the reference (kept)'])
             [:2 if (~acc).any() else 1])
     if n > 100:
         ax.set_yscale('log')
