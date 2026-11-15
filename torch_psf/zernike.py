@@ -28,13 +28,6 @@ def zernike(j, rho, phi):
     return math.sqrt(2 * (n + 1)) * R * f
 
 
-def zernike_basis(indices, rho, phi, mask=None):
-    """[len(indices), *rho.shape] stack of Z_j for the Noll indices, evaluated at rho clamped to 1 and multiplied by
-    mask (the unit disk) when given."""
-    Z = torch.stack([zernike(j, rho.clamp(max=1), phi) for j in indices])
-    return Z if mask is None else Z * mask
-
-
 # names of the low orders (Noll), for user interfaces and reports
 NOLL_NAMES = {1: 'piston', 2: 'tilt x', 3: 'tilt y', 4: 'defocus', 5: 'astigmatism 45', 6: 'astigmatism 0',
               7: 'coma y', 8: 'coma x', 9: 'trefoil y', 10: 'trefoil x', 11: 'spherical',

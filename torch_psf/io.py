@@ -22,10 +22,8 @@ psf.zip (version '0.2.0', docs/PSF_FORMAT.md; torch_psf.psfzip): psf.json with a
 0.1.0 keys of its model plus mapping / field / crop), .npy arrays, zstack.tif, preview.png, fit_report.pdf. save_zip
 writes it; load / PSF.load read it like a json.
 """
-import json
-from torch_psf.optics import Optics
 from torch_psf.camera import Camera
-from torch_psf.psf import PSF, FORMAT, VERSION   # noqa: F401
+from torch_psf.psf import PSF
 from torch_psf.spline import CubicSplinePSF
 from torch_psf import psfzip
 from torch_psf.psfzip import PSFZip, save_zip   # noqa: F401
@@ -60,11 +58,3 @@ def load_camera(path, load_maps=True):
         return psfzip.camera_from_meta(*psfzip.read_zip(path))
     return Camera.from_json(path, load_maps=load_maps)
 
-
-def load_optics(path):
-    if psfzip.is_psf_zip(path):
-        d = psfzip.read_zip(path)[0]
-    else:
-        with open(path) as f:
-            d = json.load(f)
-    return Optics.from_dict(d.get('optics', d))

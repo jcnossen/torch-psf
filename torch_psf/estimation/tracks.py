@@ -1,6 +1,6 @@
 """In-situ vectorial PSF fit on emitter tracks with variable projection.
 
-Each sample is one emitter seen on up to T consecutive frames (Tracks from torch_psf.spots.extract_tracks). Per frame
+Each sample is one emitter seen on up to T consecutive frames (torch_psf.spots.Tracks). Per frame
 the intensity, per (sample, group) the background are solved exactly (weighted linear least squares,
 torch_psf.fit.solve_linear) at every iteration; the per-sample position (x, y, and z through a sigmoid on
 [0, zmax_um]) and the global PSF parameters (Zernikes, focus, optional line blur, optional extra parameters of a

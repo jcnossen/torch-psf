@@ -135,7 +135,7 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `fourpi.py` | `FourPiPSF`: coherent two-objective (4Pi) PSF with C interference channels; `FourPiSplinePSF`: its spline table with the 4Pi phase as an analytic dependence. |
 | `zernike.py` | Zernike polynomials (Noll index and normalization). |
 | `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`; `solve_linear` (variable projection: closed-form per-frame intensities and backgrounds of a track). |
-| `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `link_tracks`, `Tracks` / `extract_tracks`. |
+| `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `Tracks`. |
 | `estimators.py` | `ZStackEstimator`, `InSituEstimator`. |
 | `estimation/` | the PSF estimation steps (`beads`: bead fit; `knots`: knot-route fits, free knots; `tracks`: variable projection on tracks; `heldout`: held-out checks; `zscale`). |
 | `dataset.py` | `Dataset`: the localizations (dict of tensors; format in [docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)). |
