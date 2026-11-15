@@ -2,6 +2,7 @@
 files, the fit report with and without estimator data, independent channels with a mapping and field dependence."""
 import json
 import math
+import os
 import warnings
 import zipfile
 import numpy as np
@@ -340,7 +341,7 @@ def test_convert_calibration_lossless(tmp_path):
     meta = psfzip.convert_calibration(p, out, roisize=11, device='cpu')
     assert meta['acquisition'] == dict(tirf_depth_um=0.12, emitter_z_median_um=0.05, emitter_z_range_um=[0.0, 0.4])
     assert meta['patterns']['type'] == 'simcode' and meta['patterns']['pitch_nm'] == [224.1, 224.3]
-    assert meta['patterns']['note'] == 'two angles'
+    assert meta['patterns']['pattern_note'] == 'two angles'
     assert meta['provenance']['source'] == 'test calibration'
     assert meta['provenance']['converted_from']['json'] == calib
     z = psfzip.PSFZip.read(out, roisize=11, device='cpu')
@@ -349,3 +350,76 @@ def test_convert_calibration_lossless(tmp_path):
     th = torch.tensor([[0.3, -0.2, 0.1, 1000.0, 5.0]])
     assert torch.allclose(a.expected(th), z.psf.expected(th), atol=1e-6)
     assert abs(z.camera.gain_e_per_adu - 0.43) < 1e-9 and abs(z.camera.offset_adu - 104.0) < 1e-9
+    assert meta['optics']['n_med'] == 1.33 and meta['optics']['NA'] == 1.49     # as in the json, not float32-rounded
+    assert meta['channels'][0]['model']['optics']['n_med'] == 1.33
+
+
+def test_convert_camera_maps_and_gaussian(tmp_path):
+    """Camera with maps: the calibrated scalars, free-form keys and all npz entries are kept; a Gaussian calibration
+    keeps its optics and puts the unused vectorial keys into provenance; the zip is byte-reproducible."""
+    import json
+    from torch_psf import psfzip
+    rng = np.random.default_rng(0)
+    np.savez(tmp_path / 'maps.npz', offset_adu=(100 + rng.random((6, 8))).astype(np.float32),
+             readnoise_e=(0.8 + 0.1 * rng.random((6, 8))).astype(np.float32), gain=np.float64(0.56),
+             note=np.array('a note'), low5=np.ones((6, 8), np.float32))
+    calib = dict(pixelsize_um=0.10833, wavelength_um=0.7, NA=1.4900000095367432, n_imm=1.518, n_med=1.33,
+                 zernike_noll=[5, 6], zernike_waves=[0.01, -0.02], focus_um=0.147, psf_gauss_sigma_um=0.140829,
+                 camera=dict(gain_e_per_adu=0.4256, offset_adu=103.926, readnoise_e=0.9, maps='maps.npz',
+                             note='v2 camera', replaces='old.npz', sensor_shift_vs_0p5nM=[15, -6]),
+                 tirf_depth_um=0.082)
+    p = tmp_path / 'calib_g.json'
+    p.write_text(json.dumps(calib))
+    out = tmp_path / 'calib_g.psf.zip'
+    meta = psfzip.convert_calibration(p, out, device='cpu')
+    assert meta['psf_type'] == 'gaussian'
+    assert meta['optics'] == dict(pixel_um=0.10833, NA=1.4900000095367432, wavelength_um=0.7, n_imm=1.518, n_med=1.33)
+    assert set(meta['provenance']['unused_model_keys']) == {'zernike_noll', 'zernike_waves', 'focus_um'}
+    assert meta['acquisition'] == dict(tirf_depth_um=0.082)
+    c = meta['camera']
+    assert (c['offset_adu'], c['readnoise_e'], c['gain_e_per_adu']) == (103.926, 0.9, 0.4256)
+    assert c['note'] == 'v2 camera' and c['replaces'] == 'old.npz' and c['sensor_shift_vs_0p5nM'] == [15, -6]
+    assert set(c['extra_arrays']) == {'gain', 'note', 'low5'}
+    z = psfzip.PSFZip.read(out, device='cpu')
+    cam = z.camera
+    assert cam.extra['note'] == 'v2 camera' and str(cam.map_extra['note']) == 'a note'
+    assert float(cam.map_extra['gain']) == 0.56 and cam.scalars['offset_adu'] == 103.926
+    assert np.array_equal(cam.offset_adu, np.load(tmp_path / 'maps.npz')['offset_adu'])
+    # a re-save of the read camera keeps everything
+    out2 = tmp_path / 'resave.psf.zip'
+    m2 = psfzip.save_zip(out2, z.psf, camera=cam, zstack_planes=3)
+    c2 = m2['camera']
+    assert (c2['offset_adu'], c2['readnoise_e'], c2['note']) == (103.926, 0.9, 'v2 camera')
+    assert set(c2['extra_arrays']) == {'gain', 'note', 'low5'}
+    # byte-reproducible
+    out3 = tmp_path / 'again.psf.zip'
+    psfzip.convert_calibration(p, out3, device='cpu')
+    assert out.read_bytes() == out3.read_bytes()
+
+
+def test_fourpi_state_exact_and_knot_options(tmp_path):
+    """FourPiPSF.state() round-trips bit-exactly (raw parameters); 4Pi spline knots as float16 or rebuilt from the
+    source on load; the estimator report is in psf.json."""
+    fp = fourpi()
+    with torch.no_grad():
+        fp.tau_logit.copy_(torch.tensor([0.1, -0.2, 0.05, 0.3]))
+    q = FourPiPSF.from_state(json.loads(json.dumps(fp.state())), device=DEV)
+    for (k, a), (_, b) in zip(fp.named_parameters(), q.named_parameters()):
+        assert torch.equal(a, b), k
+    phi = torch.tensor([0.4, 2.5])
+    assert torch.equal(fp.render(POS, phi=phi), q.render(POS, phi=phi))
+    sp = fp.to_spline(11, oversample=2, dz_um=0.05, zpad=2)
+    m32 = save(tmp_path / 's32.zip', sp, source=fp, report=dict(n_spots=12, loss=0.5, big=list(range(20000))))
+    assert m32['report']['results'] == dict(n_spots=12, loss=0.5)
+    s32 = PSF.load(tmp_path / 's32.zip', device=DEV)
+    save(tmp_path / 's16.zip', sp, source=fp, spline_knots='float16')
+    s16 = PSF.load(tmp_path / 's16.zip', device=DEV)
+    save(tmp_path / 'srb.zip', sp, source=fp, spline_knots='rebuild')
+    assert not any(n.endswith('.npy') for n in zipfile.ZipFile(tmp_path / 'srb.zip').namelist())
+    srb = PSF.load(tmp_path / 'srb.zip', device=DEV)
+    with torch.no_grad():
+        ref = sp.render(POS, phi=phi)
+        assert torch.equal(s32.render(POS, phi=phi), ref)
+        assert torch.allclose(srb.render(POS, phi=phi), ref, atol=1e-6)
+        assert (s16.render(POS, phi=phi) - ref).abs().max() < 2e-3 * ref.abs().max()
+    assert os.path.getsize(tmp_path / 'srb.zip') < os.path.getsize(tmp_path / 's16.zip') < os.path.getsize(tmp_path / 's32.zip')

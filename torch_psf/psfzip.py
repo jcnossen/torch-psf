@@ -16,7 +16,6 @@ The reader turns a single-channel (or coupled) zip into the 0.1.0 json dict of t
 model class reads it with its own _from_file; this module therefore needs no model class (the registry of PSF
 supplies them) and PSF.read_file imports it lazily.
 """
-import copy
 import dataclasses
 import io as _io
 import json
@@ -228,7 +227,11 @@ def legacy(meta, arrays, channel=None):
         g = dict(chans[0]['model']['spline'], n_channels=len(chans), tau=[c['model'].get('tau') for c in chans])
         if any(t is None for t in g['tau']):
             g['tau'] = None
-        knots = np.stack([np.stack([arrays[c['arrays'][k]] for c in chans]) for k in ('inc', 'cr', 'ci')])
+        if all(c.get('arrays') for c in chans):
+            knots = np.stack([np.stack([arrays[c['arrays'][k]] for c in chans]) for k in ('inc', 'cr', 'ci')])
+            knots = knots.astype(np.float32)
+        else:
+            knots = _rebuild_knots(meta, g)
         d, arr, typ = dict(fourpi_spline=g), dict(knots=knots), 'fourpi_spline'
         if src and src.get('type') == 'fourpi':
             d.update({k: v for k, v in src['model'].items() if k == 'fourpi'})
@@ -253,6 +256,20 @@ def legacy(meta, arrays, channel=None):
     return d, (arr or None), typ
 
 
+def _rebuild_knots(meta, g, device=None):
+    """knots [3, C, nz, n, n] of phase_spline channels written with spline_knots='rebuild': tabulated from the
+    source FourPiPSF on the grid of the channels (FourPiPSF.to_spline; on the GPU when there is one)."""
+    from torch_psf.fourpi import FourPiPSF
+    src = meta.get('source') or {}
+    if src.get('type') != 'fourpi' or not (src.get('model') or {}).get('fourpi'):
+        raise ValueError('phase_spline channels without knots need the FourPiPSF source to rebuild them')
+    reb = meta['channels'][0].get('rebuild') or {}
+    src_psf = FourPiPSF.from_state(src['model']['fourpi'], device=device or reb.get('device'))
+    sp = src_psf.to_spline(roisize=g['roisize'], z_range=tuple(g['z_range']), oversample=g['oversample'],
+                           dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'])
+    return sp.knots.detach().cpu().numpy().astype(np.float32)
+
+
 def read_legacy(path, channel=None):
     """PSF.read_file for a psf.zip."""
     meta, arrays = read_zip(path)
@@ -265,9 +282,12 @@ def camera_from_meta(meta, arrays):
     c = meta.get('camera')
     if not c:
         return None
-    cam = Camera.from_dict({k: v for k, v in c.items() if k not in ('arrays', 'maps')}, load_maps=False)
+    cam = Camera.from_dict({k: v for k, v in c.items() if k not in ('arrays', 'maps', 'extra_arrays')}, load_maps=False)
     for k, m in (c.get('arrays') or {}).items():
+        if k in c and isinstance(c[k], (int, float)):
+            cam.scalars[k] = float(c[k])          # the calibrated scalar, kept for a re-save
         setattr(cam, k, np.asarray(arrays[m], np.float32))
+    cam.map_extra = {k: arrays[m] for k, m in (c.get('extra_arrays') or {}).items()}
     return cam
 
 
@@ -470,6 +490,26 @@ def _png_bytes(fig, dpi=110):
 
 
 # ====================================================================================================== writing
+def _short32(v):
+    """a float that is exactly a float32 value as the shortest decimal that rounds to the same float32 (1.33 instead of
+    1.3300000429153442): the same model when read as float32, the value the user gave when read as float64"""
+    if isinstance(v, float) and np.isfinite(v) and float(np.float32(v)) == v:
+        return float(str(np.float32(v)))
+    return v
+
+
+def _short_optics(d):
+    if isinstance(d, dict):
+        return {k: (_short32(v) if k in OPTICS_KEYS else _short_optics(v)) for k, v in d.items()}
+    if isinstance(d, list):
+        return [_short_optics(v) for v in d]
+    return d
+
+
+OPTICS_KEYS = ('pixel_um', 'pixelsize_um', 'NA', 'wavelength_um', 'n_imm', 'n_med', 'px', 'lam', 'n', 'NA_t', 'NA_b',
+               'n_imm_t', 'n_imm_b')
+
+
 def _model_block(model, prefix):
     """{type, model, arrays} of a PSF model (its 0.1.0 json keys) and {member: array}."""
     d, arrs = model._file_dict(None)
@@ -483,7 +523,7 @@ def _emitter_params(model):
     return p + (['phi'] if model.type_name in COUPLED else [])
 
 
-def _channel_blocks(psf, source, names):
+def _channel_blocks(psf, source, names, spline_knots='float32'):
     """(channels, top-level source block or None, {member: array}) of the model(s)"""
     arrays = {}
     t = getattr(psf, 'type_name', None)
@@ -503,15 +543,25 @@ def _channel_blocks(psf, source, names):
             sb = dict(type='fourpi', model=_plain(dict(fourpi=psf.source_state)), arrays={})
         else:
             sb = None
+        if spline_knots not in ('float32', 'float16', 'rebuild'):
+            raise ValueError("spline_knots: 'float32', 'float16' or 'rebuild'")
+        if spline_knots == 'rebuild' and not (sb and sb.get('type') == 'fourpi'):
+            raise ValueError("spline_knots='rebuild' needs the FourPiPSF source (source=, or a spline from to_spline)")
         chans = []
         for c in range(psf.n_channels):
-            members = {k: f'{names(c)}/{k}.npy' for k in ('inc', 'cr', 'ci')}
-            for comp, k in enumerate(('inc', 'cr', 'ci')):
-                arrays[members[k]] = psf.luts[comp][c].knots.detach().cpu().numpy()
             g = dict(psf.luts[0][c].to_dict(), pixel_um=psf.pixel_um)
-            chans.append(dict(name=names(c), type='phase_spline',
-                              model=_plain(dict(spline=g, tau=float(psf.tau[c].detach()))), phase_param='phi',
-                              arrays=members))
+            ch = dict(name=names(c), type='phase_spline', model=_plain(dict(spline=g, tau=float(psf.tau[c].detach()))),
+                      phase_param='phi')
+            if spline_knots == 'rebuild':
+                ch['rebuild'] = dict(method='FourPiPSF.to_spline', note='knots not stored: tabulate the source on '
+                                     'this grid (torch_psf.psfzip._rebuild_knots)')
+            else:
+                members = {k: f'{names(c)}/{k}.npy' for k in ('inc', 'cr', 'ci')}
+                dt = np.float16 if spline_knots == 'float16' else np.float32
+                for comp, k in enumerate(('inc', 'cr', 'ci')):
+                    arrays[members[k]] = psf.luts[comp][c].knots.detach().cpu().numpy().astype(dt)
+                ch['arrays'] = members
+            chans.append(ch)
         return chans, sb, arrays
     models = _channel_models(psf)
     sources = list(source) if isinstance(source, (list, tuple)) else [source] + [None] * (len(models) - 1)
@@ -538,15 +588,27 @@ def _np_cpu(v):
 def _camera_block(camera, arrays):
     d = camera.to_dict()
     amap = {}
+    scal = getattr(camera, 'scalars', None) or {}
     for k in ('gain_e_per_adu', 'offset_adu', 'readnoise_e'):
         v = getattr(camera, k)
         if (torch.is_tensor(v) or isinstance(v, np.ndarray)) and np.ndim(v) > 0:
             arr = np.asarray(v.detach().cpu() if torch.is_tensor(v) else v, np.float32)
             amap[k] = f'camera/{k}.npy'
             arrays[amap[k]] = arr
-            d[k] = float(np.median(arr))
+            d[k] = float(scal[k]) if k in scal else float(np.median(arr))
     if amap:
         d['arrays'], d['maps'] = amap, None
+    extra = getattr(camera, 'map_extra', None) or {}
+    if extra:
+        d['extra_arrays'] = {}
+        for k, a in extra.items():
+            m = f'camera/extra/{k}.npy'
+            a = np.asarray(a)
+            if a.dtype == object:
+                warnings.warn(f'camera map entry {k!r}: object array, not written')
+                continue
+            arrays[m] = a
+            d['extra_arrays'][k] = m
     return _plain(d)
 
 
@@ -597,7 +659,8 @@ def _optics_of(chans, sb, models):
 
 
 def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, zstack_px=1.0, zstack_planes=25,
-             channels=None, patterns=None, acquisition=None, report_max_spots=1000):
+             channels=None, patterns=None, acquisition=None, report_max_spots=1000, optics=None, spline_knots='float32',
+             _meta_hook=None):
     """Write a psf.zip (docs/PSF_FORMAT.md). Returns the psf.json dict.
 
     psf: a PSF model, or a list of independent channel models (biplane, multicolour, dual view: one zip for the
@@ -611,12 +674,18 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     mapping, field, crop, flip, intensity_ratio, or other keys kept as given). patterns: optional pattern /
     modulation metadata block (SIMFLUX / SIMCODE). acquisition: optional dict of sample / acquisition metadata that is
     not the PSF (e.g. TIRF depth, emitter height distribution), stored verbatim. report_max_spots: spots refitted for
-    the report histograms."""
+    the report histograms. optics: top-level optics values to add / override (e.g. NA and wavelength of a calibration
+    whose model, such as a Gaussian, does not carry them). spline_knots (FourPiSplinePSF): 'float32' (exact),
+    'float16' (half the size; relative error ~5e-4) or 'rebuild' (no knots: readers tabulate the source FourPiPSF on
+    the stored grid; small file, needs the source and a render on load).
+
+    Optics scalars that are exactly float32 values are written as their shortest float32 decimal (1.33, not
+    1.3300000429). The zip is byte-reproducible (fixed member times, no PDF creation date)."""
     from torch_psf import psfreport
     models = _channel_models(psf)
     extras = list(channels or [])
     chans, sb, arrays = _channel_blocks(
-        psf, source, lambda c: str(extras[c].get('name') or f'ch{c}') if c < len(extras) else f'ch{c}')
+        psf, source, lambda c: str(extras[c].get('name') or f'ch{c}') if c < len(extras) else f'ch{c}', spline_knots)
     if len(extras) > len(chans):
         raise ValueError(f'channels: {len(extras)} entries for {len(chans)} channels')
     for i, ch in enumerate(chans):
@@ -640,7 +709,9 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
                 n_dims=models[0].n_dims, emitter_params=_emitter_params(models[0]), units=UNITS)
     if len(chans) > 1:
         meta['per_channel_params'] = ['bg']
-    optics = _optics_of(chans, sb, models)
+    optics_given = optics
+    optics = dict(_optics_of(chans, sb, models) or {})
+    optics.update(_plain(optics_given or {}))
     if optics:
         meta['optics'] = optics
     if camera is not None:
@@ -654,6 +725,12 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
         meta['patterns'] = _plain(patterns)
     if acquisition is not None:
         meta['acquisition'] = _plain(acquisition)
+    for k in ('optics', 'channels', 'source'):
+        if k in meta:
+            meta[k] = _short_optics(meta[k])
+    if _meta_hook is not None:
+        _meta_hook(meta)
+        optics = meta.get('optics')
     # zstack, preview, report
     stack, zs = render_zstack(psf, zstack_planes, zstack_px)
     px = (optics or {}).get('pixel_um')
@@ -671,18 +748,50 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     pdf, sections = psfreport.write_report(psf, meta=meta, stack=stack, z_um=zs, report=report, source=source,
                                            max_spots=report_max_spots)
     meta['report']['sections'] = sections
+    est = psfreport.bundle(report, psf) if report is not None else None
+    if est is not None:
+        meta['report'].update(_report_json(est))
     tif = zstack_tif_bytes(stack, zs, sample_um, info=dict(format=FORMAT, version=ZIP_VERSION, psf_type=meta['psf_type'],
                                                           z_um=zinfo['z_um'], channels=names, sample_px=zinfo['sample_px']))
+    def put(z, name, data, stored=False):
+        zi = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        zi.compress_type = zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED
+        zi.external_attr = 0o644 << 16
+        z.writestr(zi, data)
     with zipfile.ZipFile(str(path), 'w', compression=zipfile.ZIP_DEFLATED) as z:
-        z.writestr(JSON_NAME, json.dumps(meta, indent=1))
+        put(z, JSON_NAME, json.dumps(meta, indent=1))
         for m, a in arrays.items():
             b = _io.BytesIO()
-            np.save(b, np.ascontiguousarray(a), allow_pickle=False)
-            z.writestr(m, b.getvalue())
-        z.writestr(ZSTACK_NAME, tif)
-        z.writestr(PREVIEW_NAME, png, compress_type=zipfile.ZIP_STORED)
-        z.writestr(REPORT_NAME, pdf)
+            a = np.asarray(a)
+            np.save(b, a if a.flags.c_contiguous else a.copy(order='C'), allow_pickle=False)   # keeps 0-d
+            put(z, m, b.getvalue())
+        put(z, ZSTACK_NAME, tif)
+        put(z, PREVIEW_NAME, png, stored=True)
+        put(z, REPORT_NAME, pdf)
     return meta
+
+
+def _report_json(b, max_len=10000):
+    """{estimator, results, settings} of a report bundle for psf.json: the JSON-safe values, without arrays longer
+    than max_len elements (those stay in the PDF only)"""
+    def small(o):
+        if isinstance(o, dict):
+            return {str(k): small(v) for k, v in o.items() if _size(v) <= max_len}
+        if isinstance(o, (list, tuple)):
+            return [small(v) for v in o]
+        return o
+    out = dict(estimator=b.get('estimator'), results=small(_plain(b.get('report') or {})))
+    if b.get('settings'):
+        out['settings'] = small(_plain(b['settings']))
+    return out
+
+
+def _size(v):
+    if torch.is_tensor(v) or isinstance(v, np.ndarray):
+        return int(np.prod(v.shape))
+    if isinstance(v, (list, tuple)):
+        return len(v)
+    return 1
 
 
 
@@ -693,7 +802,10 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
     that is neither a PSF / optics / camera key goes to: provenance (source, psf_v2), patterns (a SIMCODE `pattern`
     dict, as {type: 'simcode', ...}, plus pattern_note) or the `acquisition` block (sample / acquisition metadata such
     as tirf_depth_um, emitter_z_*); the complete original json is kept in
-    provenance['converted_from'] = {file, json}. Paths in the json (maps, arrays) resolve against the json's folder.
+    provenance['converted_from'] = {file, json}. Optics keys of the json (NA, wavelength, indices) go to the top-level
+    optics also when the model does not use them (Gaussian); PSF-model keys the model does not use go to
+    provenance['unused_model_keys']. Values of the model / optics / camera blocks that equal a value of the json at
+    float32 precision are written as in the json. Paths in the json (maps, arrays) resolve against the json's folder.
     kw: passed to save_zip. Returns the psf.json dict."""
     import os
     from torch_psf import io
@@ -717,9 +829,15 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
     known = set(json.dumps(d).replace('{', ' ').replace('}', ' ').split('"')[1::2])     # every key / string in it
     known |= {'format', 'version', 'type', 'arrays', 'provenance', 'pixelsize_um', 'pixel_um', 'wavelength_um', 'NA',
               'n_imm', 'n_med', 'optics', 'camera'}
+    if psf.type_name == 'gaussian':
+        known.add('psf_gauss_sigma_um')           # the plain-calibration form of gaussian.sigma_px
     if cam is not None:
-        known |= set(cam.to_dict().keys())
+        from torch_psf.camera import Camera
+        known |= {f.name for f in dataclasses.fields(Camera)}
     rest = {k: v for k, v in orig.items() if k not in known}
+    unused = {k: rest.pop(k) for k in list(rest) if k in MODEL_KEYS}
+    if unused:
+        prov['unused_model_keys'] = unused
     for k in ('source', 'psf_v2', 'provenance_note'):          # how the calibration was made -> provenance
         if k in rest:
             prov[k] = rest.pop(k)
@@ -727,9 +845,58 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
     if patterns is None and isinstance(rest.get('pattern'), dict):   # SIMCODE / SIMFLUX pattern calibration
         patterns = dict(type='simcode', **rest.pop('pattern'))
         if 'pattern_note' in rest:
-            patterns['note'] = rest.pop('pattern_note')
-    meta = save_zip(out_path, psf, camera=cam, provenance=prov, patterns=patterns, acquisition=rest or None, **kw)
+            patterns['pattern_note'] = rest.pop('pattern_note')
+    oo = dict(orig.get('optics') or {})
+    for a, b in (('pixelsize_um', 'pixel_um'), ('pixel_um', 'pixel_um'), ('NA', 'NA'), ('wavelength_um', 'wavelength_um'),
+                 ('n_imm', 'n_imm'), ('n_med', 'n_med')):
+        if isinstance(orig.get(a), (int, float)):
+            oo.setdefault(b, orig[a])
+    optics = dict(oo, **(kw.pop('optics', None) or {}))
+    ocam = orig.get('camera') if isinstance(orig.get('camera'), dict) else {}
+
+    def hook(meta):
+        ref = dict(orig, **oo)
+        for k in ('optics', 'source'):
+            if isinstance(meta.get(k), dict):
+                meta[k] = _prefer(meta[k], ref)
+        meta['channels'] = [_prefer(c, ref) for c in meta['channels']]
+        if isinstance(meta.get('camera'), dict) and ocam:
+            meta['camera'] = _prefer(meta['camera'], ocam, top=True)
+    meta = save_zip(out_path, psf, camera=cam, provenance=prov, patterns=patterns, acquisition=rest or None,
+                    optics=optics, _meta_hook=hook, **kw)
     return meta
+
+
+# 0.1.0 PSF-model keys (torch_psf.io): in a calibration json whose model does not use them -> provenance
+MODEL_KEYS = ('zernike_noll', 'zernike_waves', 'apod', 'saf', 'focus_um', 'psf_blur_px2', 'psf_dipole_M', 'psf_dipole_w',
+              'diattenuation', 'npupil', 'oversample', 'roisize', 'z_range_um', 'spline', 'gaussian', 'fourpi',
+              'fourpi_spline', 'psf_gauss_sigma_um', 'psf_dipole_M_angle', 'psf_blur_angle_px2', 'pupil_phase',
+              'pupil_amp')
+
+
+def _agree32(a, b):
+    try:
+        x, y = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    except (TypeError, ValueError):
+        return False
+    return x.shape == y.shape and x.size > 0 and bool(np.all(x.astype(np.float32) == y.astype(np.float32)))
+
+
+def _prefer(d, ref, top=False):
+    """d with every numeric value (or list) whose key is in ref and equal to ref's value at float32 precision replaced
+    by ref's value (the json as written); nested dicts are searched with the same ref (top: only d's own keys)"""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, dict):
+            out[k] = v if top else _prefer(v, ref)
+        elif k in ref and not isinstance(v, (str, bool)) and v is not None and not isinstance(ref[k], (str, bool, dict)) \
+                and _agree32(v, ref[k]):
+            out[k] = ref[k]
+        elif k == 'pixel_um' and 'pixelsize_um' in ref and _agree32(v, ref['pixelsize_um']):
+            out[k] = ref['pixelsize_um']
+        else:
+            out[k] = v
+    return out
 
 
 def _main(argv=None):

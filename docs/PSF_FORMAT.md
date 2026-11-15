@@ -63,7 +63,7 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
 | `acquisition` | dict | no | sample / acquisition metadata that is not the PSF (TIRF depth, emitter height distribution, ...), free-form, kept verbatim |
 | `zstack` | dict | yes | description of `zstack.tif` |
 | `preview` | dict | yes | `{"file": "preview.png"}` |
-| `report` | dict | yes | `{"file": "fit_report.pdf", "sections": [...]}` (the sections written) |
+| `report` | dict | yes | `{"file": "fit_report.pdf", "sections": [...]}` (the sections written); when the PSF was saved with an estimator report also `estimator` (name), `results` (the estimator's report: counts, losses, thresholds, ...) and `settings`, JSON values only (arrays longer than 10^4 elements stay in the PDF) |
 
 ### Channels
 
@@ -127,14 +127,19 @@ pixel_um}, `roisize`; sigma_x(z) = sx0 sqrt(1 + ((z - gamma) / d)^2), sigma_y(z)
 `fourpi` = the parameter dict {meta {R, px, NA, n, lam, npupil, os, mirror, zidx, pol [C], NA_t, n_imm_t, NA_b, n_imm_b,
 n_med, zmode, asym}, zt [nz] (top-arm Zernikes, waves), zb [nz] (bottom arm), phi [C] (channel phases, rad), tau [C]
 (channel transmissions, sum 1), a (arm amplitude ratio), gamma (coherence), d_bot [3] (bottom-arm offset: px, px, um),
-blur_px2, depth [2] (asymmetric arms only)}; see `torch_psf/fourpi.py` for the physics. No arrays.
+blur_px2, depth [2] (asymmetric arms only), raw {parameter: value} (optional: the internal parameters tau_logit,
+a_log, gamma_logit, logblur, ...; when present a reader takes them instead of the natural values, which makes the
+round trip bit-exact)}; see `torch_psf/fourpi.py` for the physics. No arrays.
 
 **source_output**: channel `index` of the top-level source model. `model` is informative only: {pol, phi_rad, tau} of
 that output.
 
 **phase_spline** (`FourPiSplinePSF` channel c): `model` = {`spline` (as for a spline, the grid of all three
 components), `tau` (the channel weight of the source model, for reference)}; arrays `inc`, `cr`, `ci`, each
-[nz, n, n] float32 knots on that grid. The channel image is
+[nz, n, n] float32 knots on that grid (float16 when written with `spline_knots='float16'`: half the size, relative
+error ~5e-4; readers convert to float32). Written with `spline_knots='rebuild'` the channels have no `arrays` but a
+`rebuild` {method: "FourPiPSF.to_spline", ...} entry: the reader tabulates the top-level `source` FourPiPSF on the
+stored grid (a 4Pi spline is ~100 MB of knots otherwise). The channel image is
 
     g_c(x, y, z; phi) = inc_c(x, y, z) + cos(phi) cr_c(x, y, z) - sin(phi) ci_c(x, y, z)
 
@@ -197,14 +202,27 @@ distribution a network is trained on). Readers keep it verbatim (Python: `PSFZip
 `python -m torch_psf.psfzip calib.json [...] [-o out]` (Python: `torch_psf.psfzip.convert_calibration`) converts a
 SIMCODE calib json or a torch-psf 0.1.0 PSF json + npz without loss: the PSF and the camera (with its maps) as usual;
 of the remaining top-level keys `source` / `psf_v2` go to `provenance`, a `pattern` dict to `patterns`
-(`type: "simcode"`, with `pattern_note` as `note`), everything else to `acquisition`; the complete original json is
-also kept in `provenance.converted_from` = {file, json}.
+(`type: "simcode"`, plus `pattern_note`), PSF-model keys the model does not use (the vectorial keys of a Gaussian
+calibration) to `provenance.unused_model_keys`, everything else to `acquisition`; the optics keys of the json go to
+the top-level `optics` also when the model does not use them; values that equal the json's at float32 precision are
+written as in the json; the complete original json is also kept in `provenance.converted_from` = {file, json}.
 
 ### Camera (`camera`, optional)
 
 The `torch_psf.Camera` fields: `gain_e_per_adu`, `offset_adu`, `readnoise_e`, `type` (`scmos` | `emccd`),
 `excess_noise`. Per-pixel maps are arrays in the zip: `arrays` {field: member} (e.g. `camera/offset_adu.npy` [H, W]
-float32), and the scalar field then holds the map median (for readers that ignore the maps); `maps` is null.
+float32), and the scalar field then holds the calibrated scalar given with the maps (e.g. the global offset a
+simulator uses), or the map median when none was given; `maps` is null. Other entries of the maps npz are kept as
+`extra_arrays` {name: member} (`camera/extra/<name>.npy`, any non-object dtype such as bool, int64 or a unicode
+string, 0-d allowed; readers that do not need them skip dtypes they cannot parse); other keys of the camera dict
+(notes etc.) are kept as given.
+
+### Numbers and reproducibility
+
+Scalars are JSON numbers (float64). Optics scalars that the model holds as float32 are written as the shortest
+decimal of that float32 (1.33, not 1.3300000429). Arrays in the JSON are float64 decimals of the stored values.
+Writers should make the zip byte-reproducible: fixed member times (torch-psf: 1980-01-01), no creation date in the
+PDF.
 
 ### zstack.tif
 
