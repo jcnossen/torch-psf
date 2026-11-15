@@ -312,9 +312,9 @@ def _chunks(data, active, max_renders):
 # ---------------------------------------------------------------------------------------------------- fit
 def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), emitter_z_um=0.0, train=None,
                     drift=True, drift_order=3, focus_offset='tilt', bg='linear', intensity='free',
-                    fit_dz_scale=False, warmup=50, heldout_iters=150, max_renders=3000, reject=None, reject_at=None,
-                    log=None, stop=None):
-    """Joint fit of a shared VectorialPSF (copied, roisize = data.patch) to the bead clusters `data` (BeadClusters),
+                    fit_dz_scale=False, warmup=50, heldout_iters=200, max_renders=3000, reject=None, reject_at=None,
+                    lr_focus=1e-2, lr_drift=1e-2, log=None, stop=None):
+    """Joint fit of a shared VectorialPSF (copied, roisize = data.R) to the bead clusters `data` (BeadClusters),
     imaged at the focus positions focus_um [nk] (um, focal plane relative to the coverslip, see stage_focus). Poisson
     likelihood, Adam (lr for the PSF parameters; cosine decay to 0.1 lr over the last 30 % of the iterations).
 
@@ -327,7 +327,9 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     (photons per bead and plane) or 'bead_x_plane' (per bead times a per-plane factor per stack). fit_dz_scale: a scale
     of the focus steps. warmup: first iterations with the PSF fixed (the per-bead terms settle first). reject: drop
     (from training) the clusters whose mean chi2 per pixel ((d - mu)^2 / mu) is above reject x the median, at
-    iteration reject_at (default iters // 3). max_renders: bead-planes per backward pass (memory).
+    iteration reject_at (default iters // 3). max_renders: bead-planes per backward pass (memory). lr_focus (um) /
+    lr_drift (px): Adam steps of the focus offsets and drift coefficients (Adam moves a parameter by at most about lr
+    per iteration: beads 0.4 um off the stack centre need lr_focus x iters well above that).
 
     Returns dict(psf, report, history, xy [B, 2] (image px), photons [B, nk], bg [C, nk], focus_offset [B] (um),
     drift, mu [nk, Npix] (the fitted expected images; data.unflatten(mu, c) for one cluster), chi2 [C], deviance [C]
@@ -377,7 +379,7 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     dr = None
     if drift:
         dr = torch.zeros(S, int(drift_order), 2, device=dev, requires_grad=True)
-        groups.append(dict(params=[dr], lr=2e-3))
+        groups.append(dict(params=[dr], lr=lr_drift))
     fo = None
     if focus_offset == 'stack':
         fo = torch.zeros(S, device=dev, requires_grad=True)
@@ -391,7 +393,7 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     elif focus_offset is not None:
         raise ValueError(focus_offset)
     if fo is not None:
-        groups.append(dict(params=[fo], lr=2e-3))
+        groups.append(dict(params=[fo], lr=lr_focus))
     log_s = None
     if fit_dz_scale:
         log_s = torch.zeros((), device=dev, requires_grad=True)
@@ -478,8 +480,8 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     ho[rejected] = False
     if ho.any():
         opt2 = torch.optim.Adam([dict(params=[xy], lr=1e-2), dict(params=int_params[:1], lr=1e-2),
-                                 dict(params=bg_params, lr=0.3)] + ([dict(params=[dr], lr=2e-3)] if dr is not None else [])
-                                + ([dict(params=[fo], lr=2e-3)] if fo is not None else []))
+                                 dict(params=bg_params, lr=0.3)] + ([dict(params=[dr], lr=lr_drift)] if dr is not None else [])
+                                + ([dict(params=[fo], lr=lr_focus)] if fo is not None else []))
         hchunks = _chunks(data, ho, max_renders)
         for it in range(heldout_iters):
             opt2.zero_grad()
@@ -536,7 +538,7 @@ def _cluster_stats(data, model, active, max_renders, keep_mu=False):
     return (c2, dv, mu_all) if keep_mu else (c2, dv)
 
 
-def dense_nll(data, focus_um, psf, iters=150, **kw):
+def dense_nll(data, focus_um, psf, iters=200, **kw):
     """Score a fixed PSF on bead clusters: refit every cluster's own terms (positions, photons, background, drift and
     focus offsets as configured in **kw, see fit_dense_beads) with the PSF fixed. Returns the fit_dense_beads
     result; result['report']['nll_per_px'] / ['deviance_per_px'] (lower is better)."""
