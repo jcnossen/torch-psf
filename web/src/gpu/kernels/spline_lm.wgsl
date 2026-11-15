@@ -13,13 +13,13 @@ struct U {
   nv: u32, nu: u32, iters: u32, fixed: u32,       // fixed: bit mask of theta indices held at theta0
   z0: f32, hz: f32, oS0: f32, xmax: f32,
   zmin: f32, zmax: f32, lam0: f32, rvar: f32,      // z clamp (the spline's z_limits); scalar read-noise variance (e^2)
-  first: u32, _a: u32, _b: u32, _c: u32,
+  first: u32, ts0: u32, _b: u32, _c: u32,      // ts0: floats per spot in theta0 (0: 5; 13: a previous output)
 };
 
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> knots: array<f32>;
 @group(0) @binding(2) var<storage, read> rois: array<f32>;
-@group(0) @binding(3) var<storage, read> theta0: array<f32>;
+@group(0) @binding(3) var<storage, read> theta0: array<f32>;  // [N, ts0]
 @group(0) @binding(4) var<storage, read_write> outp: array<f32>;  // [N, 13]
 
 const WG: u32 = 128u;
@@ -165,7 +165,8 @@ fn lm(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li: vec3u,
   let lid = li.x;
   if (spot >= u.N) { return; }              // uniform for the whole workgroup
   var t: array<f32, 5>;
-  for (var k = 0u; k < 5u; k++) { t[k] = theta0[spot * 5u + k]; }
+  let ts = select(5u, u.ts0, u.ts0 != 0u);
+  for (var k = 0u; k < 5u; k++) { t[k] = theta0[spot * ts + k]; }
   clampth(&t);
   evaluate(spot, t, lid);
   var gr: array<f32, 5>; var H: array<f32, 15>; var nll = red[20u * WG]; var chi2 = red[21u * WG]; var dev = red[22u * WG];

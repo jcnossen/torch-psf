@@ -8,5 +8,6 @@ import './test_psfzip';
 import './test_pdf';
 import './test_bench';
 import './test_smlm';
+import './test_insitu_vjp';
 
 getDevice().then(({ info }) => runAll(describeGpu(info)), (e) => runAll('none: ' + e.message));

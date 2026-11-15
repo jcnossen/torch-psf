@@ -59,16 +59,21 @@ export class SplineLocalizer {
   readonly g: SplineGrid;
   private knots: GPUBuffer;
   private gradPipe: GPUComputePipeline | null = null;
+  private uLM: GPUBuffer | null = null;       // uniforms of encodeLM / encodeKnotGradient
+  private uKG: GPUBuffer | null = null;
 
-  constructor(dev: GPUDevice, grid: SplineGrid, knots: Float32Array) {
+  /** knots null: a zero knot buffer, to be filled on the GPU (knotBuffer, e.g. KnotEngine.build). */
+  constructor(dev: GPUDevice, grid: SplineGrid, knots: Float32Array | null) {
     this.dev = dev; this.g = grid;
     const module = dev.createShaderModule({ code: src });
     this.pipe = dev.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'lm' } });
-    this.knots = dev.createBuffer({ size: knots.byteLength, usage: SU | CD });
-    dev.queue.writeBuffer(this.knots, 0, knots);
+    this.knots = dev.createBuffer({ size: knots ? knots.byteLength : grid.nz * grid.nv * grid.nu * 4, usage: SU | CD | CS });
+    if (knots) dev.queue.writeBuffer(this.knots, 0, knots);
   }
-  destroy() { this.knots.destroy(); }
+  destroy() { this.knots.destroy(); this.uLM?.destroy(); this.uKG?.destroy(); }
   setKnots(knots: Float32Array) { this.dev.queue.writeBuffer(this.knots, 0, knots); }
+  /** The knots [nz, nv, nu] on the GPU (storage, copy source / destination). */
+  get knotBuffer(): GPUBuffer { return this.knots; }
 
   /** The spline's z_limits: (z0 + hz, z0 + (nz - 2) hz). */
   get zLimits(): [number, number] { const g = this.g; return [g.z0 + g.hz, g.z0 + (g.nz - 2) * g.hz]; }
@@ -101,8 +106,6 @@ export class SplineLocalizer {
     try {
       if (!sharedRois) this.dev.queue.writeBuffer(bR, 0, rois.buffer, rois.byteOffset, N * P2 * 4);
       this.dev.queue.writeBuffer(bT, 0, theta0.buffer, theta0.byteOffset, N * 20);
-      const [zmin, zmax] = this.zLimits;
-      const oS0 = (-((g.roisize - 1) >> 1) - (-(((Math.ceil((g.roisize - 1) / 2 + g.xmax) + 2) * g.S + g.S - 1) / g.S))) * g.S;
       let fixed = 0; for (const k of o.fixed ?? []) fixed |= 1 << k;
       const bg = this.dev.createBindGroup({ layout: this.pipe.getBindGroupLayout(0), entries: [
         { binding: 0, resource: { buffer: bU } }, { binding: 1, resource: { buffer: this.knots } },
@@ -110,13 +113,8 @@ export class SplineLocalizer {
       const enc = this.dev.createCommandEncoder();
       const per = 65535;
       for (let first = 0; first < N; first += per) {
-        const dv = new DataView(new ArrayBuffer(80));
-        const u32 = [N, g.roisize, g.S, g.nz, g.nv, g.nu, o.iters ?? 30, fixed];
-        u32.forEach((v, i) => dv.setUint32(4 * i, v, true));
-        [g.z0, g.hz, oS0, g.xmax, zmin, zmax, 1.0, o.var ?? 0].forEach((v, i) => dv.setFloat32(32 + 4 * i, v, true));
-        dv.setUint32(64, first, true);
         // one uniform write per dispatch: separate submits keep the order
-        this.dev.queue.writeBuffer(bU, 0, dv.buffer);
+        this.dev.queue.writeBuffer(bU, 0, this.lmUniform(N, o.iters ?? 30, fixed, o.var ?? 0, first, 5));
         const e = first === 0 ? enc : this.dev.createCommandEncoder();
         const pass = e.beginComputePass();
         pass.setPipeline(this.pipe); pass.setBindGroup(0, bg);
@@ -141,29 +139,15 @@ export class SplineLocalizer {
    *  total NLL (poisson_nll without var, constant dropped). */
   async knotGradient(rois: Float32Array, N: number, theta: Float32Array, rvar = 0): Promise<{ gK: Float32Array; nll: number }> {
     const g = this.g, P2 = g.roisize ** 2, nK = g.nz * g.nv * g.nu;
-    if (!this.gradPipe) this.gradPipe = this.dev.createComputePipeline({ layout: 'auto', compute: { module: this.dev.createShaderModule({ code: gradSrc }), entryPoint: 'knot_grad' } });
     const mk = (size: number, usage = SU | CD) => this.dev.createBuffer({ size: Math.max(16, size), usage });
-    const bR = mk(N * P2 * 4), bT = mk(N * 20), bG = mk(nK * 4, SU | CD | CS), bN = mk(N * 4, SU | CS), bU = mk(48, GPUBufferUsage.UNIFORM | CD);
+    const bR = mk(N * P2 * 4), bT = mk(N * 20), bG = mk(nK * 4, SU | CD | CS), bN = mk(N * 4, SU | CS);
     const rG = this.dev.createBuffer({ size: nK * 4, usage: GPUBufferUsage.MAP_READ | CD });
     const rN = this.dev.createBuffer({ size: Math.max(16, N * 4), usage: GPUBufferUsage.MAP_READ | CD });
     try {
       this.dev.queue.writeBuffer(bR, 0, rois.buffer, rois.byteOffset, N * P2 * 4);
       this.dev.queue.writeBuffer(bT, 0, theta.buffer, theta.byteOffset, N * 20);
-      const dv = new DataView(new ArrayBuffer(48));
-      [N, g.roisize, g.S, g.nz, g.nv, g.nu, 0, 0].forEach((v, i) => dv.setUint32(4 * i, v, true));
-      dv.setFloat32(24, rvar, true);
-      [g.z0, g.hz, this.oS0(), g.xmax].forEach((v, i) => dv.setFloat32(32 + 4 * i, v, true));
-      this.dev.queue.writeBuffer(bU, 0, dv.buffer);
-      const bg = this.dev.createBindGroup({ layout: this.gradPipe.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: bU } }, { binding: 1, resource: { buffer: this.knots } }, { binding: 2, resource: { buffer: bR } },
-        { binding: 3, resource: { buffer: bT } }, { binding: 4, resource: { buffer: bG } }, { binding: 5, resource: { buffer: bN } }] });
       const enc = this.dev.createCommandEncoder();
-      enc.clearBuffer(bG);
-      const pass = enc.beginComputePass();
-      pass.setPipeline(this.gradPipe); pass.setBindGroup(0, bg);
-      const gx = Math.min(N, 65535);
-      pass.dispatchWorkgroups(gx, Math.ceil(N / gx));
-      pass.end();
+      this.encodeKnotGradient(enc, bR, N, bT, 5, bG, bN, rvar);
       enc.copyBufferToBuffer(bG, 0, rG, 0, nK * 4);
       enc.copyBufferToBuffer(bN, 0, rN, 0, N * 4);
       this.dev.queue.submit([enc.finish()]);
@@ -173,7 +157,58 @@ export class SplineLocalizer {
       let nll = 0; for (let i = 0; i < N; i++) nll += nl[i];
       rG.unmap(); rN.unmap();
       return { gK, nll };
-    } finally { for (const b of [bR, bT, bG, bN, bU, rG, rN]) b.destroy(); }
+    } finally { for (const b of [bR, bT, bG, bN, rG, rN]) b.destroy(); }
+  }
+
+  /** Encode knot_grad on GPU buffers: rois [N, P, P], theta with `stride` floats per spot (5, or 13 = an encodeLM
+   *  output), gK [nK] (cleared here), nll [N]. The uniform is written now: at most one call per submit. */
+  encodeKnotGradient(enc: GPUCommandEncoder, rois: GPUBuffer, N: number, theta: GPUBuffer, stride: number, gK: GPUBuffer, nll: GPUBuffer, rvar = 0) {
+    const g = this.g;
+    if (!this.gradPipe) this.gradPipe = this.dev.createComputePipeline({ layout: 'auto', compute: { module: this.dev.createShaderModule({ code: gradSrc }), entryPoint: 'knot_grad' } });
+    if (!this.uKG) this.uKG = this.dev.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | CD });
+    const dv = new DataView(new ArrayBuffer(48));
+    [N, g.roisize, g.S, g.nz, g.nv, g.nu, 0, stride].forEach((v, i) => dv.setUint32(4 * i, v, true));
+    dv.setFloat32(24, rvar, true);
+    [g.z0, g.hz, this.oS0(), g.xmax].forEach((v, i) => dv.setFloat32(32 + 4 * i, v, true));
+    this.dev.queue.writeBuffer(this.uKG, 0, dv.buffer);
+    const bg = this.dev.createBindGroup({ layout: this.gradPipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.uKG } }, { binding: 1, resource: { buffer: this.knots } }, { binding: 2, resource: { buffer: rois } },
+      { binding: 3, resource: { buffer: theta } }, { binding: 4, resource: { buffer: gK } }, { binding: 5, resource: { buffer: nll } }] });
+    enc.clearBuffer(gK);
+    const pass = enc.beginComputePass();
+    pass.setPipeline(this.gradPipe); pass.setBindGroup(0, bg);
+    const gx = Math.min(N, 65535);
+    pass.dispatchWorkgroups(gx, Math.ceil(N / gx));
+    pass.end();
+  }
+
+  /** Uniform block of spline_lm.wgsl. */
+  private lmUniform(N: number, iters: number, fixed: number, rvar: number, first: number, stride: number): ArrayBuffer {
+    const g = this.g, [zmin, zmax] = this.zLimits;
+    // (as before: (roisize - 1) / 2 unrounded here, unlike oS0(); the same for odd roisize)
+    const oS0 = (-((g.roisize - 1) >> 1) - (-(((Math.ceil((g.roisize - 1) / 2 + g.xmax) + 2) * g.S + g.S - 1) / g.S))) * g.S;
+    const dv = new DataView(new ArrayBuffer(80));
+    [N, g.roisize, g.S, g.nz, g.nv, g.nu, iters, fixed].forEach((v, i) => dv.setUint32(4 * i, v, true));
+    [g.z0, g.hz, oS0, g.xmax, zmin, zmax, 1.0, rvar].forEach((v, i) => dv.setFloat32(32 + 4 * i, v, true));
+    dv.setUint32(64, first, true);
+    dv.setUint32(68, stride === 5 ? 0 : stride, true);
+    return dv.buffer;
+  }
+
+  /** Encode one LM run (as run(), all parameters free) on GPU buffers: rois [N, P, P], theta0 with `stride` floats per
+   *  spot (5, or 13 = a previous output), out [N, 13] (theta, nll, crlb, chi2, deviance; must not be theta0). The
+   *  uniform is written now: at most one call per submit. */
+  encodeLM(enc: GPUCommandEncoder, rois: GPUBuffer, N: number, theta0: GPUBuffer, stride: number, out: GPUBuffer, o: { iters?: number; var?: number } = {}) {
+    if (!this.uLM) this.uLM = this.dev.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | CD });
+    this.dev.queue.writeBuffer(this.uLM, 0, this.lmUniform(N, o.iters ?? 30, 0, o.var ?? 0, 0, stride));
+    const bg = this.dev.createBindGroup({ layout: this.pipe.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.uLM } }, { binding: 1, resource: { buffer: this.knots } },
+      { binding: 2, resource: { buffer: rois } }, { binding: 3, resource: { buffer: theta0 } }, { binding: 4, resource: { buffer: out } }] });
+    const pass = enc.beginComputePass();
+    pass.setPipeline(this.pipe); pass.setBindGroup(0, bg);
+    const gx = Math.min(N, 65535);
+    pass.dispatchWorkgroups(gx, Math.ceil(N / gx));
+    pass.end();
   }
 
   private oS0(): number {

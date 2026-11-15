@@ -12,6 +12,10 @@ struct U {
   px: f32,       // pixel size (um)
   nA: u32,       // normal equations: number of atomic columns (D + 1)
   nslot: u32,    // normal equations: slots per image
+  S: u32,        // knot build: spline oversampling (knots [nz, R S, R S])
+  _p0: u32,
+  _p1: u32,
+  _p2: u32,
 };
 @group(0) @binding(0) var<uniform> u: U;
 

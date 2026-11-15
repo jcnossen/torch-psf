@@ -1,9 +1,11 @@
 // In-situ PSF estimation from SMLM spots by the knot route: a port of torch_psf.estimation.fit_zernike_knots (route 'K')
 // and torch_psf.pipeline.estimate_psf_insitu. Per iteration: knots of the CubicSplinePSF from the vectorial model at
-// the current Zernikes (with the Zernike derivatives of every knot image, for the vector-Jacobian product), emitter
-// parameters by Levenberg-Marquardt on the spline (zstarts and 30 iterations the first time, 3 afterwards), the NLL
-// gradient on the knots, its VJP to the Zernikes, an Adam step (lr 2e-3, betas 0.9 / 0.999, eps 1e-12).
+// the current Zernikes, emitter parameters by Levenberg-Marquardt on the spline (zstarts and 30 iterations the first
+// time, 3 afterwards), the NLL gradient on the knots, its vector-Jacobian product to the Zernikes (one backward pass
+// through the knot build, as torch_psf vjp_vectorial), an Adam step (lr 2e-3, betas 0.9 / 0.999, eps 1e-12).
+// Everything but the Adam step stays on the GPU: one readback per iteration (the NLL per spot and the 17 gradients).
 import { VecEngine } from '../gpu/ops';
+import { KnotEngine } from '../gpu/knot_engine';
 import { SplineLocalizer, SplineGrid, LocResult } from '../gpu/spline_lm';
 import { VectorialConfig } from '../psf/vectorial';
 import { StopToken } from '../core/task';
@@ -11,7 +13,8 @@ import { StopToken } from '../core/task';
 export interface KnotGridFull extends SplineGrid { c: number; Pl: number; }
 
 /** Knots [nz, nv, nu] of the vectorial model at zcoef and their derivatives with respect to every Zernike
- *  [nZ, nz, nv, nu] (torch_psf CubicSplinePSF.build_planes: knot z = emitter height, focus fixed). */
+ *  [nZ, nz, nv, nu] by forward-mode directions (torch_psf CubicSplinePSF.build_planes: knot z = emitter height, focus
+ *  fixed). The previous route of fitZernikeKnots (option jacobian); kept for tests and debugging. */
 export async function knotsAndJacobian(dev: GPUDevice, cfg: VectorialConfig, zcoef: ArrayLike<number>, g: KnotGridFull, focus_um: number,
   check?: () => void): Promise<{ knots: Float32Array; dK: Float32Array }> {
   const S = g.S, Pl = g.Pl, nK = g.nz * g.nv * g.nu, nZ = cfg.zernike_noll.length;
@@ -43,11 +46,109 @@ export async function knotsAndJacobian(dev: GPUDevice, cfg: VectorialConfig, zco
 
 export interface InsituIter { it: number; nll: number; seconds: number; zcoef: number[]; }
 
+export interface FitOptions {
+  iters?: number; lr?: number; locIters?: number; tok?: StopToken; log?: (h: InsituIter) => void; var?: number;
+  /** the previous route: knots and all Zernike derivatives by forward mode, read back, contracted on the CPU */
+  jacobian?: boolean;
+}
+
+export interface FitResult { zcoef: number[]; theta: Float32Array; K0: Float32Array; knots: Float32Array; history: InsituIter[]; seconds: number; }
+
+/** Adam (torch_psf.estimation._adam: betas 0.9 / 0.999, eps 1e-12) on zc in place; zc kept in float32 steps. */
+function adamStep(zc: Float64Array, m: Float64Array, v: Float64Array, gz: ArrayLike<number>, it: number, lr: number) {
+  for (let z = 0; z < zc.length; z++) {
+    m[z] = 0.9 * m[z] + 0.1 * gz[z];
+    v[z] = 0.999 * v[z] + 0.001 * gz[z] * gz[z];
+    const step = (m[z] / (1 - 0.9 ** (it + 1))) / (Math.sqrt(v[z] / (1 - 0.999 ** (it + 1))) + 1e-12);
+    zc[z] = Math.fround(zc[z] - lr * step);
+  }
+}
+
 /** torch_psf.estimation.fit_zernike_knots (route 'K') on ROIs [N, P, P] (photons). */
 export async function fitZernikeKnots(dev: GPUDevice, rois: Float32Array, N: number, cfg: VectorialConfig, zc0: number[], g: KnotGridFull,
-  focus_um: number, o: { iters?: number; lr?: number; locIters?: number; tok?: StopToken; log?: (h: InsituIter) => void; var?: number } = {}) {
+  focus_um: number, o: FitOptions = {}): Promise<FitResult> {
+  if (o.jacobian) return fitZernikeKnotsJacobian(dev, rois, N, cfg, zc0, g, focus_um, o);
+  const iters = o.iters ?? 80, lr = o.lr ?? 2e-3, nZ = zc0.length, nK = g.nz * g.nv * g.nu, P2 = g.roisize ** 2;
+  const zc = Float64Array.from(zc0);
+  const m = new Float64Array(nZ), v = new Float64Array(nZ);
+  const hist: InsituIter[] = [];
+  const t0 = performance.now();
+  const SU = GPUBufferUsage.STORAGE, CD = GPUBufferUsage.COPY_DST, CS = GPUBufferUsage.COPY_SRC;
+  const bufs: GPUBuffer[] = [];
+  const mk = (size: number, usage: number) => { const b = dev.createBuffer({ size: Math.max(16, Math.ceil(size / 16) * 16), usage }); bufs.push(b); return b; };
+  const eng = new KnotEngine(dev, cfg, g, focus_um);
+  const loc = new SplineLocalizer(dev, g, null);
+  try {
+    const bR = mk(N * P2 * 4, SU | CD);
+    dev.queue.writeBuffer(bR, 0, rois.buffer, rois.byteOffset, N * P2 * 4);
+    const th5 = mk(N * 20, SU | CD | CS), th13 = [mk(N * 52, SU | CS), mk(N * 52, SU | CS)];
+    const bG = mk(nK * 4, SU | CD), bN = mk(N * 4, SU | CS), bK0 = mk(nK * 4, CD | CS);
+    const rb = mk((nZ + N) * 4, GPUBufferUsage.MAP_READ | CD);       // [nZ gradients, N spot NLLs]
+    let cur: { buf: GPUBuffer; stride: number } | null = null;         // theta of the last localization (GPU)
+    for (let it = 0; it < iters; it++) {
+      o.tok?.check();
+      eng.setZernike(Array.from(zc, Math.fround));
+      eng.build(loc.knotBuffer);
+      const enc = dev.createCommandEncoder();
+      if (it === 0) enc.copyBufferToBuffer(loc.knotBuffer, 0, bK0, 0, nK * 4);
+      if (!cur) {
+        dev.queue.submit([enc.finish()]);
+        const r: LocResult = await loc.localize(rois, N, { var: o.var });
+        dev.queue.writeBuffer(th5, 0, r.theta.buffer, r.theta.byteOffset, N * 20);
+        cur = { buf: th5, stride: 5 };
+      } else {
+        const nxt: GPUBuffer = th13[cur.buf === th13[0] ? 1 : 0];
+        loc.encodeLM(enc, bR, N, cur.buf, cur.stride, nxt, { iters: o.locIters ?? 3, var: o.var });
+        cur = { buf: nxt, stride: 13 };
+        dev.queue.submit([enc.finish()]);
+      }
+      const e2 = dev.createCommandEncoder();
+      loc.encodeKnotGradient(e2, bR, N, cur.buf, cur.stride, bG, bN, o.var ?? 0);
+      dev.queue.submit([e2.finish()]);
+      eng.vjp(bG, rb, 0);                                               // the gradients straight into the readback buffer
+      const e3 = dev.createCommandEncoder();
+      e3.copyBufferToBuffer(bN, 0, rb, nZ * 4, N * 4);
+      dev.queue.submit([e3.finish()]);
+      await rb.mapAsync(GPUMapMode.READ);
+      const out = new Float32Array(rb.getMappedRange().slice(0, (nZ + N) * 4));
+      rb.unmap();
+      let nll = 0; for (let i = 0; i < N; i++) nll += out[nZ + i];
+      const h: InsituIter = { it, nll, seconds: (performance.now() - t0) / 1000, zcoef: Array.from(zc) };
+      hist.push(h); o.log?.(h);
+      adamStep(zc, m, v, out.subarray(0, nZ), it, lr);
+      if (o.tok?.stopEarly) break;
+    }
+    // results: theta of the last localization, the knots of the first and the last iteration
+    const rd = async (src: GPUBuffer, bytes: number) => {
+      const st = mk(bytes, GPUBufferUsage.MAP_READ | CD);
+      const enc = dev.createCommandEncoder();
+      enc.copyBufferToBuffer(src, 0, st, 0, bytes);
+      dev.queue.submit([enc.finish()]);
+      await st.mapAsync(GPUMapMode.READ);
+      const a = new Float32Array(st.getMappedRange().slice(0, bytes));
+      st.unmap();
+      return a;
+    };
+    let theta: Float32Array = null!;
+    if (cur) {
+      const a = await rd(cur.buf, N * cur.stride * 4);
+      theta = new Float32Array(N * 5);
+      for (let n = 0; n < N; n++) for (let k = 0; k < 5; k++) theta[n * 5 + k] = a[n * cur.stride + k];
+    }
+    const [K0, knots] = hist.length ? await Promise.all([rd(bK0, nK * 4), rd(loc.knotBuffer, nK * 4)]) : [null!, null!];
+    return { zcoef: Array.from(zc), theta, K0, knots, history: hist, seconds: (performance.now() - t0) / 1000 };
+  } finally {
+    for (const b of bufs) b.destroy();
+    loc.destroy(); eng.destroy();
+  }
+}
+
+/** fitZernikeKnots by the previous route: knotsAndJacobian every iteration (a new engine, D = 1 + 17 forward-mode
+ *  directions, all read back), knots and theta through the CPU, gK . dK on the CPU. */
+async function fitZernikeKnotsJacobian(dev: GPUDevice, rois: Float32Array, N: number, cfg: VectorialConfig, zc0: number[], g: KnotGridFull,
+  focus_um: number, o: FitOptions): Promise<FitResult> {
   const iters = o.iters ?? 80, lr = o.lr ?? 2e-3, nZ = zc0.length, nK = g.nz * g.nv * g.nu;
-  let zc = Float64Array.from(zc0);
+  const zc = Float64Array.from(zc0);
   const m = new Float64Array(nZ), v = new Float64Array(nZ);
   const hist: InsituIter[] = [];
   let loc: SplineLocalizer | null = null;
@@ -68,12 +169,7 @@ export async function fitZernikeKnots(dev: GPUDevice, rois: Float32Array, N: num
       for (let z = 0; z < nZ; z++) { let s = 0; const off = z * nK; for (let k = 0; k < nK; k++) s += gK[k] * dK[off + k]; gz[z] = s; }
       const h: InsituIter = { it, nll, seconds: (performance.now() - t0) / 1000, zcoef: Array.from(zc) };
       hist.push(h); o.log?.(h);
-      for (let z = 0; z < nZ; z++) {
-        m[z] = 0.9 * m[z] + 0.1 * gz[z];
-        v[z] = 0.999 * v[z] + 0.001 * gz[z] * gz[z];
-        const step = (m[z] / (1 - 0.9 ** (it + 1))) / (Math.sqrt(v[z] / (1 - 0.999 ** (it + 1))) + 1e-12);
-        zc[z] = Math.fround(zc[z] - lr * step);
-      }
+      adamStep(zc, m, v, gz, it, lr);
       if (o.tok?.stopEarly) break;
     }
   } finally { loc?.destroy(); }

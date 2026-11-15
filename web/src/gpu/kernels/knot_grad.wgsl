@@ -8,7 +8,7 @@
 
 struct U {
   N: u32, P: u32, S: u32, nz: u32,
-  nv: u32, nu: u32, rvar: f32, _b: u32,
+  nv: u32, nu: u32, rvar: f32, ts: u32,       // ts: floats per spot in theta (0: 5; 13: a spline_lm output)
   z0: f32, hz: f32, oS0: f32, xmax: f32,
 };
 
@@ -43,8 +43,9 @@ fn knot_grad(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li:
   let lid = li.x;
   if (spot >= u.N) { return; }
   let P = u.P; let S = u.S; let Sf = f32(S);
-  let x = theta[spot * 5u]; let y = theta[spot * 5u + 1u]; let z = theta[spot * 5u + 2u];
-  let I = theta[spot * 5u + 3u]; let bg = theta[spot * 5u + 4u];
+  let o = spot * select(5u, u.ts, u.ts != 0u);
+  let x = theta[o]; let y = theta[o + 1u]; let z = theta[o + 2u];
+  let I = theta[o + 3u]; let bg = theta[o + 4u];
   let tz = clamp((z - u.z0) / u.hz, 1.0, f32(u.nz) - 2.0 - 1e-4);
   let ty = u.oS0 - clamp(y, -u.xmax, u.xmax) * Sf;
   let tx = u.oS0 - clamp(x, -u.xmax, u.xmax) * Sf;
