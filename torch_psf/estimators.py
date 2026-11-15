@@ -1,4 +1,5 @@
-"""PSF estimators: from bead z-stacks (ZStackEstimator) and in situ from an SMLM movie (InSituEstimator).
+"""PSF estimators: from bead z-stacks (ZStackEstimator; DenseBeadEstimator for dense, overlapping beads) and in situ
+from an SMLM movie (InSituEstimator).
 
 Both take the starting point the same way (a PSF object or file, or Optics), an optional Camera, progress / stop
 hooks, and return the estimated PSF itself; the numbers of the run are on the estimator: estimator.report (dict) and
@@ -259,6 +260,135 @@ class ZStackEstimator(Estimator):
         self.report.update(sigma_px=list(out.sigma), gamma_um=out.gamma, d_um=out.d,
                            nll_per_px=float(l.detach()) / dd.numel())
         return out
+
+
+class DenseBeadEstimator(Estimator):
+    """PSF from bead z-stacks with dense, overlapping beads (vectorial model; torch_psf.estimation.dense_beads): all
+    beads are detected in the maximum projection over z, beads whose patch x patch boxes overlap are grouped into
+    clusters, and one shared VectorialPSF is fitted to all clusters jointly (per bead position and photons per plane,
+    per cluster and plane a background, per stack a lateral drift and a focus offset). Same starting point (start /
+    optics), camera and progress / stop hooks as ZStackEstimator; same z convention (plane k at focus
+    sign dz_um (k - (nk - 1) / 2), the beads on the coverslip at emitter_z_um).
+
+    patch: grouping box (odd px; None = psf_extent of the start model over the scanned range, rel=extent_rel, at most
+    max_patch); render_pad: extra px per side in which every bead is rendered (default patch // 3: the tails of a
+    member on its neighbours' pixels are modelled); region (x0, y0, x1, y1): crop of every stack (e.g. one channel of
+    a split camera frame); field_stop: 'auto' (detect a dark field-stop region; clusters with a member box outside it
+    are dropped), False, or a bool mask [H, W] (of the region); threshold (robust sd), min_dist (px), faint (relative
+    amplitude below which a detection does not take part in the grouping but joins a cluster it lies in), max_members,
+    max_box (px): detection and grouping (estimation.find_all_beads / find_bead_clusters); holdout: index of a stack
+    kept out of the fit, or holdout_fraction: a random fraction of the clusters (seed holdout_seed); held-out clusters
+    are refitted with the PSF fixed and scored (report heldout_nll_per_px, heldout_deviance_per_px); plane_step: use
+    every n-th plane; reject: drop clusters whose chi2 is above reject x the median (debris, unresolved aggregates).
+    drift / drift_order / focus_offset / bg / intensity / fit_dz_scale / fit_na / fit_n_med / emitter_z_um / warmup /
+    max_renders: see estimation.fit_dense_beads.
+
+    estimate(stacks, dz_um) -> VectorialPSF (roisize patch, focus_um 0). report: n_detected, n_clusters, n_beads,
+    cluster_sizes ({size: count}), dropped ({reason: clusters}), patch, render_pad, nll_per_px, deviance_per_px,
+    chi2_median, heldout_*. data (BeadClusters), result (the fit_dense_beads dict; result['xy_frame']: bead positions
+    in the full frame) and detections (per stack: xy, amp in region px, field-stop mask) for figures."""
+
+    def __init__(self, start=None, optics=None, camera=None, patch=None, render_pad=None, sign=1.0, iters=300,
+                 warmup=50, holdout=None, holdout_fraction=0.0, holdout_seed=0, region=None, field_stop='auto',
+                 threshold=6.0, min_dist=3, faint=0.1, max_members=8, max_box=None, drift=True, drift_order=3,
+                 focus_offset='tilt', bg='linear', intensity='free', fit_dz_scale=False, fit_na=False,
+                 fit_n_med=False, emitter_z_um=0.0, plane_step=1, reject=None, extent_rel=0.02, max_patch=31,
+                 zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, max_renders=3000, device=None,
+                 progress=None, stop=None):
+        super().__init__(device, progress, stop)
+        self.start, self.optics, self.camera = start, optics, _camera(camera)
+        self.patch, self.render_pad, self.sign, self.iters, self.warmup = patch, render_pad, sign, iters, warmup
+        self.holdout, self.holdout_fraction, self.holdout_seed = holdout, holdout_fraction, holdout_seed
+        self.region, self.field_stop, self.threshold, self.min_dist = region, field_stop, threshold, min_dist
+        self.max_members, self.max_box, self.faint = max_members, max_box, faint
+        self.fit_kw = dict(drift=drift, drift_order=drift_order, focus_offset=focus_offset, bg=bg, intensity=intensity,
+                           fit_dz_scale=fit_dz_scale, emitter_z_um=float(emitter_z_um), max_renders=max_renders)
+        self.fit_na, self.fit_n_med, self.plane_step, self.reject = fit_na, fit_n_med, plane_step, reject
+        self.extent_rel, self.max_patch = extent_rel, max_patch
+        self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
+
+    def _stacks(self, stacks):
+        if isinstance(stacks, (str, np.ndarray)) or torch.is_tensor(stacks):
+            stacks = [stacks]
+        out = []
+        for s in stacks:
+            a = tifffile.imread(s) if isinstance(s, str) else s
+            a = (a if torch.is_tensor(a) else torch.as_tensor(np.asarray(a, np.float32))).to(self.dev).float()
+            if self.camera is not None:
+                a = self.camera.to_photons(a)
+            if self.region is not None:
+                x0, y0, x1, y1 = self.region
+                a = a[:, y0:y1, x0:x1]
+            out.append(a[::self.plane_step])
+        return out
+
+    def estimate(self, stacks, dz_um):
+        """stacks: list of [nk, H, W] arrays / tensors or TIFF paths (the same nk). Returns the VectorialPSF (its
+        provenance holds the settings and the report)."""
+        from torch_psf.estimation.dense_beads import (field_stop_mask, find_all_beads, find_bead_clusters,
+                                                      psf_extent, BeadClusters, fit_dense_beads)
+        self._reset()
+        st = self._stacks(stacks)
+        nk_full = (st[0].shape[0] - 1) * self.plane_step + 1
+        focus = stage_focus(nk_full, dz_um, self.sign).to(self.dev)[::self.plane_step]
+        vec = _start_vectorial(self.start, self.optics, 21, self.dev, self.zernike_indices, self.npupil,
+                               self.oversample_pupil)
+        P = self.patch or psf_extent(vec, focus, self.fit_kw['emitter_z_um'],
+                                     rel=self.extent_rel, pmax=self.max_patch)
+        pad = P // 3 if self.render_pad is None else int(self.render_pad)
+        clusters, self.detections, dropped, ndet = [], [], {}, 0
+        for i, a in enumerate(st):
+            an = a.cpu().numpy()
+            if isinstance(self.field_stop, np.ndarray):
+                mask = self.field_stop
+            elif self.field_stop == 'auto':
+                mask = field_stop_mask(an)
+            else:
+                mask = None
+            xy, amp = find_all_beads(an, threshold=self.threshold, min_dist=self.min_dist)
+            kept, drop = find_bead_clusters(xy, amp, P, an.shape[1:], mask=mask, max_members=self.max_members,
+                                            max_box=self.max_box, faint=self.faint)
+            for c in kept:
+                c['stack'] = i
+            clusters += kept
+            for c in drop:
+                dropped[c['why']] = dropped.get(c['why'], 0) + 1
+            ndet += len(xy)
+            self.detections.append(dict(xy=xy, amp=amp, mask=mask, kept=kept, dropped=drop))
+        if not clusters:
+            raise ValueError('no usable bead clusters found')
+        data = BeadClusters.from_stacks(st, clusters, P, self.dev, render_pad=pad)
+        train = np.ones(data.n_clusters, bool)
+        if self.holdout is not None:
+            train = data.cl_stack.cpu().numpy() != self.holdout
+        elif self.holdout_fraction > 0:
+            rng = np.random.default_rng(self.holdout_seed)
+            nho = int(round(self.holdout_fraction * data.n_clusters))
+            train[rng.permutation(data.n_clusters)[:nho]] = False
+        if not train.any():
+            raise ValueError('no training clusters left')
+        sizes = data.cluster_sizes()
+        self.report.update(n_stacks=len(st), n_planes=len(focus), dz_um=dz_um * self.plane_step, sign=self.sign,
+                           n_detected=ndet, n_clusters_found=data.n_clusters, n_beads_found=data.n_beads,
+                           n_faint_members=int(sum(np.sum(c['faint']) for c in clusters)),
+                           cluster_sizes={int(k): int((sizes == k).sum()) for k in np.unique(sizes)}, dropped=dropped,
+                           patch=P, render_pad=pad)
+        fit = ('zcoef',) + (('NA',) if self.fit_na else ()) + (('n_med',) if self.fit_n_med else ())
+        r = fit_dense_beads(data, focus, vec, iters=self.iters, fit=fit, train=train, warmup=self.warmup,
+                            reject=self.reject, log=self._log('dense_beads'), stop=self.stop, **self.fit_kw)
+        psf = r['psf'].resized(P)
+        psf.focus_um = 0.0
+        for k, v in r['report'].items():
+            if k not in ('method', 'patch'):
+                self.report[k] = v
+        if self.fit_na or self.fit_n_med:
+            self.report.update(NA=float(psf.NA), n_med=float(psf.n_med))
+        off = torch.tensor(self.region[:2] if self.region is not None else (0, 0), device=self.dev).float()
+        r['xy_frame'] = r['xy'] + off
+        self.data, self.result, self.focus_um = data, r, focus
+        self.report['seconds'] = time.time() - self._t0
+        psf.provenance = dict(estimator='DenseBeadEstimator', dz_um=float(dz_um), report=self.report)
+        return psf
 
 
 class InSituEstimator(Estimator):
