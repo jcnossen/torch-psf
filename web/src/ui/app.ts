@@ -266,8 +266,10 @@ export function startApp(root: HTMLElement) {
     else if (!followTimer) followTimer = window.setTimeout(() => { followTimer = 0; if (followNext >= 0) followFrame(followNext); }, wait);
   }
   const fitScale = (cw: number, ch: number) => player ? Math.max(player.W * n('o-px') / cw, player.H * n('o-px') / ch) * 1.02 : 1;
+  let queuedFrame = -1;     // a frame asked for while another was being drawn: drawn next (the last request wins)
   async function showFrame(t: number) {
-    if (!player || drawing) return;
+    if (!player) return;
+    if (drawing) { queuedFrame = t; return; }
     drawing = true;
     try {
       frameNow = t; slider.max = String(player.n - 1); slider.value = String(t);
@@ -280,7 +282,10 @@ export function startApp(root: HTMLElement) {
       haveFrame = true;
       renderMovie();
       $('m-frame-v').textContent = `frame ${t + 1} / ${player.n}`;
-    } finally { drawing = false; }
+    } finally {
+      drawing = false;
+      if (queuedFrame >= 0) { const q = queuedFrame; queuedFrame = -1; showFrame(q); }
+    }
   }
   function renderMovie() {
     const dpr = window.devicePixelRatio || 1;
@@ -459,7 +464,7 @@ export function startApp(root: HTMLElement) {
     const frac = p.total ? Math.min(1, p.done / p.total) : 0;
     const [bar, txt] = running === 'movie' ? ['mbar', 'mtext'] : ['pbar', 'ptext'];
     $(bar).style.width = (100 * frac).toFixed(1) + '%';
-    const fmt = (v: unknown) => typeof v === 'number' ? (Math.abs(v) < 1e-2 || Math.abs(v) > 1e4 ? v.toExponential(3) : v.toFixed(4)) : String(v);
+    const fmt = (v: unknown) => typeof v === 'number' ? Number.isInteger(v) ? String(v) : (Math.abs(v) < 1e-2 || Math.abs(v) > 1e4 ? v.toExponential(3) : v.toFixed(4)) : String(v);
     const info = Object.entries(p.info ?? {}).filter(([k]) => k !== 'zcoef').map(([k, v]) => `${k.replace(/_/g, ' ')} ${fmt(v)}`).join(', ');
     const t = p.elapsed_s !== undefined ? ` | ${p.elapsed_s.toFixed(1)} s` + (p.eta_s !== undefined ? `, ~${p.eta_s.toFixed(0)} s left` : '') : '';
     $(txt).textContent = `${running === 'movie' ? (STAGES[p.stage] ?? p.stage) : p.stage}: ${p.done} / ${p.total}${info ? ' | ' + info : ''}${t}`;

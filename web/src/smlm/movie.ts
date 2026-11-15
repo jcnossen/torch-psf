@@ -28,6 +28,9 @@ export async function openSource(src: File[] | MovieSource, progress?: (p: Progr
   return TiffMovie.open(src, (msg) => progress?.({ stage: 'header', done: 0, total: 1, info: { msg } }));
 }
 
+/** frames per localization batch (emitted to the live views) */
+const EMIT_FRAMES = 50;
+
 export async function localizeMovie(device: GPUDevice, source: File[] | MovieSource, form: MovieForm, tok: StopToken,
   progress: (p: Progress) => void, emit: (rows: Float32Array) => void): Promise<MovieSummary> {
   const mv = await openSource(source, progress);
@@ -57,22 +60,32 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
       if ((form.excessNoise ?? 1) !== 1) { const F2 = form.excessNoise!; for (let i = 0; i < fr.length; i++) fr[i] = Math.fround(fr[i] / F2); }
       const d = await det.detect(fr, T, f0);
       const N = d.frame.length;
-      if (N) {
-        const rois = extractRois(fr, mv.H, mv.W, f0, d, P);
-        const r = await loc.localize(rois, N, { var: varE });
-        const rows = new Float32Array(N * NCOL);
-        for (let i = 0; i < N; i++) {
-          const o = i * NCOL, t = r.theta, c = r.crlb;
-          const lim = Math.max(Math.abs(t[i * 5]), Math.abs(t[i * 5 + 1])) > grid.xmax - 0.06 ? 1 : 0;
+      // localized and emitted in sub-batches of EMIT_FRAMES frames (detections are in frame order), so the live views
+      // update while a noise chunk is processed; every spot is fitted on its own, so the results do not depend on it
+      let a = 0;
+      while (a < N) {
+        tok.check();
+        const fEnd = d.frame[a] - (d.frame[a] - f0) % EMIT_FRAMES + EMIT_FRAMES;
+        let b = a; while (b < N && d.frame[b] < fEnd) b++;
+        const M = b - a;
+        const rois = extractRois(fr, mv.H, mv.W, f0, d, P, a, M);
+        const r = await loc.localize(rois, M, { var: varE });
+        const rows = new Float32Array(M * NCOL);
+        for (let k = 0; k < M; k++) {
+          const i = a + k, o = k * NCOL, t = r.theta, c = r.crlb;
+          const lim = Math.max(Math.abs(t[k * 5]), Math.abs(t[k * 5 + 1])) > grid.xmax - 0.06 ? 1 : 0;
           nLimit += lim;
           rows[o] = d.frame[i];
-          rows[o + 1] = d.x[i] + t[i * 5]; rows[o + 2] = d.y[i] + t[i * 5 + 1];   // corner + (P - 1) / 2 = detection pixel
-          rows[o + 3] = t[i * 5 + 2]; rows[o + 4] = t[i * 5 + 3]; rows[o + 5] = t[i * 5 + 4];
-          for (let q = 0; q < 5; q++) rows[o + 6 + q] = c[i * 5 + q];
-          rows[o + 11] = -r.nll[i]; rows[o + 12] = r.chi2[i]; rows[o + 13] = lim;
+          rows[o + 1] = d.x[i] + t[k * 5]; rows[o + 2] = d.y[i] + t[k * 5 + 1];   // corner + (P - 1) / 2 = detection pixel
+          rows[o + 3] = t[k * 5 + 2]; rows[o + 4] = t[k * 5 + 3]; rows[o + 5] = t[k * 5 + 4];
+          for (let q = 0; q < 5; q++) rows[o + 6 + q] = c[k * 5 + q];
+          rows[o + 11] = -r.nll[k]; rows[o + 12] = r.chi2[k]; rows[o + 13] = lim;
         }
         emit(rows);
-        n += N;
+        n += M;
+        a = b;
+        const fd = Math.min(f1, fEnd);
+        progress({ stage: 'localize', done: fd, total: nFrames, info: { localizations: n }, ...eta.update(fd, nFrames) });
       }
       done = f1;
       progress({ stage: 'localize', done, total: nFrames, info: { localizations: n }, ...eta.update(done, nFrames) });
