@@ -17,7 +17,7 @@ export interface ReportImage extends Image2D { label?: string; extent?: [number,
 export interface FitReportData {
   title?: string;
   subtitle?: string;                       // e.g. the input file names
-  created?: string;                        // ISO time; default now
+  created?: string;                        // ISO time; default now ('' = no time, a reproducible file)
   /** input settings (key -> value), shown as a table */
   settings?: Record<string, SettingValue>;
   /** results (key -> value), shown as a table next to the settings */
@@ -192,11 +192,11 @@ function qualityRow(doc: PdfDoc, pg: PdfPage, x: number, y: number, w: number, h
 }
 
 /** Build the report; returns the PDF bytes. */
-export async function makeFitReport(d: FitReportData, opts: { compress?: boolean } = {}): Promise<Uint8Array> {
+export async function makeFitReport(d: FitReportData, opts: { compress?: boolean; creationDate?: boolean } = {}): Promise<Uint8Array> {
   const title = d.title ?? 'PSF fit report';
   const created = d.created ?? new Date().toISOString();
   const doc = new PdfDoc({ title, creator: 'torch-psf web', subject: d.subtitle });
-  const F = new Flow(doc, `${title}  •  ${created.replace('T', ' ').replace(/\.\d+Z$/, ' UTC')}`);
+  const F = new Flow(doc, created ? `${title}  •  ${created.replace('T', ' ').replace(/\.\d+Z$/, ' UTC')}` : title);
   const pg = () => F.page;
 
   // ---- title

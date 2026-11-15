@@ -94,8 +94,9 @@ exaggeration); a global display maximum so the brightness does not jump; above a
 hash-ranked subset weighted to keep the brightness (the principles of webSMLM's point-cloud renderer and its
 tilt / rotate view). The fit starts from
 a generic astigmatic PSF (Noll 6 = 0.08) unless another start is chosen in the Fit PSF step (the PSF in the 3D view, the last
-estimate, or a PSF json). On the demo it recovers the truth to about 0.001 waves rms in about a minute on a laptop iGPU. The Localize step localizes again (with the last estimate, or the start PSF if there is none) without estimating the PSF.
-"Fit report (PDF)" in the Export step writes `fit_report.pdf` (see "Fit report" below).
+estimate, or a PSF file: `psf.zip`, a torch-psf PSF json or a SIMCODE calibration json). On the demo it recovers the truth to about 0.001 waves rms in about a minute on a laptop iGPU. The Localize step localizes again (with the last estimate, or the start PSF if there is none) without estimating the PSF.
+"Fit report (PDF)" in the Export step writes `fit_report.pdf` (see "Fit report" below); "PSF (psf.zip)" writes the shared PSF file (see
+"psf.zip" below).
 
 ### Bead z-stack
 
@@ -113,7 +114,24 @@ estimate, or a PSF json). On the demo it recovers the truth to about 0.001 waves
    the calib keys `pixelsize_um`, `wavelength_um`, `NA`, `n_imm`, `n_med`; `provenance` records the fit, including
    `partial`), `psf_spline.npz` (knots of the convolutional Catmull-Rom spline, S = 2, hz = 0.04 um, the same grid as
    torch_psf's `CubicSplinePSF`: `knots [nz, nv, nu]`, `z0`, `hz`, `S`, `u0`, `roisize`, `xmax`, `focus_um`, Zernikes) and
-   `psf_model_zstack.tif` (float32 normalized model PSF at the stack's planes, ImageJ stack), `fit_report.pdf`.
+   `psf_model_zstack.tif` (float32 normalized model PSF at the stack's planes, ImageJ stack), `fit_report.pdf`, and
+   `psf.zip` (below).
+
+### psf.zip
+
+The shared PSF file of torch-psf (format `torch-psf` 0.2.0, `../docs/PSF_FORMAT.md`), one button per fit: `psf.json`
+with one channel (the fitted vectorial model, or with "spline channel" a spline whose `source` is the vectorial model:
+bead fit: the model tabulated on the export spline grid; in-situ: the refined free knots when they were kept, else the
+model tabulated on the fit's knot grid), the camera gain / offset, provenance and the report summary; the knots as
+`ch0/knots.npy`; `zstack.tif` (ImageJ hyperstack ZCYX, float32, spacing / unit / resolution / Info as torch_psf writes
+them; default 25 planes at 1 camera px, options "planes" and "sampling 1 / k px"); `preview.png`; `fit_report.pdf`
+(without a creation date). Deflated with `CompressionStream('deflate-raw')` (PNG stored), fixed member times: the same
+fit gives the same bytes. Bead fit: z = emitter height at the export focus ("imaging focus"), z range = the export
+spline z range, ROI = the fit ROI; in-situ: the acquisition focal plane and emitter z range. `torch_psf.io.load` /
+`PSFZip.read` read it; the app reads `psf.zip` (channel 0's vectorial model or the `source` of a spline channel; only
+the arrays psf.json references are parsed, dtypes the npy reader does not support are skipped) wherever it reads a PSF
+json. Code: `src/io/zip.ts`, `src/io/imagejtif.ts`, `src/io/psfzip.ts`, `src/psf/zstack.ts`, `src/psf/makezip.ts`,
+`src/report/preview.ts`, `src/ui/exportzip.ts`.
 
 ### Fit report (PDF)
 
@@ -162,9 +180,11 @@ per lobe). Not modelled (unlike torch_psf's `fit_beads`): finite bead size, blea
 
 ```
 src/gpu/        device.ts (adapter / limits), ops.ts (VecEngine: chunked dispatch), kernels/*.wgsl
-src/psf/        vectorial.ts (pupil precompute, Zernikes, derivative directions), spline.ts (knot export)
+src/psf/        vectorial.ts (pupil precompute, Zernikes, derivative directions), spline.ts (knot export), zstack.ts (z-stack
+                render, spline evaluation), makezip.ts (psf.zip of a fit)
 src/fit/        beads.ts (bead finding, LM with Schur elimination), linalg.ts
-src/io/         tiff.ts (lazy reader), npy.ts (npy / npz read + write), tifwrite.ts, psfjson.ts, pdf.ts + pdffonts.ts (PDF writer)
+src/io/         tiff.ts (lazy reader), npy.ts (npy / npz read + write), zip.ts, tifwrite.ts, imagejtif.ts (hyperstack), psfjson.ts,
+                psfzip.ts (psf.zip json / write / read), pdf.ts + pdffonts.ts (PDF writer)
 src/report/     plot.ts (axes, line / bar / histogram, images with colour bars, tables), fitreport.ts (makeFitReport),
                 fromapp.ts (report data from the in-situ / bead results)
 src/ui/         app.ts, view3d.ts (three.js scene: isosurfaces + slice planes), isosurface.ts (marching tetrahedra),
@@ -191,6 +211,8 @@ checked in between.
 | bead fit, generated tetrapod-like stack (3 beads, ROI 40, 3 um z range) | Zernikes 0.0000 w rms, focus 0.00 nm, PSF L2 3e-7, held-out NLL 1.2e-6 rel.; vs truth 0.0001 w rms | same |
 | bead fit, one-bead real crop vs the Python fit (no held-out bead; z-step scale fixed) | Zernikes 0.0000 w rms, focus 0.05 nm, PSF L2 7e-5, NLL 4e-7 rel. | same |
 | spline knots vs torch_psf's `CubicSplinePSF` (knots_from_vectorial) | max rel. error 2e-6 | |
+| psf.zip written by torch_psf (vectorial with camera maps and extras; spline with source) read here; web render vs its zstack.tif | Zernikes identical; render max rel. 1.4e-6 (vectorial, 1 / 2 px) / 9e-8 (spline); bool / unicode camera extras skipped | 1e-4 / 1e-5 |
+| psf.zip written here (vectorial, spline) read by torch_psf (`tests/test_web_psfzip.py`, after the web tests) | Zernikes / optics identical; torch_psf render vs the web zstack.tif 7e-7 / 1e-7; zstack.tif tags identical to tifffile's; knots vs knots_from_vectorial 9e-7; byte-reproducible | 1e-4 / 1e-5 |
 | PDF writer and fit report (synthetic data, all sections; empty and partial reports) | header, xref offsets, stream lengths, page count, Flate streams inflate to the image sizes; the report is saved to `test/out/fit_report_test.pdf` | |
 | ROI quality range (synthetic bands, bead chi2 with reference line, in-situ estimate of a small demo movie) | bands around the cutoff, rejected count = n_rejected, the deviance of the shown data / model reproduces q (max rel. 4e-6); `test/out/quality_range_insitu.pdf`, `quality_range_beads.pdf` | 2e-2 |
 | SMLM movie: spot detection vs torch_psf `extract_spots` / `detect_spots` (seeded simulated movie, 300 frames, chunks of 100) | identical spots and order (718 / 718), noise rel. 2e-6 | |

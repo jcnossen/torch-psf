@@ -14,6 +14,7 @@ import { localizeMovie, MovieSource } from './smlm/movie';
 import { estimateInsitu } from './smlm/estimate';
 import { simulateDemo, ArrayMovie } from './smlm/simulate';
 import { photonTransfer } from './smlm/camera';
+import { buildPsfZip } from './psf/makezip';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 let token: StopToken | null = null;
@@ -209,6 +210,10 @@ ctx.onmessage = async (ev: MessageEvent<Req>) => {
     } else if (m.type === 'export') {
       const r = await exportFile(m.kind, m.params);
       post({ id: m.id, type: 'result', bytes: r.bytes, name: r.name }, [r.bytes.buffer]);
+    } else if (m.type === 'psfzip') {
+      const { device } = await getDevice();
+      const r = await buildPsfZip(device, m.req);
+      post({ id: m.id, type: 'result', bytes: r.bytes }, [r.bytes.buffer]);
     }
   } catch (e) {
     const err = e as Error;

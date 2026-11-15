@@ -6,7 +6,11 @@
 import { View3D, Volume } from './view3d';
 import { drawArray } from './colormap';
 import { DEFAULT_NOLL, Optics } from '../psf/vectorial';
-import { makePsfJson, readPsfJson } from '../io/psfjson';
+import { makePsfJson } from '../io/psfjson';
+import { readPsfFile } from '../io/psfzip';
+import { beadZipRequest, insituZipRequest, ZipOptions } from './exportzip';
+import type { PsfZipRequest } from '../psf/makezip';
+import { reportSections } from '../report/sections';
 import { WEBGPU_HELP, getDevice } from '../gpu/device';
 import { TiffMovie } from '../io/tiff';
 import type { FitForm, FitSummary, VolumeSpec, Req, MovieForm, InsituForm, MovieSourceSpec } from './protocol';
@@ -419,11 +423,11 @@ export function startApp(root: HTMLElement) {
     const f = (e.target as HTMLInputElement).files?.[0];
     if (!f) return;
     try {
-      const j = readPsfJson(await f.text());
+      const j = await readPsfFile(f);
       if (!Array.isArray(j.noll) || !Array.isArray(j.zcoef)) throw new Error('no zernike_noll / zernike_waves');
       psfJson = { noll: j.noll.map(Number), zcoef: j.zcoef.map(Number), name: f.name };
-      $('m-psfinfo').textContent = `${f.name}: ${fmtZ(psfJson.noll, psfJson.zcoef)}`;
-    } catch (err) { psfJson = null; $('m-psfinfo').textContent = 'not a torch-psf PSF json: ' + (err as Error).message; }
+      $('m-psfinfo').textContent = `${f.name} (${j.kind}): ${fmtZ(psfJson.noll, psfJson.zcoef)}` + (j.notes.length ? ` [${j.notes.join('; ')}]` : '');
+    } catch (err) { psfJson = null; $('m-psfinfo').textContent = 'not a torch-psf PSF file: ' + (err as Error).message; }
   };
   const startPsf = (): { noll: number[]; zcoef: number[] } | null => {
     if (psfSel.value === 'json') return psfJson;
@@ -676,28 +680,50 @@ export function startApp(root: HTMLElement) {
       ...(truth ? [{ z: truth, color: '#1a7f37', label: 'truth (demo)' }] : []),
     ]);
   }
+  const insituProv = (r: InsituReport) => ({ source: 'torch-psf web in-situ fit (knot route, torch_psf estimate_psf_insitu)',
+    movie: source === 'demo' ? 'simulated demo' : (source as File[]).map((f) => f.name),
+    n_train: r.n_train, n_test: r.n_test, iterations: r.iterations, partial: r.partial, heldout_nll_px_diff: r.heldout?.diff ?? null,
+    z_scale_vs_start: r.z_scale, z_range_um: [n('m-zlo'), n('m-zhi')], gain_e_per_adu: n('o-gain'), offset_adu: n('o-offset') });
   $('i-json').onclick = () => {
     if (!insitu) return;
     const j = makePsfJson({ optics: optics(), noll: insitu.noll, zcoef: insitu.zcoef, focus_um: n('m-focus'), npupil: 64, oversample: 3,
-      provenance: { source: 'torch-psf web in-situ fit (knot route, torch_psf estimate_psf_insitu)', created: new Date().toISOString(),
-        movie: source === 'demo' ? 'simulated demo' : (source as File[]).map((f) => f.name),
-        n_train: insitu.n_train, n_test: insitu.n_test, iterations: insitu.iterations, partial: insitu.partial, heldout_nll_px_diff: insitu.heldout?.diff ?? null,
-        z_scale_vs_start: insitu.z_scale, z_range_um: [n('m-zlo'), n('m-zhi')], gain_e_per_adu: n('o-gain'), offset_adu: n('o-offset') } });
+      provenance: { ...insituProv(insitu), created: new Date().toISOString() } });
     download(JSON.stringify(j, null, 1), 'psf_insitu.json', 'application/json');
   };
+  /** fit_report.pdf of the in-situ fit (reproducible: no time stamp, for psf.zip) and its psf.json sections */
+  async function insituPdf(reproducible: boolean) {
+    const R = await import('../report/fromapp'), r = insitu!, f = insituForm!;
+    const spec: VolumeSpec = { optics: f.optics, npupil: 64, noll: r.noll, zcoef: r.zcoef, nxy: 48, dxy_um: 0.04, zmin: f.zlo, zmax: f.zhi, nz: 41, ze_um: 0, focus_um: f.focus_um };
+    const vol = await call({ type: 'volume', spec });
+    const d = R.insituReportData(r, { form: f, results: insituRows, source: source === 'demo' ? 'simulated demo' : (source as File[]).map((x) => x.name).join(', '),
+      truth: truthZ ? DEFAULT_NOLL.map((j) => truthZ![j] ?? 0) : null, locs: recon?.rows() ?? null, volume: { data: vol.volume, spec } });
+    if (reproducible) d.created = '';
+    return { bytes: await R.makeFitReport(d, { creationDate: !reproducible }), sections: reportSections(d) };
+  }
   $('i-pdf').onclick = async () => {
     if (!insitu || !insituForm) return;
     const st = $('i-status');
     st.textContent = 'writing the report...';
     try {
-      const R = await import('../report/fromapp'), r = insitu, f = insituForm;
-      const spec: VolumeSpec = { optics: f.optics, npupil: 64, noll: r.noll, zcoef: r.zcoef, nxy: 48, dxy_um: 0.04, zmin: f.zlo, zmax: f.zhi, nz: 41, ze_um: 0, focus_um: f.focus_um };
-      const vol = await call({ type: 'volume', spec });
-      const bytes = await R.makeFitReport(R.insituReportData(r, { form: f, results: insituRows, source: source === 'demo' ? 'simulated demo' : (source as File[]).map((x) => x.name).join(', '),
-        truth: truthZ ? DEFAULT_NOLL.map((j) => truthZ![j] ?? 0) : null, locs: recon?.rows() ?? null, volume: { data: vol.volume, spec } }));
+      const { bytes } = await insituPdf(false);
       download(bytes, 'fit_report.pdf', 'application/pdf');
       st.textContent = `fit_report.pdf (${(bytes.length / 1024).toFixed(0)} kB)`;
     } catch (e) { st.textContent = 'error: ' + (e as Error).message; }
+  };
+  // --- psf.zip (both fits): built in the worker (psf/makezip.ts)
+  const zipOpts = (p: string): ZipOptions => ({ planes: Math.round(n(p + '-zn')), k: Math.round(n(p + '-zk')), spline: $<HTMLInputElement>(p + '-spline').checked });
+  const saveZip = async (st: HTMLElement, make: () => Promise<PsfZipRequest>) => {
+    st.textContent = 'writing psf.zip...';
+    try {
+      const r = await call({ type: 'psfzip', req: await make() });
+      download(r.bytes, 'psf.zip', 'application/zip');
+      st.textContent = `psf.zip (${(r.bytes.length / 1024).toFixed(0)} kB)`;
+    } catch (e) { st.textContent = 'error: ' + (e as Error).message; }
+  };
+  $('i-zip').onclick = () => {
+    if (!insitu || !insituForm) return;
+    const r = insitu, f = insituForm;
+    saveZip($('i-status'), async () => { const p = await insituPdf(true); return insituZipRequest(r, f, zipOpts('i'), insituProv(r), p.bytes, p.sections); });
   };
   function showLocs(s: MovieSummary) {
     const rows = recon!.rows(), N = rows.length / NCOL;
@@ -800,13 +826,14 @@ export function startApp(root: HTMLElement) {
       `x ${r.beads[k].x.toFixed(2)} px, y ${r.beads[k].y.toFixed(2)} px from the ROI centre, focus offset ${(r.beads[k].zoff * 1000).toFixed(1)} nm`;
   }
   const expParams = () => ({ focus_um: n('e-focus'), splineRoi: n('e-roi'), zmin: n('e-zmin'), zmax: n('e-zmax') });
+  const beadProv = (r: FitSummary, f: FitForm) => ({ source: 'torch-psf web bead fit', stacks: r.stacks.map((s) => s.name), beads: r.beads.length,
+    heldout_beads: r.beads.filter((b) => b.heldout).length, frames_used: r.frames_used, frames_total: r.frames_total, partial: r.partial,
+    nll_train_px: r.nll_train_px, nll_heldout_px: r.nll_heldout_px, iterations: r.iterations, dz_scale: r.dz_scale,
+    stage_sign: f.sign, dz_um: f.dz_um, bead_centre_um: f.ze_um, gain_e_per_adu: f.gain, offset_adu: f.offset });
   $('x-json').onclick = () => {
     const r = fitResult!, f = readForm();
     const j = makePsfJson({ optics: f.optics, noll: r.noll, zcoef: r.zcoef, focus_um: expParams().focus_um, npupil: f.npupil, oversample: f.oversample,
-      provenance: { source: 'torch-psf web bead fit', created: new Date().toISOString(), stacks: r.stacks.map((s) => s.name), beads: r.beads.length,
-        heldout_beads: r.beads.filter((b) => b.heldout).length, frames_used: r.frames_used, frames_total: r.frames_total, partial: r.partial,
-        nll_train_px: r.nll_train_px, nll_heldout_px: r.nll_heldout_px, iterations: r.iterations, dz_scale: r.dz_scale,
-        stage_sign: f.sign, dz_um: f.dz_um, bead_centre_um: f.ze_um, gain_e_per_adu: f.gain, offset_adu: f.offset } });
+      provenance: { ...beadProv(r, f), created: new Date().toISOString() } });
     download(JSON.stringify(j, null, 1), 'psf.json', 'application/json');
   };
   const viaWorker = async (kind: 'knots' | 'tif') => {
@@ -814,15 +841,24 @@ export function startApp(root: HTMLElement) {
     try { const r = await call({ type: 'export', kind, params: expParams() }); download(r.bytes, r.name); $('x-status').textContent = `${r.name} (${(r.bytes.length / 1024).toFixed(0)} kB)`; }
     catch (e) { $('x-status').textContent = 'error: ' + (e as Error).message; }
   };
+  async function beadPdf(r: FitSummary, f: FitForm, reproducible: boolean) {
+    const R = await import('../report/fromapp');
+    const d = R.beadReportData(r, { form: f, results: beadRows, settings: {
+      'stage sign / z step (\u00b5m)': [f.sign, f.dz_um], 'bead centre height (\u00b5m)': f.ze_um, 'camera gain (e/ADU) / offset (ADU)': [f.gain, f.offset],
+      'ROI size (px)': f.roisize, 'pupil sampling / oversampling': [f.npupil, f.oversample], 'fit z-step scale': f.fitDz, 'fit xy drift': f.fitDrift,
+      'held-out beads': f.holdout, 'max. iterations': f.maxIter } });
+    if (reproducible) d.created = '';
+    return { bytes: await R.makeFitReport(d, { creationDate: !reproducible }), sections: reportSections(d) };
+  }
+  $('x-zip').onclick = () => {
+    const r = fitResult!, f = readForm(), e = expParams();
+    saveZip($('x-status'), async () => { const p = await beadPdf(r, f, true); return beadZipRequest(r, f, e, zipOpts('x'), beadProv(r, f), p.bytes, p.sections); });
+  };
   $('x-pdf').onclick = async () => {
     const r = fitResult!, f = readForm();
     $('x-status').textContent = 'writing the report...';
     try {
-      const R = await import('../report/fromapp');
-      const bytes = await R.makeFitReport(R.beadReportData(r, { form: f, results: beadRows, settings: {
-        'stage sign / z step (\u00b5m)': [f.sign, f.dz_um], 'bead centre height (\u00b5m)': f.ze_um, 'camera gain (e/ADU) / offset (ADU)': [f.gain, f.offset],
-        'ROI size (px)': f.roisize, 'pupil sampling / oversampling': [f.npupil, f.oversample], 'fit z-step scale': f.fitDz, 'fit xy drift': f.fitDrift,
-        'held-out beads': f.holdout, 'max. iterations': f.maxIter } }));
+      const { bytes } = await beadPdf(r, f, false);
       download(bytes, 'fit_report.pdf', 'application/pdf');
       $('x-status').textContent = `fit_report.pdf (${(bytes.length / 1024).toFixed(0)} kB)`;
     } catch (e) { $('x-status').textContent = 'error: ' + (e as Error).message; }
@@ -944,6 +980,13 @@ const field = (id: string, label: string, v: number, unit = '', step = 'any', ti
   `<label class="field" title="${title}"><span class="fl">${label}</span><span class="inp"><input id="${id}" type="number" step="${step}" value="${v}">${unit ? `<i>${unit}</i>` : ''}</span></label>`;
 const check = (id: string, label: string, on = false, title = '') => `<label class="chk" title="${title}"><input id="${id}" type="checkbox" ${on ? 'checked' : ''}> ${label}</label>`;
 
+const ZIP_TITLE = 'psf.zip (torch-psf 0.2.0): psf.json, z-stack, preview and fit report; read by torch_psf.io.load and by this app';
+/** psf.zip options: z-stack planes and sampling (1 / k camera px), spline channel. */
+const zipRow = (p: string, splineTitle: string) => `<details class="adv" data-key="zip-${p}"><summary>psf.zip options <span class="dim">z-stack resolution, spline</span></summary>` +
+  field(p + '-zn', 'z-stack planes', 25, '', '1', 'zstack.tif planes over the z range (torch_psf default 25)') +
+  field(p + '-zk', 'Sampling 1 / k px', 1, 'k', '1', 'zstack.tif sample spacing 1 / k camera px, from k x k sub-pixel renders (torch_psf default k = 1)') +
+  check(p + '-spline', 'Spline channel', false, `channel 0 as a spline whose source is the vectorial model: ${splineTitle}`) + '</details>';
+
 const TEMPLATE = `
 <header class="appbar">
   <div class="brand">
@@ -1005,8 +1048,8 @@ const TEMPLATE = `
     ${field('m-focus', 'Focal plane', 0.4, 'µm', 'any', 'focal-plane position above the coverslip during the acquisition')}
     <div class="field"><span class="fl">Emitter heights</span><span class="pair"><span class="inp"><input id="m-zlo" type="number" step="any" value="0"></span><span class="inp"><input id="m-zhi" type="number" step="any" value="0.8"><i>µm</i></span></span></div>
     <h3 class="grp">Fit</h3>
-    <label class="field"><span class="fl">Start PSF</span><select id="m-psf"><option value="guess">generic astigmatic</option><option value="view">PSF in the 3D view</option><option value="insitu">last in-situ estimate</option><option value="json">PSF json file…</option></select></label>
-    <input id="m-psfjson" type="file" accept=".json" hidden><p id="m-psfinfo" class="hint"></p>
+    <label class="field"><span class="fl">Start PSF</span><select id="m-psf"><option value="guess">generic astigmatic</option><option value="view">PSF in the 3D view</option><option value="insitu">last in-situ estimate</option><option value="json">PSF file (psf.zip / json)…</option></select></label>
+    <input id="m-psfjson" type="file" accept=".json,.zip" hidden><p id="m-psfinfo" class="hint"></p>
     ${check('m-refine', 'Spline refinement' + cite('torchpsf', 'lbfgs'), false, 'free spline knots regularised towards the fitted vectorial PSF (torch_psf InSituEstimator refine=True); kept only if the held-out NLL improves')}
     <details class="adv" data-key="adv-fit"><summary>Advanced <span class="dim">spot counts, iterations, overlaps</span></summary>
       ${field('m-nspots', 'Spots for the fit', 8000, '', '1')}${field('m-nheld', 'Held-out spots', 4000, '', '1')}${field('m-iters', 'Iterations' + cite('adam'), 80, '', '1')}
@@ -1037,6 +1080,8 @@ const TEMPLATE = `
     <h2>Export</h2><p class="sub">Download the results.</p>
     <div data-mode="movie locs" class="btncol">
       <button id="r-csv" title="ThunderSTORM csv (nm, frames from 1), as torch_psf Dataset.save_csv">Localizations (.csv)</button><p class="hint">CSV in the ThunderSTORM format${cite('thunderstorm')}.</p>
+      <button id="i-zip" data-mode="movie" title="${ZIP_TITLE}">PSF (psf.zip)</button>
+      <div data-mode="movie">${zipRow('i', 'the refined free knots when kept, else the fit tabulated on its knot grid')}</div>
       <button id="i-json" data-mode="movie">PSF (torch-psf json)</button>
       <button id="i-pdf" data-mode="movie" title="PDF report of the in-situ PSF estimate">Fit report (PDF)</button><p id="i-status" class="hint" data-mode="movie"></p>
     </div>
@@ -1044,7 +1089,7 @@ const TEMPLATE = `
       ${field('e-focus', 'Imaging focus', 0.0, 'µm', 'any', 'focal-plane position above the coverslip for the exported PSF / spline')}
       ${field('e-roi', 'Spline ROI', 13, 'px', '1')}
       <div class="field"><span class="fl">Spline z range</span><span class="pair"><span class="inp"><input id="e-zmin" type="number" step="any" value="0"></span><span class="inp"><input id="e-zmax" type="number" step="any" value="0.8"><i>µm</i></span></span></div>
-      <div class="btncol"><button id="x-json">PSF (torch-psf json)</button><button id="x-knots">Spline knots (.npz)</button><button id="x-tif">Model z-stack (.tif)</button><button id="x-pdf" title="PDF report of the bead fit">Fit report (PDF)</button></div>
+      <div class="btncol"><button id="x-zip" title="${ZIP_TITLE}">PSF (psf.zip)</button>${zipRow('x', 'the model tabulated on the spline grid above (ROI, z range)')}<button id="x-json">PSF (torch-psf json)</button><button id="x-knots">Spline knots (.npz)</button><button id="x-tif">Model z-stack (.tif)</button><button id="x-pdf" title="PDF report of the bead fit">Fit report (PDF)</button></div>
       <p id="x-status" class="hint"></p>
     </div>
   </section>

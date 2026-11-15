@@ -1,5 +1,6 @@
 // Messages between the UI thread and the compute worker.
 import type { Optics } from '../psf/vectorial';
+import type { PsfZipRequest } from '../psf/makezip';
 
 export interface VolumeSpec {
   optics: Optics; npupil: number; noll: number[]; zcoef: number[];
@@ -64,4 +65,5 @@ export type Req =
   | { id: number; type: 'demo' }
   | { id: number; type: 'movieHeader'; files: File[] }
   | { id: number; type: 'export'; kind: 'knots' | 'tif'; params: { focus_um: number; splineRoi: number; zmax: number; zmin: number } }
+  | { id: number; type: 'psfzip'; req: PsfZipRequest }
   | { type: 'stop'; signal: 'enough' | 'abort' };
