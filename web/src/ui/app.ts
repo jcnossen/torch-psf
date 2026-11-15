@@ -127,10 +127,18 @@ export function startApp(root: HTMLElement) {
     const sb = $<HTMLButtonElement>('snext'); sb.textContent = 'Next: Fit PSF  →'; sb.hidden = step !== 'input';
     $<HTMLButtonElement>('run').classList.toggle('primary', step !== 'input');
     $('fit-title').textContent = mode === 'stack' ? 'Bead fit' : 'PSF fit';
+    // the run controls (progress, next / run all, stop) sit right under the title of the current step
+    const sec = [...root.querySelectorAll<HTMLElement>('.side-body > section')].find((s) => !s.hidden);
+    const anchor = sec?.querySelector<HTMLElement>(':scope > .sub') ?? sec?.querySelector<HTMLElement>(':scope > h2');
+    if (anchor && anchor.nextElementSibling !== $('runbox')) anchor.after($('runbox'));
+    const first = STEPS[mode][0][0] === step;
+    $<HTMLButtonElement>('back').hidden = first; $<HTMLButtonElement>('sback').hidden = first;
     renderSteps();
     cloud?.request(); renderMovie();
   }
   function setStep(s: Step) { step = s; applyLayout(); try { localStorage.setItem('tpsf.step', s); } catch { /* no storage */ } }
+  const prevStep = () => { const k = STEPS[mode].findIndex(([s]) => s === step); if (k > 0) setStep(STEPS[mode][k - 1][0]); };
+  for (const id of ['back', 'sback']) $(id).onclick = prevStep;
   function setMode(m: Mode, keepStep = false) {
     mode = m;
     if (!keepStep || !STEPS[m].some(([k]) => k === step)) step = 'input';
@@ -226,7 +234,7 @@ export function startApp(root: HTMLElement) {
     (window as any).__demoReady = true;
   }
   function newMovie() {
-    locsByFrame.clear(); insitu = null; locsDone = false; recon = null; showInsituEmpty(); fillPresets();
+    locsByFrame.clear(); detsByFrame.clear(); insitu = null; locsDone = false; recon = null; showInsituEmpty(); fillPresets();
     mview.scale = 0; mview.cx = 0; mview.cy = 0;
     if (cloud && player) cloud.start(player.W, player.H, n('o-px'));
     $('r-empty').hidden = false;
@@ -241,8 +249,18 @@ export function startApp(root: HTMLElement) {
   const frameCv = document.createElement('canvas');
   const mview = { scale: 0, cx: 0, cy: 0 };
   let linked = true, rings = true;
-  let playing = true, frameNow = 0, playTimer = 0, lims: [number, number] | null = null, drawing = false, haveFrame = false;
+  let playing = false, frameNow = 0, playTimer = 0, lims: [number, number] | null = null, drawing = false, haveFrame = false;
   const locsByFrame = new Map<number, number[]>();
+  const detsByFrame = new Map<number, number[]>();     // spots detected for the PSF fit (rings in another colour)
+  // while a run is going the movie shows the frame the worker finished last, with its spots / localizations
+  let follow = false, followAt = 0, followNext = -1, followTimer = 0;
+  function followFrame(t: number) {
+    if (!follow) return;
+    followNext = t;
+    const wait = 250 - (performance.now() - followAt);
+    if (wait <= 0) { followAt = performance.now(); showFrame(t); followNext = -1; }
+    else if (!followTimer) followTimer = window.setTimeout(() => { followTimer = 0; if (followNext >= 0) followFrame(followNext); }, wait);
+  }
   const fitScale = (cw: number, ch: number) => player ? Math.max(player.W * n('o-px') / cw, player.H * n('o-px') / ch) * 1.02 : 1;
   async function showFrame(t: number) {
     if (!player || drawing) return;
@@ -278,7 +296,8 @@ export function startApp(root: HTMLElement) {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (rings) {
       ctx.strokeStyle = '#4fd1c5'; ctx.lineWidth = 1.3 * dpr;
-      const L = locsByFrame.get(frameNow) ?? [], r = Math.max(5 * dpr, 2.6 * px / s);
+      const loc = locsByFrame.get(frameNow), L = loc ?? detsByFrame.get(frameNow) ?? [], r = Math.max(5 * dpr, 2.6 * px / s);
+      if (!loc) ctx.strokeStyle = '#e8a33d';      // detections of the spot collection (Estimate PSF), not localizations
       for (let i = 0; i < L.length; i += 2) { ctx.beginPath(); ctx.arc(ox + (L[i] + 0.5) * px / s, oy + (L[i + 1] + 0.5) * px / s, r, 0, 2 * Math.PI); ctx.stroke(); }
     }
     overlay(ctx, W, H, s, fit, player.W * px, player.H * px, mview.cx, mview.cy, dpr);
@@ -291,9 +310,9 @@ export function startApp(root: HTMLElement) {
   }
   const PLAY = '<svg viewBox="0 0 20 20"><path d="M7 5l8 5-8 5z" fill="currentColor"/></svg>', PAUSE = '<svg viewBox="0 0 20 20"><path d="M6 5h3v10H6zM11 5h3v10h-3z" fill="currentColor"/></svg>';
   const setPlaying = (p: boolean) => { playing = p; playBtn.innerHTML = p ? PAUSE : PLAY; };
-  setPlaying(true);
-  playBtn.onclick = () => setPlaying(!playing);
-  slider.oninput = () => { setPlaying(false); showFrame(+slider.value); };
+  setPlaying(false);       // no autoplay: a blinking movie is restless; play on request
+  playBtn.onclick = () => { follow = false; setPlaying(!playing); };
+  slider.oninput = () => { follow = false; setPlaying(false); showFrame(+slider.value); };
   // pan / zoom (shared with the reconstruction when Linked)
   const pushView = () => { if (linked && cloud) { cloud.scale = mview.scale; cloud.cx = mview.cx; cloud.cy = mview.cy; cloud.request(); } renderMovie(); };
   {
@@ -441,6 +460,11 @@ export function startApp(root: HTMLElement) {
     const t = p.elapsed_s !== undefined ? ` | ${p.elapsed_s.toFixed(1)} s` + (p.eta_s !== undefined ? `, ~${p.eta_s.toFixed(0)} s left` : '') : '';
     $(txt).textContent = `${running === 'movie' ? (STAGES[p.stage] ?? p.stage) : p.stage}: ${p.done} / ${p.total}${info ? ' | ' + info : ''}${t}`;
     if (running === 'movie' && p.stage === 'fit' && p.info?.zcoef) drawZernikeBars(String(p.info.zcoef).split(' ').map(Number), startZ);
+    if (running === 'movie' && p.view) {
+      const xy: number[] = []; for (let i = 0; i < p.view.x.length; i++) xy.push(p.view.x[i], p.view.y[i]);
+      detsByFrame.set(p.view.frame, xy); followFrame(p.view.frame);
+    }
+    if (running === 'movie' && p.stage === 'localize' && !$('r-empty').hidden) $('r-empty').textContent = 'Localizing… the first frames are on their way.';
     if (running === 'stack') $('enough').textContent = p.stage === 'read' ? 'Enough frames' : p.stage === 'fit' ? 'Stop, keep estimate' : 'Use what we have';
   };
 
@@ -521,7 +545,9 @@ export function startApp(root: HTMLElement) {
     recon?.add(rows);
     cloud?.append(rows);
     $('r-empty').hidden = true;
-    for (let o = 0; o < rows.length; o += NCOL) { const f = rows[o]; const L = locsByFrame.get(f) ?? []; L.push(rows[o + 1], rows[o + 2]); locsByFrame.set(f, L); }
+    let last = -1;
+    for (let o = 0; o < rows.length; o += NCOL) { const f = rows[o]; const L = locsByFrame.get(f) ?? []; L.push(rows[o + 1], rows[o + 2]); locsByFrame.set(f, L); if (f > last) last = f; }
+    if (last >= 0) followFrame(last);
     if (performance.now() - lastDraw > 700) drawRecon(); else { clearTimeout(drawTimer); drawTimer = window.setTimeout(drawRecon, 700); }
   };
   $('r-csv').onclick = () => { if (recon) download(locsToCsv(recon.rows(), n('o-px')), 'localizations.csv', 'text/csv'); };
@@ -539,7 +565,10 @@ export function startApp(root: HTMLElement) {
     running = 'movie'; busy(true);
     startZ = kind === 'estimate' ? [...psf.zcoef] : null;
     if (kind === 'estimate') insituForm = form;
-    recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear(); locsDone = false;
+    recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear(); detsByFrame.clear(); locsDone = false;
+    setPlaying(false); follow = true; followAt = 0;
+    $('r-empty').hidden = false;
+    $('r-empty').textContent = kind === 'estimate' ? 'Fills in at the last stage of Estimate PSF: localizing the movie with the fitted PSF.' : 'Fills in live while the movie is localized.';
     cloud?.start(player.W, player.H, 1000 * form.optics.pixel_um); cloud?.setFilter(n('r-crlb'));
     if (linked && cloud) { cloud.scale = mview.scale; cloud.cx = mview.cx; cloud.cy = mview.cy; }
     setNum('r-zlo', n('m-zlo')); setNum('r-zhi', n('m-zhi'));
@@ -547,7 +576,7 @@ export function startApp(root: HTMLElement) {
     try {
       const src: MovieSourceSpec = source;
       const r = kind === 'estimate' ? await call({ type: 'estimate', source: src, form, localize: true }) : await call({ type: 'movie', source: src, form: form as MovieForm });
-      drawRecon(); setPlaying(false); showFrame(frameNow);
+      follow = false; drawRecon(); setPlaying(false); showFrame(frameNow);
       const s = r.summary as MovieSummary | null;
       if (s) { showLocs(s); locsDone = true; }
       $('mbar').style.width = '100%';
@@ -560,7 +589,7 @@ export function startApp(root: HTMLElement) {
       const err = e as Error & { abort?: boolean };
       $('mtext').textContent = err.abort ? 'aborted' : 'error: ' + err.message;
       $('mbar').style.width = '0%';
-    } finally { busy(false); }
+    } finally { busy(false); follow = false; }
   }
   mRun.onclick = () => runMovie('estimate');
   nextBtn.onclick = () => {
@@ -1020,15 +1049,15 @@ const TEMPLATE = `
     </div>
   </section>
  </div>
- <div class="side-foot">
+ <div class="side-foot" id="runbox">
   <div class="foot" data-mode="movie">
     <div class="progress"><div id="mbar"></div></div><p id="mtext" class="hint">Estimate PSF collects isolated spots, fits a vectorial PSF to them, then localizes the movie with it.</p>
-    <div class="btnrow idle"><button id="next" class="primary"></button><button id="m-run" title="Estimate the PSF and localize the movie">Run all</button></div>
+    <div class="btnrow idle"><button id="back" class="back" title="previous step">←</button><button id="next" class="primary"></button><button id="m-run" title="Estimate the PSF and localize the movie">Run all</button></div>
     <div class="btnrow running"><button id="m-enough" title="stop now and keep the current estimate">Stop early</button><button id="m-abort">Abort</button></div>
   </div>
   <div class="foot" data-mode="stack">
     <div class="progress"><div id="pbar"></div></div><p id="ptext" class="hint"></p>
-    <div class="btnrow idle"><button id="snext" class="primary"></button><button id="run">Fit PSF</button></div>
+    <div class="btnrow idle"><button id="sback" class="back" title="previous step">←</button><button id="snext" class="primary"></button><button id="run">Fit PSF</button></div>
     <div class="btnrow running"><button id="enough">Use what we have</button><button id="abort">Abort</button></div>
   </div>
  </div>
