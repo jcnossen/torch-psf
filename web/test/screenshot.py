@@ -66,13 +66,13 @@ def drive_app(pg, base, outdir):
     t = json.load(open(os.path.join(CACHE, 'tetrapod.json')))
     pg.click('.tabs button[data-tab=stack]')
     pg.evaluate("document.querySelectorAll('details.adv').forEach((d) => { d.open = true; })")
-    vals = {'o-na': t['NA'], 'o-wl': t['wavelength_um'], 'o-nimm': t['n_imm'], 'o-nmed': t['n_med'],
-            'o-px': t['pixel_um'], 'f-dz': t['dz_um'], 'o-gain': t['gain'], 'o-offset': t['offset'],
-            'f-ze': t['ze_um'], 'f-roi': t['R']}
-    for k, v in vals.items():
-        pg.fill('#' + k, str(v))
-    pg.select_option('#f-sign', str(int(t['sign'])))
-    pg.uncheck('#f-fitdz')
+    # pixel size and wavelength are entered in nm; the stack-fit fields live in the (hidden) Fit PSF step
+    vals = {'o-na': t['NA'], 'o-wl': 1000 * t['wavelength_um'], 'o-nimm': t['n_imm'], 'o-nmed': t['n_med'],
+            'o-px': 1000 * t['pixel_um'], 'f-dz': t['dz_um'], 'o-gain': t['gain'], 'o-offset': t['offset'],
+            'f-ze': t['ze_um'], 'f-roi': t['R'], 'f-sign': int(t['sign'])}
+    pg.evaluate("v => { for (const [k, x] of Object.entries(v)) document.getElementById(k).value = String(+x.toPrecision(10)); "
+                "document.getElementById('f-fitdz').checked = false; }", vals)
+    pg.evaluate("window.__setStep('fit')")
     pg.set_input_files('#file', os.path.join(CACHE, 'stack_tetrapod.tif'))
     # stop controls: Abort discards, "Stop and keep current estimate" gives a partial result
     pg.click('#run')
@@ -95,6 +95,7 @@ def drive_app(pg, base, outdir):
     shot(pg, os.path.join(outdir, 'result.png'), full_page=True)
     compress(os.path.join(outdir, 'result.png'), width=900, colors=96)
     files = {}
+    pg.evaluate("window.__setStep('export')")
     for btn in ['x-json', 'x-knots', 'x-tif']:
         with pg.expect_download() as dl:
             pg.click('#' + btn)

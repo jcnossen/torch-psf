@@ -43,9 +43,29 @@ calibration is used. The only tracked data file is a one-bead real crop of publi
 
 ## Using it
 
-The Input panel has two tabs that share the optics (pixel size, NA, wavelength; refractive indices and the camera under
-"Advanced: refractive indices, camera"). Each tab shows only its essential inputs and one button; everything else is
-under its "Advanced" fold.
+The page is laid out as a workflow. The step bar on top (SMLM movie: Input > Detect spots > Fit PSF > Localize >
+Export; bead z-stack: Input > Fit PSF > Export; localization file: Input > Export) selects which settings the left
+sidebar shows and outlines the views that step feeds; finished steps get a check. "Next" walks through the steps,
+"Run all" estimates the PSF and localizes the movie in one go. The Input step holds the data (SMLM movie, bead
+z-stack or localization file), the optics (pixel size and wavelength in nm, NA, refractive indices) and the camera
+(sCMOS / EMCCD, gain, offset, read noise); less common settings are under each step's "Advanced" fold.
+
+When a TIFF movie is opened, the camera gain and offset are measured from it (torch_psf `photon_transfer`, ported
+in `src/smlm/camera.ts`: blocks of frames spread over the movie, per-pixel temporal mean and frame-difference
+variance of background samples away from detected spots, a line through the binned medians; the only deviation is a
+shorter block when block x H x W would exceed the 128 MiB storage-buffer limit, e.g. 128 frames for 512 x 512).
+Choosing EMCCD sets the excess noise F^2 = 2 and rescales the gain. The mean-variance line cannot separate the
+offset from the read noise (its intercept is readnoise^2 - slope x offset; Heintzmann et al., arXiv:1611.05654): by
+default the offset is estimated and absorbs the read-noise variance, and the read noise is entered by hand; with
+"Offset known" (camera specification or dark frames) the read noise is estimated from the intercept instead
+(torch_psf photon_transfer(offset_adu=...)). The demo
+movie has a uniform background, which gives the line nothing to fit, so its (known) camera is not re-measured.
+
+The views are cards: the movie and the reconstruction side by side with one shared zoom and pan ("Linked"; wheel to
+zoom, drag to pan, double-click to fit), a compact PSF view (3D view plus xy / xz / yz sections; the expand button
+makes it larger) and the fit summary (Zernike bars and status checks; "Report" shows the full table). Small
+numbers next to the controls refer to the reference list at the bottom of the page (the papers behind each method:
+vectorial PSF and Zernikes, in-situ PSF estimation, maximum-likelihood localization and CRLB, sCMOS read noise, EMCCD excess noise, photon transfer, the optimizers and the file formats).
 
 ### SMLM movie (default): in-situ PSF estimation
 
@@ -54,14 +74,14 @@ Noll 5 / 6 / 11 = 0.02 / 0.10 / 0.03 waves, blinking sites on curved filaments, 
 torch_psf.simulate.simulate_reference_movie with filament_sites) and plays it in the Movie panel (autoplay, frame slider). Drop
 your own movie (TIFF, streamed) to replace it.
 
-"Estimate PSF" runs torch_psf's InSituEstimator, ported step by step: spot detection and ROIs, a 16 px checkerboard
+"Estimate PSF" (Fit PSF step) runs torch_psf's InSituEstimator, ported step by step: spot detection and ROIs, a 16 px checkerboard
 split into spots for the fit and held-out spots, the in-situ fit of the vectorial PSF by the knot route
 (fit_zernike_knots: knots of the spline from the vectorial model, Levenberg-Marquardt localization on the spline, the
 NLL gradient on the knots, one vector-Jacobian product to the Zernikes, Adam), the held-out NLL of the start and the
 fitted PSF, the z scale relative to the start. As torch_psf's InSituEstimator, spots the single-emitter model does
 not explain (overlapping emitters; Poisson deviance per pixel above 1 + 3 sqrt(2 / P^2) after the first pass) are
 rejected and the fit is repeated from the first-pass result (3/4 of the iterations). Optional "spline refinement"
-(Advanced; InSituEstimator(refine=True), torch_psf.estimation.fit_free_knots): free spline knots regularised towards the
+(Fit PSF step; InSituEstimator(refine=True), torch_psf.estimation.fit_free_knots): free spline knots regularised towards the
 fitted vectorial spline and smooth, alternating localization and a torch.optim.LBFGS (strong Wolfe) step on the knots,
 12 times; kept only if it improves the held-out NLL (then the movie is localized with it and the 3D view shows the
 knots), with its z scale relative to the vectorial fit and the warning that free knots can warp z. On the demo, which
@@ -73,8 +93,8 @@ blur) integrated over the screen pixel, additive; pan, zoom and orbit (rotate ab
 exaggeration); a global display maximum so the brightness does not jump; above a point cap while dragging, a fixed
 hash-ranked subset weighted to keep the brightness (the principles of webSMLM's point-cloud renderer and its
 tilt / rotate view). The fit starts from
-a generic astigmatic PSF (Noll 6 = 0.08) unless another start is chosen under Advanced (the PSF in the 3D view, the last
-estimate, or a PSF json). On the demo it recovers the truth to about 0.001 waves rms in about a minute on a laptop iGPU. "Localize only" (Advanced) localizes with the start PSF without estimating it.
+a generic astigmatic PSF (Noll 6 = 0.08) unless another start is chosen in the Fit PSF step (the PSF in the 3D view, the last
+estimate, or a PSF json). On the demo it recovers the truth to about 0.001 waves rms in about a minute on a laptop iGPU. The Localize step localizes again (with the last estimate, or the start PSF if there is none) without estimating the PSF.
 
 ### Bead z-stack
 
@@ -161,6 +181,7 @@ checked in between.
 | in situ: spot deviance per pixel vs estimation.spot_deviance (1850 spots) | max abs. diff 2e-5; no spot on the other side of the threshold | 1e-3 |
 | in situ: fit_free_knots (3 outer L-BFGS iterations from the vectorial spline, 1850 ROIs) | loss per outer within 2 of 3e7; knots 2.5e-4 of the peak from torch_psf (the refinement moves them 7e-2) | 0.1 x the change |
 | in situ: whole InSituEstimator(refine=True) | same decision (kept); held-out NLL/px refined - vectorial -3.47e-4 vs -3.52e-4; z scale vs vectorial 1.0003 (same) | 1e-4, 0.01 |
+| camera: photon_transfer (1200 frames, varying background; defaults, given offset, EMCCD, other keywords) | same detections and pixel counts; gain, offset, slope rel. 1e-7, read noise 5e-7 | 1e-5 |
 
 With a single real bead and a free z-step scale the fit has several optima (the web LM and the Python L-BFGS ended in
 different ones), so that test keeps the z step fixed.

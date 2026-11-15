@@ -45,6 +45,13 @@ export interface InsituForm extends MovieForm {
   sample?: 'spread' | 'sequential'; sampleChunk?: number;  // InSituEstimator(sample='spread', chunk=50)
   devianceRule?: 'median' | 'poisson';                    // InSituEstimator(deviance_rule='median')
 }
+/** torch_psf.camera.photon_transfer keywords (smlm/camera.ts): nblocks 8, block 400 (reduced when block x H x W is too
+ *  large for the browser: CameraCalibration.block_used), mask_radius 4, threshold 4, offset_adu none (given: the
+ *  intercept gives the read noise), excess_noise 1 (EMCCD 2), nbins 24, frames [f0, f1) = the whole movie. */
+export interface CameraOpts {
+  nblocks?: number; block?: number; maskRadius?: number; threshold?: number; offsetAdu?: number | null;
+  excessNoise?: number; nbins?: number; frames?: [number, number];
+}
 export type MovieSourceSpec = 'demo' | File[];
 
 export type Req =
@@ -53,6 +60,7 @@ export type Req =
   | { id: number; type: 'fit'; files: File[]; form: FitForm }
   | { id: number; type: 'movie'; source: MovieSourceSpec; form: MovieForm }
   | { id: number; type: 'estimate'; source: MovieSourceSpec; form: InsituForm; localize: boolean }
+  | { id: number; type: 'camera'; source: MovieSourceSpec; opts: CameraOpts }
   | { id: number; type: 'demo' }
   | { id: number; type: 'movieHeader'; files: File[] }
   | { id: number; type: 'export'; kind: 'knots' | 'tif'; params: { focus_um: number; splineRoi: number; zmax: number; zmin: number } }

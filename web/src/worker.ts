@@ -13,6 +13,7 @@ import type { Req, VolumeSpec, FitForm, FitSummary } from './ui/protocol';
 import { localizeMovie, MovieSource } from './smlm/movie';
 import { estimateInsitu } from './smlm/estimate';
 import { simulateDemo, ArrayMovie } from './smlm/simulate';
+import { photonTransfer } from './smlm/camera';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 let token: StopToken | null = null;
@@ -194,6 +195,11 @@ ctx.onmessage = async (ev: MessageEvent<Req>) => {
           (rows) => post({ type: 'locs', rows }, [rows.buffer]));
       }
       post({ id: m.id, type: 'result', report, summary });
+    } else if (m.type === 'camera') {
+      token = new StopToken();
+      const { device } = await getDevice();
+      const camera = await photonTransfer(device, sourceOf(m.source), m.opts, token, (p) => progress(p, p.stage === 'camera'));
+      post({ id: m.id, type: 'result', camera });
     } else if (m.type === 'demo') {
       const { device } = await getDevice();
       const d = await simulateDemo(device);

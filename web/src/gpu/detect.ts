@@ -13,6 +13,7 @@ export interface DetectOptions {
   nms?: number;                // max-pool window (default 9)
   border?: number;             // px (extract_spots default: (P - 1) / 2 + 2)
   isolation?: number | null;   // px (default off)
+  maxPeaks?: number;           // capacity of the peak list per chunk (default max(4096, Tmax x max(64, H W / 400)))
 }
 
 export interface Detections {
@@ -48,6 +49,8 @@ export class Detector {
   private dummy: GPUBuffer; private dummyU: GPUBuffer;
   private kl0: number; private kl1: number;
   readonly maxPeaks: number;
+  /** The frames of the last detect() call on the GPU ([T, H, W] f32, as given), e.g. for further per-pixel work. */
+  get input(): GPUBuffer { return this.raw; }
   private opt: Required<DetectOptions>;
 
   /** Frames of H x W, chunks of up to Tmax frames (the noise is estimated per chunk, as in torch_psf). */
@@ -56,7 +59,9 @@ export class Detector {
     this.opt = { threshold: opt.threshold ?? 6, sigma: opt.sigma ?? [2, 6], nms: opt.nms ?? 9, border: opt.border ?? 0, isolation: opt.isolation ?? null } as Required<DetectOptions>;
     const fb = H * W * 4;
     this.Tb = Math.max(1, Math.min(Tmax, Math.floor((64 * 2 ** 20) / fb)));
-    this.maxPeaks = Math.max(4096, Tmax * 64);
+    // (64 per frame was too few for dense 512 x 512 frames: ~160 spots per frame overflowed a chunk of 500 frames;
+    // H W / 400 = 655 per 512 x 512 frame, 16 bytes each)
+    this.maxPeaks = opt.maxPeaks ?? Math.max(4096, Tmax * Math.max(64, Math.ceil((H * W) / 400)));
     const mk = (size: number, usage = SU | CD | CS) => dev.createBuffer({ size: Math.max(16, Math.ceil(size / 4) * 4), usage });
     this.raw = mk(Tmax * fb); this.F = mk(Tmax * fb);
     this.A = mk(this.Tb * fb); this.B = mk(this.Tb * fb); this.C = mk(this.Tb * fb); this.map = mk(this.Tb * fb);

@@ -12,6 +12,9 @@ import { knotsAndJacobian, fitZernikeKnots } from '../src/smlm/insitu';
 import { estimateInsitu } from '../src/smlm/estimate';
 import { fitFreeKnots } from '../src/smlm/refine';
 import { readLocFile } from '../src/io/locfile';
+import { photonTransfer, BlockStats } from '../src/smlm/camera';
+import { cpuBlockStats } from './camera_oracle';
+import { simulateDemo, ArrayMovie, DEMO } from '../src/smlm/simulate';
 
 test('smlm: spot detection = torch_psf extract_spots / detect_spots', async () => {
   const meta = await fetchJson('smlm/movie.json');
@@ -271,4 +274,91 @@ test('viewer: localization files written by torch_psf (Dataset HDF5, Picasso HDF
     check(dxy < 1e-3 && dz < zTol && dc < 1e-3 && df === 0 && L.pixel_nm === 108, out[out.length - 1]);
   }
   return out.join('; ');
+});
+
+test('camera: photon transfer (gain / offset / read noise from the movie) = torch_psf.camera.photon_transfer', async () => {
+  const ref = await fetchJson('smlm/photon_transfer.json');
+  const { device } = await getDevice();
+  const buf = await fetchBuf('smlm/pt_movie.tif');
+  const rel = (a: number, b: number) => Math.abs(a - b) / Math.max(Math.abs(b), 1e-12);
+  const out: string[] = [];
+  let worst = 0, worstBlock = 0, spotsOff = 0, pxOff = 0;
+  const worstField: Record<string, number> = {};
+  for (const c of ref.cases) {
+    const kw = c.kwargs;
+    const r = await photonTransfer(device, [new File([buf], 'pt_movie.tif')], { nblocks: kw.nblocks, block: kw.block, maskRadius: kw.mask_radius,
+      threshold: kw.threshold, offsetAdu: kw.offset_adu, excessNoise: kw.excess_noise, nbins: kw.nbins, frames: kw.frames });
+    const P = c.report, C = c.camera;
+    check(r.per_block.length === P.per_block.length && r.block_used === r.block_requested,
+      `${JSON.stringify(kw)}: ${r.per_block.length} blocks (torch_psf ${P.per_block.length}), block ${r.block_used} / ${r.block_requested}`);
+    const d = { gain: rel(r.gain_e_per_adu, C.gain_e_per_adu), offset: rel(r.offset_adu, C.offset_adu), slope: rel(r.slope_adu, P.slope_adu),
+      readnoise: C.readnoise_e > 0 ? rel(r.readnoise_e, C.readnoise_e) : Math.abs(r.readnoise_e), spread: Math.abs(r.slope_spread - P.slope_spread) };
+    worst = Math.max(worst, d.gain, d.offset, d.slope, d.readnoise);
+    r.per_block.forEach((b, i) => {
+      const q = P.per_block[i];
+      check(b.frames[0] === q.frames[0] && b.frames[1] === q.frames[1], `block ${i} frames ${b.frames} vs ${q.frames}`);
+      const db: Record<string, number> = { slope: rel(b.slope, q.slope), offset: rel(b.offset_adu, q.offset_adu), median_mean: rel(b.median_mean_adu, q.median_mean_adu),
+        kept: rel(b.kept_fraction, q.kept_fraction), intercept: q.intercept_adu2 > 0 ? rel(b.intercept_adu2, q.intercept_adu2) : Math.abs(b.intercept_adu2) };
+      for (const [f, v] of Object.entries(db)) { worstField[f] = Math.max(worstField[f] ?? 0, v); worstBlock = Math.max(worstBlock, v); }
+      spotsOff += Math.abs(b.n_spots - c.n_spots[i]); pxOff += Math.abs(b.n_px - q.n_px);
+    });
+    out.push(`${JSON.stringify(kw)}: gain ${r.gain_e_per_adu.toFixed(6)} (torch_psf ${C.gain_e_per_adu.toFixed(6)}), offset ${r.offset_adu.toFixed(4)} ` +
+      `(${C.offset_adu.toFixed(4)}), read noise ${r.readnoise_e.toFixed(5)} (${C.readnoise_e.toFixed(5)}) e-, rel. diff gain ${d.gain.toExponential(1)} ` +
+      `offset ${d.offset.toExponential(1)} slope ${d.slope.toExponential(1)} readnoise ${d.readnoise.toExponential(1)}, ${r.seconds.toFixed(2)} s`);
+  }
+  const msg = out.join('; ') + `; per block: max rel. diff ${Object.entries(worstField).map(([f, v]) => `${f} ${v.toExponential(1)}`).join(', ')}, |n_spots diff| ${spotsOff}, |n_px diff| ${pxOff}`;
+  // float32 per-pixel sums (torch on the GPU: other summation order) and float64 fits: ~1e-7 expected
+  check(worst < 1e-5 && worstBlock < 1e-5 && spotsOff === 0 && pxOff === 0, msg);
+  return msg;
+});
+
+test('camera: photon transfer on the demo movie (600 x 128 x 128), runtime', async () => {
+  // info only: the demo background is uniform (20 photons), so the pixel means differ by noise and spots only and the
+  // variance-vs-mean line has no lever arm: the gain is not determined by this movie (torch_psf gives the same kind of
+  // number on such a movie). The comparison with torch_psf is the test above.
+  const { device } = await getDevice();
+  const d = await simulateDemo(device);
+  const mv = new ArrayMovie(d.adu, d.T, d.H, d.W);
+  const a = await photonTransfer(device, mv, {});
+  const b = await photonTransfer(device, mv, { offsetAdu: DEMO.offset });
+  const msg = `block ${a.block_used}, ${a.per_block.length} block(s), ${a.per_block[0].n_spots} spots; gain ${a.gain_e_per_adu.toFixed(4)} e-/ADU, offset ${a.offset_adu.toFixed(2)} ADU ` +
+    `(${a.seconds.toFixed(2)} s); offset given: gain ${b.gain_e_per_adu.toFixed(4)}, read noise ${b.readnoise_e.toFixed(3)} e- (${b.seconds.toFixed(2)} s)`;
+  check(a.block_used === 400 && a.per_block.length === 1 && Number.isFinite(a.gain_e_per_adu), msg);
+  return msg;
+});
+
+test('camera: per-pixel statistics on the GPU (BlockStats) = the float64 CPU reference', async () => {
+  // integer ADU (pt_movie, the demo): the GPU sums are exact, so mu / var / n must agree to the bit; non-integer data
+  // (pt_movie x 0.37 + 0.1): compensated float32 sums, differences at the float32 rounding level
+  const { device } = await getDevice();
+  const pt = await TiffMovie.open([new File([await fetchBuf('smlm/pt_movie.tif')], 'pt_movie.tif')]);
+  const demo = await simulateDemo(device);
+  const dm = new ArrayMovie(demo.adu, demo.T, demo.H, demo.W);
+  const out: string[] = [];
+  let bad = 0;
+  for (const [name, mv, f0, T, scale] of [['pt_movie', pt, 0, 400, 1], ['pt_movie', pt, 800, 400, 1], ['demo', dm, 0, 400, 1], ['pt_movie x 0.37 + 0.1', pt, 400, 400, 0.37]] as const) {
+    const x = await mv.read(f0, f0 + T);
+    if (scale !== 1) for (let i = 0; i < x.length; i++) x[i] = Math.fround(Math.fround(x[i] * scale) + 0.1);
+    const det = new Detector(device, mv.H, mv.W, T, { threshold: 4, border: 0, isolation: null });
+    const st = new BlockStats(device, mv.H, mv.W, T);
+    try {
+      const d = await det.detect(x, T, 0);
+      const t0 = performance.now();
+      const g = await st.run(det.input, x.subarray(0, mv.H * mv.W), T, d, 4);
+      const ms = performance.now() - t0;
+      const c = cpuBlockStats(x, T, mv.H, mv.W, d, 4);
+      let dmu = 0, dv = 0, nmu = 0, nv = 0, nn = 0;
+      for (let p = 0; p < mv.H * mv.W; p++) {
+        if (g.mu[p] !== c.mu[p]) { nmu++; dmu = Math.max(dmu, Math.abs(g.mu[p] - c.mu[p]) / Math.abs(c.mu[p])); }
+        if (g.var[p] !== c.var[p]) { nv++; dv = Math.max(dv, Math.abs(g.var[p] - c.var[p]) / Math.abs(c.var[p])); }
+        if (g.n[p] !== c.n[p]) nn++;
+      }
+      if (scale === 1) bad += nmu + nv + nn + (g.kept_fraction !== c.kept_fraction ? 1 : 0);
+      else if (nn > 2 || dmu > 1e-6 || dv > 1e-5) bad++;
+      out.push(`${name} [${f0}, ${f0 + T}) ${mv.H}x${mv.W}: mu differ ${nmu} px (max rel ${dmu.toExponential(1)}), var ${nv} px (${dv.toExponential(1)}), n ${nn} px, kept ${g.kept_fraction} vs ${c.kept_fraction}; GPU ${ms.toFixed(0)} ms`);
+    } finally { det.destroy(); st.destroy(); }
+  }
+  const msg = out.join('; ');
+  check(bad === 0, msg);
+  return msg;
 });

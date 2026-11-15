@@ -33,6 +33,26 @@ function quantile(sorted: Float32Array, q: number): number {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
+/** The k-th smallest value of a (0-based; a is reordered: a[0..k-1] <= a[k] <= a[k+1..]). Quickselect. */
+function select(a: Float32Array, k: number): number {
+  let l = 0, r = a.length - 1;
+  while (r > l) {
+    const m = (l + r) >> 1;                                // median of three as the pivot
+    if (a[m] < a[l]) { const t = a[m]; a[m] = a[l]; a[l] = t; }
+    if (a[r] < a[l]) { const t = a[r]; a[r] = a[l]; a[l] = t; }
+    if (a[r] < a[m]) { const t = a[r]; a[r] = a[m]; a[m] = t; }
+    const pv = a[m];
+    let i = l, j = r;
+    while (i <= j) {
+      while (a[i] < pv) i++;
+      while (a[j] > pv) j--;
+      if (i <= j) { const t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+    }
+    if (k <= j) r = j; else if (k >= i) l = i; else return a[k];
+  }
+  return a[k];
+}
+
 export class SplineLocalizer {
   private dev: GPUDevice;
   private pipe: GPUComputePipeline;
@@ -53,13 +73,18 @@ export class SplineLocalizer {
   /** The spline's z_limits: (z0 + hz, z0 + (nz - 2) hz). */
   get zLimits(): [number, number] { const g = this.g; return [g.z0 + g.hz, g.z0 + (g.nz - 2) * g.hz]; }
 
-  /** torch_psf.fit.initial_theta: x = y = 0, z, photons = sum - bg P^2 (>= 50), bg = 0.2 quantile of the ROI. */
+  /** torch_psf.fit.initial_theta: x = y = 0, z, photons = sum - bg P^2 (>= 50), bg = 0.2 quantile of the ROI
+   *  (torch.quantile, linear interpolation: the two order statistics by selection instead of a full sort). */
   initialTheta(rois: Float32Array, N: number, z: number): Float32Array {
     const P2 = this.g.roisize ** 2, th = new Float32Array(N * 5);
+    const pos = 0.2 * (P2 - 1), lo = Math.floor(pos), hi = Math.min(P2 - 1, lo + 1), w = pos - lo;
+    const s = new Float32Array(P2);
     for (let n = 0; n < N; n++) {
       const r = rois.subarray(n * P2, (n + 1) * P2);
-      const s = Float32Array.from(r).sort();
-      const bg = Math.fround(quantile(s, 0.2));
+      s.set(r);
+      const a = select(s, lo);
+      let b = a; if (hi > lo) { b = s[hi]; for (let i = hi + 1; i < P2; i++) if (s[i] < b) b = s[i]; }
+      const bg = Math.fround(a + (b - a) * w);
       let sum = 0; for (let i = 0; i < P2; i++) sum += r[i];
       th[n * 5 + 2] = z; th[n * 5 + 3] = Math.max(50, Math.fround(sum - bg * P2)); th[n * 5 + 4] = bg;
     }
@@ -161,9 +186,11 @@ export class SplineLocalizer {
     if (o.theta0) return this.run(rois, N, o.theta0, o);
     const zs = o.zstarts ?? 5, { zlo, zhi } = this.g;
     let best: LocResult | null = null;
+    const th0 = this.initialTheta(rois, N, 0);           // the same for every start but z
     for (let k = 1; k <= zs; k++) {
       const z = Math.fround(zlo + (zhi - zlo) * k / (zs + 1));
-      const r = await this.run(rois, N, this.initialTheta(rois, N, z), o);
+      const th = th0.slice(); for (let n = 0; n < N; n++) th[n * 5 + 2] = z;
+      const r = await this.run(rois, N, th, o);
       if (!best) { best = r; continue; }
       for (let n = 0; n < N; n++) if (r.nll[n] < best.nll[n]) {
         best.nll[n] = r.nll[n]; best.chi2[n] = r.chi2[n]; best.deviance[n] = r.deviance[n];

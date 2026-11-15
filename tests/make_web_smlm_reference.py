@@ -12,6 +12,10 @@ Cases:
   localize.npz / .json         the spline knots (VectorialPSF.to_spline), the ROIs of the first 600 detections,
                                torch_psf.fit.localize (theta, nll) and crlb, and the table columns
                                (theta, nll, crlb, chi2 as the localization table of PSF.fit)
+  pt_movie.tif +               torch_psf.camera.photon_transfer on a movie with a background varying over the field
+  photon_transfer.json         (gain 0.5 e-/ADU, offset 100 ADU, read noise 1.5 e-): defaults, offset_adu given,
+                               excess_noise 2, and non-default keywords (frames, nblocks, block, mask_radius,
+                               threshold, nbins); per block also the number of detect_spots detections
 """
 import argparse, json, os, sys
 import numpy as np
@@ -177,3 +181,33 @@ F = ds.numpy()
 np.savez(os.path.join(a.out, 'locs_ref.npz'), frame=F['frame'].astype(np.int32), pos=F['pos'].astype(np.float64), crlb=F['crlb'].astype(np.float32),
          photons=F['photons'].astype(np.float32))
 print('viewer files: dataset / picasso / csv,', nloc, 'localizations;', sorted(os.listdir(a.out))[:0])
+
+# camera calibration from the movie (torch_psf.camera.photon_transfer). The movies above have a uniform background (no
+# lever arm for the variance-vs-mean line), so a movie as tests/test_u373fixes.py::test_photon_transfer: background
+# 20 .. 50 photons varying over the field, blinking Gaussian spots, gain 0.5 e-/ADU, offset 100 ADU, read noise
+# 1.5 e-, rounded to uint16 (cpu, seeded). Cases: defaults, offset_adu given, excess_noise 2, other keywords.
+from torch_psf.camera import photon_transfer
+from torch_psf.detect import detect_spots
+from torch_psf.gaussian import GaussianPSF
+g = torch.Generator().manual_seed(11)
+T, H, W = 1200, 64, 80
+bgm = 20.0 + 30.0 * torch.rand(1, H, W, generator=g)
+spots, _ = simulate_movie(GaussianPSF(11, sigma_px=1.3, device='cpu').render, 11, T=T, H=H, W=W, nsites=40, p_on=0.03,
+                          mean_on=2.0, bg=0.0, photons=2000.0, photons_logsd=0.2, z_range=(0.0, 0.0), margin=6,
+                          generator=g, device='cpu')
+e = torch.poisson(bgm.expand(T, H, W), generator=g) + spots.float()
+adu = (e / 0.5 + 100.0 + (1.5 / 0.5) * torch.randn(e.shape, generator=g)).round().clamp(0, 65535).numpy().astype('uint16')
+tifffile.imwrite(os.path.join(a.out, 'pt_movie.tif'), adu)
+PT = [dict(), dict(offset_adu=100.0), dict(excess_noise=2.0),
+      dict(frames=[50, 1150], nblocks=4, block=150, mask_radius=3, threshold=5.0, nbins=16)]
+pt = []
+for kw in PT:
+    cam, rep = photon_transfer(adu, device=dev, **kw)
+    th = kw.get('threshold', 4.0)
+    nd = [int(len(detect_spots(torch.as_tensor(adu[b['frames'][0]:b['frames'][1]], device=dev).float(), threshold=th)['frame']))
+          for b in rep['per_block']]
+    pt.append(dict(kwargs=kw, camera=cam.to_dict(), report=rep, n_spots=nd))
+    print('photon_transfer', kw, 'gain', round(cam.gain_e_per_adu, 4), 'offset', round(cam.offset_adu, 3),
+          'readnoise', round(cam.readnoise_e, 3), 'blocks', len(rep['per_block']), 'spots', nd)
+json.dump(dict(T=T, H=H, W=W, gain_e_per_adu=0.5, offset_adu=100.0, readnoise_e=1.5, cases=pt),
+          open(os.path.join(a.out, 'photon_transfer.json'), 'w'), indent=1, default=float)
