@@ -46,7 +46,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   // 1. spots: torch_psf.spots.extract_spots(sample='spread', chunk=50, max_spots): chunks in bit-reversed order over the
   //    frame range until max_spots, the first max_spots in read order kept, then sorted by frame (stable)
   let starts: number[] = []; for (let f = 0; f < nFrames; f += chunk) starts.push(f);
-  if ((form.sample ?? 'spread') === 'spread') { const s0 = starts; starts = spreadOrder(s0.length).map((i) => s0[i]); }
+  { const s0 = starts; starts = spreadOrder(s0.length).map((i) => s0[i]); }
   const det = new Detector(dev, mv.H, mv.W, chunk, { threshold: form.threshold, border: h + 2, isolation: form.isolation > 0 ? form.isolation : null });
   const roiParts: Float32Array[] = [], cx0: number[] = [], cy0: number[] = [], cf: number[] = [];
   let n = 0, done = 0, nChunks = 0;
@@ -112,19 +112,18 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     const loc = new SplineLocalizer(dev, g, K1a);
     let dv: Float32Array, th1: Float32Array;
     try { const r1 = await loc.localize(dTr, tr.length, { var: rvar }); dv = r1.deviance; th1 = r1.theta; } finally { loc.destroy(); }
-    // deviance_rule 'median' (default): median + k max(1.4826 MAD, median sqrt(2 / P^2)); 'poisson': 1 + k sqrt(2 / P^2)
+    // rejected above median + k max(1.4826 MAD, median sqrt(2 / P^2))
     const med = median(dv);
-    let scale: number;
-    if ((form.devianceRule ?? 'median') === 'poisson') { scale = Math.sqrt(2 / P2); thr = 1 + k * scale; }
-    else { scale = Math.max(1.4826 * median(Float32Array.from(dv, (v) => Math.abs(v - med))), med * Math.sqrt(2 / P2)); thr = med + k * scale; }
-    devRep = { rule: form.devianceRule ?? 'median', median: med, scale, threshold: thr, rejected_fraction: 0 };
+    const scale = Math.max(1.4826 * median(Float32Array.from(dv, (v) => Math.abs(v - med))), med * Math.sqrt(2 / P2));
+    thr = med + k * scale;
+    devRep = { rule: 'median', median: med, scale, threshold: thr, rejected_fraction: 0 };
     const keep: number[] = [];
     for (let i = 0; i < tr.length; i++) if (dv[i] < thr) keep.push(i);
     nRej = tr.length - keep.length; nFit = keep.length;
     devRep.rejected_fraction = nRej / tr.length;
     if (devRep.rejected_fraction > 0.25) warnings.push(`${(100 * devRep.rejected_fraction).toFixed(0)} % of the training spots were rejected as overlaps`);
     if (devRep.median > 1.3) warnings.push(`median deviance per px ${devRep.median.toFixed(2)} (1 for Poisson statistics): check the camera gain / offset / excess noise`);
-    quality = qualitySpots(dTr, dv, th1, thr, K1a, g, (i) => cf[ord[tr[i]]], devRep, k);
+    quality = qualitySpots(dTr, dv, th1, thr, K1a, g, (i) => cf[ord[tr[i]]], k);
     const dKeep = new Float32Array(keep.length * P2);
     keep.forEach((i, q) => dKeep.set(dTr.subarray(i * P2, (i + 1) * P2), q * P2));
     dFit = dKeep;
@@ -186,7 +185,7 @@ export function spreadOrder(n: number): number[] {
 /** The quality range of the training spots: q = first-pass deviance per pixel, cutoff = the rejection threshold; the
  *  shown ROIs (copies) with the model of their first-pass fit (photons x spline + bg). */
 function qualitySpots(dTr: Float32Array, dv: Float32Array, theta: Float32Array, thr: number, K: Float32Array, g: KnotGridFull,
-  frameOf: (i: number) => number, dr: { rule: string }, k: number): QualityRange {
+  frameOf: (i: number) => number, k: number): QualityRange {
   const P = g.roisize, P2 = P * P;
   const b = qualityBands(dv, (i) => dv[i] < thr);
   const roi = (i: number): QualityRoi => {
@@ -196,7 +195,7 @@ function qualitySpots(dTr: Float32Array, dv: Float32Array, theta: Float32Array, 
       photons: t[3], bg: t[4], z: t[2], label: `training spot ${i}, frame ${frameOf(i)}` };
   };
   let nRej = 0; for (const v of dv) if (!(v < thr)) nRej++;
-  const rule = dr.rule === 'poisson' ? `1 + ${k} sqrt(2 / P^2)` : `median + ${k} x max(1.4826 MAD, median sqrt(2 / P^2))`;
+  const rule = `median + ${k} x max(1.4826 MAD, median sqrt(2 / P^2))`;
   return {
     q: Float32Array.from(dv), cutoff: thr, cutoffKind: 'rejection', qLabel: 'Poisson deviance per px (first pass)', unit: 'training spots',
     notes: [`q = Poisson deviance per px of a training spot after its single-emitter fit with the first-pass PSF (the values the estimator used; about 1 when the model explains the spot, overlapping emitters give more). Model images: that fit.`,

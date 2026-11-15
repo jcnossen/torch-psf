@@ -94,7 +94,7 @@ exaggeration); a global display maximum so the brightness does not jump; above a
 hash-ranked subset weighted to keep the brightness (the principles of webSMLM's point-cloud renderer and its
 tilt / rotate view). The fit starts from
 a generic astigmatic PSF (Noll 6 = 0.08) unless another start is chosen in the Fit PSF step (the PSF in the 3D view, the last
-estimate, or a PSF file: `psf.zip`, a torch-psf PSF json or a SIMCODE calibration json). On the demo it recovers the truth to about 0.001 waves rms in about a minute on a laptop iGPU. The Localize step localizes again (with the last estimate, or the start PSF if there is none) without estimating the PSF.
+estimate, or a `psf.zip`). On the demo it recovers the truth to about 0.001 waves rms in about a minute on a laptop iGPU. The Localize step localizes again (with the last estimate, or the start PSF if there is none) without estimating the PSF.
 "Fit report (PDF)" in the Export step writes `fit_report.pdf` (see "Fit report" below); "PSF (psf.zip)" writes the shared PSF file (see
 "psf.zip" below).
 
@@ -110,12 +110,8 @@ estimate, or a PSF file: `psf.zip`, a torch-psf PSF json or a SIMCODE calibratio
    estimate" (while fitting) continue with what is there; "Abort" discards.
 4. Results: 3D view of the fitted PSF, the Zernike coefficients, NLL per pixel of the fitted beads and of the held-out
    bead (refitted with the PSF frozen), and data / model / residual images (xy at a plane, xz) per bead.
-5. Exports: `psf.json` (torch-psf schema: `format`, `optics`, `zernike_noll`, `zernike_waves`, `focus_um`, ...; also
-   the calib keys `pixelsize_um`, `wavelength_um`, `NA`, `n_imm`, `n_med`; `provenance` records the fit, including
-   `partial`), `psf_spline.npz` (knots of the convolutional Catmull-Rom spline, S = 2, hz = 0.04 um, the same grid as
-   torch_psf's `CubicSplinePSF`: `knots [nz, nv, nu]`, `z0`, `hz`, `S`, `u0`, `roisize`, `xmax`, `focus_um`, Zernikes) and
-   `psf_model_zstack.tif` (float32 normalized model PSF at the stack's planes, ImageJ stack), `fit_report.pdf`, and
-   `psf.zip` (below).
+5. Exports: `psf.zip` (below), `psf_model_zstack.tif` (float32 normalized model PSF at the stack's planes, ImageJ
+   stack) and `fit_report.pdf`.
 
 ### psf.zip
 
@@ -129,8 +125,8 @@ them; default 25 planes at 1 camera px, options "planes" and "sampling 1 / k px"
 fit gives the same bytes. Bead fit: z = emitter height at the export focus ("imaging focus"), z range = the export
 spline z range, ROI = the fit ROI; in-situ: the acquisition focal plane and emitter z range. `torch_psf.io.load` /
 `PSFZip.read` read it; the app reads `psf.zip` (channel 0's vectorial model or the `source` of a spline channel; only
-the arrays psf.json references are parsed, dtypes the npy reader does not support are skipped) wherever it reads a PSF
-json. Code: `src/io/zip.ts`, `src/io/imagejtif.ts`, `src/io/psfzip.ts`, `src/psf/zstack.ts`, `src/psf/makezip.ts`,
+the arrays psf.json references are parsed, dtypes the npy reader does not support are skipped) as the start PSF of the
+in-situ fit. Code: `src/io/zip.ts`, `src/io/imagejtif.ts`, `src/io/psfzip.ts`, `src/psf/zstack.ts`, `src/psf/makezip.ts`,
 `src/report/preview.ts`, `src/ui/exportzip.ts`.
 
 ### Fit report (PDF)
@@ -180,10 +176,10 @@ per lobe). Not modelled (unlike torch_psf's `fit_beads`): finite bead size, blea
 
 ```
 src/gpu/        device.ts (adapter / limits), ops.ts (VecEngine: chunked dispatch), kernels/*.wgsl
-src/psf/        vectorial.ts (pupil precompute, Zernikes, derivative directions), spline.ts (knot export), zstack.ts (z-stack
+src/psf/        vectorial.ts (pupil precompute, Zernikes, derivative directions), spline.ts (spline knots of a vectorial PSF), zstack.ts (z-stack
                 render, spline evaluation), makezip.ts (psf.zip of a fit)
 src/fit/        beads.ts (bead finding, LM with Schur elimination), linalg.ts
-src/io/         tiff.ts (lazy reader), npy.ts (npy / npz read + write), zip.ts, tifwrite.ts, imagejtif.ts (hyperstack), psfjson.ts,
+src/io/         tiff.ts (lazy reader), npy.ts (npy write, npy / npz read), zip.ts, tifwrite.ts, imagejtif.ts (hyperstack),
                 psfzip.ts (psf.zip json / write / read), pdf.ts + pdffonts.ts (PDF writer)
 src/report/     plot.ts (axes, line / bar / histogram, images with colour bars, tables), fitreport.ts (makeFitReport),
                 fromapp.ts (report data from the in-situ / bead results)
