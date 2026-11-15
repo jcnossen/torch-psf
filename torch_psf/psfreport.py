@@ -5,6 +5,11 @@ model pages only (summary, aberrations / pupil when the model has them, PSF view
 Sections (psf.json report.sections lists the ones written):
   summary      model, optics, camera, estimator, settings, results (scalars of the report), warnings
   spots        ROIs found / used / held out / rejected and why (overlap deviance histogram with its threshold)
+  quality      the range of ROI quality: histogram of a per-ROI score q (higher = worse) with the cutoff, and data /
+               model / difference of the 3 best ROIs, the 3 last accepted (just below the cutoff) and the 3 first
+               rejected (just above). InSitu: q = Poisson deviance per px of the first fit, cutoff = the overlap
+               rejection threshold; ZStack: q = chi2 per px of a bead (mean over its planes), no rejection, a
+               reference line median + 3 x 1.4826 MAD
   fit_stats    histograms of chi2, photons, background, z of refitted spots (InSitu: held-out spots refitted with the
                final spline; ZStack: every bead plane with the fitted model)
   convergence  loss per iteration of each estimation stage; the focus / wavelength scan
@@ -296,13 +301,17 @@ def s_spots(ctx):
             y -= 0.016
         y -= 0.006
     d = ctx.data
-    if dv and d.get('spots') is not None and d.get('vectorial_spline') is not None and len(d.get('train', [])):
-        from torch_psf.estimation import spot_deviance
+    if dv and d.get('deviance') is not None:                 # the estimator's first-fit values
+        dev, idx = np.asarray(d['deviance']), np.asarray(d['train'])
+    elif dv and d.get('spots') is not None and d.get('vectorial_spline') is not None and len(d.get('train', [])):
         sp = d['spots']
         idx = np.asarray(d['train'])[:ctx.max_spots]
         ii = torch.as_tensor(idx, device=sp.rois.device)
         var = sp.var[ii] if (sp.var is not None and sp.var.dim() > 0) else None
-        dev, _ = spot_deviance(d['vectorial_spline'], sp.rois[ii], var)
+        dev, _ = spot_dev(d['vectorial_spline'], sp.rois[ii], var)
+    else:
+        dev = None
+    if dev is not None:
         ax = fig.add_axes([0.1, 0.12, 0.8, 0.3])
         hi = np.quantile(dev, 0.995)
         ax.hist(np.clip(dev, None, hi), bins=60, color=SERIES[0])
@@ -523,6 +532,231 @@ def s_examples(ctx):
     return [fig]
 
 
+QBANDS = (('best', 'Best: the lowest q', SERIES[2]),
+          ('accepted', 'Last accepted: just below the cutoff', SERIES[0]),
+          ('rejected', 'First rejected: just above the cutoff', SERIES[1]))
+
+
+def _bands(q, accepted, n=3):
+    """indices of the n lowest q, the n accepted ones with the highest q (not already among the best) and the n
+    not-accepted ones with the lowest q"""
+    o = np.argsort(q, kind='stable')
+    best = o[:n]
+    acc = o[accepted[o] & ~np.isin(o, best)][-n:]
+    rej = o[~accepted[o] & ~np.isin(o, best)][:n]
+    return dict(best=best, accepted=acc, rejected=rej)
+
+
+def _ref_cutoff(q):
+    """reference line median + 3 x 1.4826 MAD (no estimator rejection)"""
+    med = float(np.median(q))
+    return med + 3 * 1.4826 * float(np.median(np.abs(q - med)))
+
+
+@torch.no_grad()
+def _quality(ctx):
+    """per-ROI quality score q (higher = worse), the cutoff and the ROIs of the three bands, or None:
+    dict(q, accepted [N] bool, cutoff, kind ('rejection' | 'reference' | None), qlabel, notes, rows {band: [row]}),
+    row = dict(data, model [P, P], q, rank, photons, bg, z, label)"""
+    d, rep = ctx.data, ctx.rep
+    if d.get('rois') is not None and d.get('model') is not None and d.get('chi2') is not None:   # ZStackEstimator
+        rois, mu, c2 = _np(d['rois']), _np(d['model']), _np(d['chi2'])
+        nb, nk = c2.shape
+        q = c2.mean(1)
+        cut = _ref_cutoff(q) if nb >= 3 else None
+        acc = np.ones(nb, bool) if cut is None else q < cut
+        sid = _np(d.get('stack_id'))
+        ho = ctx.settings.get('holdout')
+        foc = _np(d.get('focus_um'))
+        per_plane = lambda a: None if a is None else np.reshape(a, (nb, -1))[:, np.arange(nk) % np.size(a[0])]
+        ph, bg = per_plane(_np(d.get('photons'))), per_plane(_np(d.get('bg')))
+        o = np.argsort(q, kind='stable')
+        rank = np.empty(nb, int)
+        rank[o] = np.arange(nb)
+
+        def row(b):
+            k = int(mu[b].reshape(nk, -1).max(1).argmax())             # the plane with the sharpest model
+            tag = '' if sid is None else f' (stack {int(sid[b])}{", held out" if ho is not None and int(sid[b]) == ho else ""})'
+            return dict(data=rois[b, k], model=mu[b, k], q=float(q[b]), rank=int(rank[b]),
+                        photons=None if ph is None else float(ph[b, k]), bg=None if bg is None else float(bg[b, k]),
+                        z=None if foc is None else 0.0 - float(foc[k]), label=f'bead {b}{tag}, plane {k + 1} of {nk} (sharpest)')
+        notes = [f'q = chi2 per px of a bead, (data - model)^2 / model averaged over its {nk} planes and the pixels '
+                 f'(about 1 when the model explains the data); images: the plane with the sharpest model.']
+        if cut is not None:
+            notes.append(f'The ZStackEstimator rejects no beads. Reference line (not a rejection): median + 3 x 1.4826 '
+                         f'MAD = {cut:.3f}; {int((~acc).sum())} of {nb} beads lie above it and were used in the fit.')
+        bands = _bands(q, acc)
+        return dict(q=q, accepted=acc, cutoff=cut, kind=None if cut is None else 'reference', notes=notes,
+                    qlabel='chi2 per px of a bead (mean over its planes)', unit='beads',
+                    rows={b: [row(int(i)) for i in ix] for b, ix in bands.items()})
+    sp, dvr = d.get('spots'), rep.get('deviance')
+    tr = np.asarray(d.get('train', []))
+    if sp is None or not dvr or not len(tr):
+        return None
+    if d.get('deviance') is not None and d.get('deviance_psf') is not None:
+        q, psf, th = np.asarray(d['deviance'], float), d['deviance_psf'], d.get('deviance_theta')
+        how, first = 'the first-fit PSF (the values the estimator used)', True
+    elif d.get('vectorial_spline') is not None:                         # older data: recomputed with the final fit
+        tr = tr[:ctx.max_spots]
+        psf, th = d['vectorial_spline'], None
+        how = (f'the final vectorial PSF (recomputed for {len(tr)} training spots: the first-fit values were not '
+               f'stored)')
+        q, first = None, False
+    else:
+        return None
+    ii = torch.as_tensor(tr, device=sp.rois.device)
+    var = sp.var[ii] if (sp.var is not None and sp.var.dim() > 0) else (
+        None if sp.var is None or float(sp.var) == 0 else sp.var)
+    if q is None:
+        q, th = spot_dev(psf, sp.rois[ii], var)
+        q = np.asarray(q, float)
+    thr = float(dvr['threshold'])
+    acc = q < thr
+    o = np.argsort(q, kind='stable')
+    rank = np.empty(len(q), int)
+    rank[o] = np.arange(len(q))
+    bands = _bands(q, acc)
+    sel = np.concatenate(list(bands.values())).astype(int)
+    st = torch.as_tensor(sel, device=ii.device)
+    if th is None:
+        r_, v_ = sp.rois[ii[st]], var
+        if v_ is not None and v_.dim() > 0:
+            v_ = v_[st]
+        _, th_sel = spot_dev(psf, r_, v_)
+    else:
+        th_sel = torch.as_tensor(_np(th)[sel])
+    dev_ = getattr(psf, 'dev', None) or th_sel.device
+    th_sel = th_sel.to(dev_)
+    mu = _np(psf.expected(th_sel))
+    thn = _np(th_sel)
+    data = _np(sp.rois[ii[st]])
+    fr = _np(getattr(sp, 'frame', None))
+    has_z = getattr(psf, 'z_range', None) is not None
+    pos = {int(i): j for j, i in enumerate(sel)}
+
+    def row(i):
+        j = pos[int(i)]
+        return dict(data=data[j], model=mu[j], q=float(q[i]), rank=int(rank[i]), photons=float(thn[j, 3]),
+                    bg=float(thn[j, 4]), z=float(thn[j, 2]) if has_z else None,
+                    label=f'training spot {int(i)}' + ('' if fr is None else f', frame {int(fr[tr[i]])}'))
+    rule = (f'median + {dvr.get("k")} x max(1.4826 MAD, median sqrt(2 / P^2))' if dvr.get('rule') == 'median' else
+            f'1 + {dvr.get("k")} sqrt(2 / P^2)' if dvr.get('rule') == 'poisson' else f'rule {dvr.get("rule")}')
+    notes = [f'q = Poisson deviance per px of a training spot after its single-emitter fit with {how} (about 1 when '
+             f'the model explains the spot; overlapping emitters give more). Model images: that fit.',
+             f'Rejection (InSituEstimator overlap rule {rule}): q >= {thr:.3f}; {int((~acc).sum())} of {len(q)} '
+             f'spots rejected, the PSF was refitted without them.']
+    return dict(q=q, accepted=acc, cutoff=thr, kind='rejection', notes=notes, unit='training spots',
+                qlabel='Poisson deviance per px (first fit)' if first else 'Poisson deviance per px (final fit)', rows={b: [row(i) for i in ix] for b, ix in bands.items()})
+
+
+def spot_dev(psf, rois, var):
+    from torch_psf.estimation import spot_deviance
+    return spot_deviance(psf, rois, var)
+
+
+def s_quality(ctx):
+    qd = _quality(ctx)
+    if qd is None or not len(qd['q']):
+        return []
+    import textwrap
+    from matplotlib.transforms import blended_transform_factory
+    q, acc, cut, kind = np.asarray(qd['q'], np.float64), qd['accepted'], qd['cutoff'], qd['kind']
+    n = len(q)
+    fig = _fig()
+    _header(fig, 'ROI quality range: best, last accepted, first rejected')
+    y = 0.945
+    for t in qd['notes']:
+        for l in textwrap.wrap(t, 130):
+            fig.text(0.06, y, l, fontsize=6.8, color=INK2)
+            y -= 0.0125
+    titles = dict(reference=dict(accepted='Just below the reference line',
+                                 rejected='Just above the reference line (kept: the estimator rejects nothing)'),
+                  none=dict(accepted='Worst')).get(kind or 'none', {})
+    bands = [(b, titles.get(b, t), SERIES[3] if b == 'rejected' and kind != 'rejection' else c) for b, t, c in QBANDS]
+    # histogram of q, the cutoff, ticks at the shown ROIs
+    lo = float(q.min())
+    hi = float(np.quantile(q, 0.99)) if n > 20 else float(q.max())       # long tails (overlaps) in the last bin
+    if cut is not None:
+        hi = max(float(np.quantile(q, 0.95)) if n > 20 else -np.inf, cut + 0.6 * (cut - lo))
+    hi = hi if hi > lo else lo + 1.0
+    bins = np.linspace(lo, hi, int(np.clip(np.sqrt(n) * 2, 30, 70)) + 1)
+    ax = fig.add_axes([0.1, y - 0.205, 0.84, 0.17])
+    qc = np.clip(q, lo, hi)
+    ax.hist([qc[acc], qc[~acc]] if (~acc).any() else [qc], bins=bins, stacked=True,
+            color=[SERIES[0], SERIES[1] if kind == 'rejection' else SERIES[3]][:2 if (~acc).any() else 1],
+            label=(['accepted', 'rejected'] if kind == 'rejection' else ['below the reference', 'above the reference (used)'])
+            [:2 if (~acc).any() else 1])
+    if n > 100:
+        ax.set_yscale('log')
+    tr_ = blended_transform_factory(ax.transData, ax.transAxes)
+    if cut is not None:
+        ax.axvline(cut, color=SERIES[1] if kind == 'rejection' else INK2, lw=1.4, ls='-' if kind == 'rejection' else '--')
+        ax.text(cut, 0.97, f' rejection threshold {cut:.3f}' if kind == 'rejection' else f' reference {cut:.3f} (no rejection)',
+                transform=tr_, fontsize=7, color=INK, va='top')
+    for b, col, ym in ((b, c, -0.2 if b == 'rejected' else -0.15) for b, _, c in bands):   # two rows of marks
+        xs = np.asarray([r['q'] for r in qd['rows'].get(b, [])])
+        if len(xs):
+            ax.plot(np.clip(xs[xs <= hi], lo, hi), [ym] * int((xs <= hi).sum()), '|', ms=8, mew=1.6, color=col,
+                    transform=tr_, clip_on=False)
+            if (xs > hi).any():                                          # beyond the axis: an arrow at the edge
+                ax.plot([hi + 0.012 * (hi - lo)], [ym], '>', ms=5, color=col, transform=tr_, clip_on=False)
+    if (q > hi).any():
+        m = int((q > hi).sum())
+        ax.text(1.0, -0.36, f'{m} value{"s" if m > 1 else ""} above {hi:.3g} counted in the last bin',
+                transform=ax.transAxes, fontsize=6.5, color=INK2, ha='right', va='top')
+    ax.set_xlim(lo - 0.01 * (hi - lo), hi + 0.01 * (hi - lo))
+    ax.set_xlabel(qd['qlabel'], fontsize=7.5, labelpad=22)
+    if (~acc).any():
+        ax.legend(fontsize=6.5, frameon=False, loc='lower right', bbox_to_anchor=(1.0, 1.0), ncol=2, borderaxespad=0.2)
+    _style(ax, f'q of {n} {qd["unit"]}; marks below the axis: the ROIs shown')
+    # bands of rows: caption | data | model | data - model
+    rows = [(b, t, c, qd['rows'].get(b, [])) for b, t, c in bands]
+    rows = [(b, t, c, rr) for b, t, c, rr in rows if rr]
+    nrow = sum(len(rr) for *_, rr in rows)
+    top = y - 0.29
+    H = min(0.066, (top - 0.035 - 0.012 * len(rows)) / (nrow + 0.45 * len(rows)))
+    yy = top
+    for b, t, c, rr in rows:
+        fig.text(0.06, yy - 0.018, t, fontsize=8.5, color=c, weight='bold')
+        yy -= 0.45 * H
+        for r in rr:
+            yy -= H
+            dd, m = r['data'], r['model']
+            lo_, hi_ = float(min(dd.min(), m.min())), float(max(dd.max(), m.max()))
+            res = dd - m
+            rl = float(np.abs(res).max()) or 1.0
+            pc = 100 * (r['rank'] + 1) / n
+            cap = [f'q {r["q"]:.3f}   rank {r["rank"] + 1} of {n} ({pc:.2f} %)' if pc < 1 else
+                   f'q {r["q"]:.3f}   rank {r["rank"] + 1} of {n} ({pc:.1f} %)',
+                   ', '.join(s for s in (None if r['photons'] is None else f'{r["photons"]:.0f} photons',
+                                         None if r['bg'] is None else f'bg {r["bg"]:.1f}',
+                                         None if r['z'] is None else f'z {r["z"]:.3f} um') if s),
+                   r['label']]
+            for k, l in enumerate(cap):
+                fig.text(0.075, yy + H * (0.68 - 0.24 * k), l, fontsize=7 if k == 0 else 6.5,
+                         color=INK if k == 0 else INK2, weight='bold' if k == 0 else 'normal')
+            fig.patches.append(__import__('matplotlib.patches', fromlist=['Rectangle']).Rectangle(
+                (0.06, yy + 0.1 * H), 0.006, 0.8 * H, transform=fig.transFigure, color=c))
+            w = H * A4[1] / A4[0] * 0.92                                       # square panels
+            for j, (img, cm, v0, v1, tt) in enumerate(((dd, 'gray', lo_, hi_, 'data'), (m, 'gray', lo_, hi_, 'model'),
+                                                       (res, 'RdBu_r', -rl, rl, 'data - model'))):
+                x0 = 0.42 + j * (w + 0.035) + (0.02 if j == 2 else 0)
+                a = fig.add_axes([x0, yy + 0.04 * H, w, 0.92 * H])
+                im = a.imshow(img, cmap=cm, vmin=v0, vmax=v1, interpolation='nearest')
+                a.set_xticks([]); a.set_yticks([])
+                if r is rows[0][3][0]:
+                    a.set_title(tt, fontsize=7, color=INK2)
+                if j >= 1:
+                    cax = fig.add_axes([x0 + w + 0.004, yy + 0.04 * H, 0.008, 0.92 * H])
+                    cb = fig.colorbar(im, cax=cax)
+                    cb.ax.tick_params(labelsize=5, length=2, pad=1)
+                    cb.outline.set_linewidth(0.4)
+        yy -= 0.012
+    fig.text(0.06, 0.018, 'data and model on a shared linear scale (photons) per ROI (colour bar next to the model); '
+             'data - model on a symmetric scale', fontsize=6.5, color=INK2)
+    return [fig]
+
+
 def s_residuals(ctx):
     f = ctx.fit()
     if f is None or f['z'] is None or f['photons'] is None or len(f['rois']) < 4:
@@ -636,7 +870,7 @@ def s_field(ctx):
     return figs
 
 
-SECTIONS = (('summary', s_summary), ('spots', s_spots), ('fit_stats', s_fit_stats), ('convergence', s_convergence),
+SECTIONS = (('summary', s_summary), ('spots', s_spots), ('quality', s_quality), ('fit_stats', s_fit_stats), ('convergence', s_convergence),
             ('aberrations', s_aberrations), ('pupil', s_pupil), ('psf', s_psf), ('examples', s_examples),
             ('residuals', s_residuals), ('field', s_field))
 

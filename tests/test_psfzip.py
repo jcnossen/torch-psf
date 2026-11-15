@@ -147,8 +147,8 @@ def test_report_zstack_estimator(tmp_path):
     psf = est.estimate([torch.poisson(stack).numpy()], dz_um=0.08)
     assert est.data['model'].shape == est.data['rois'].shape and est.data['chi2'].shape == (2, nk)
     secs = save(tmp_path / 'p.zip', psf, report=est)['report']['sections']
-    assert secs == ['summary', 'spots', 'fit_stats', 'convergence', 'aberrations', 'pupil', 'psf', 'examples',
-                    'residuals']
+    assert secs == ['summary', 'spots', 'quality', 'fit_stats', 'convergence', 'aberrations', 'pupil', 'psf',
+                    'examples', 'residuals']
     # the report of a reloaded PSF comes from its provenance (no history / data)
     secs = save(tmp_path / 'q.zip', PSF.load(tmp_path / 'p.zip', device=DEV))['report']['sections']
     assert secs == ['summary', 'spots', 'aberrations', 'pupil', 'psf']
@@ -173,8 +173,80 @@ def test_report_insitu_style_data(tmp_path):
     data = dict(spots=sp, train=np.arange(40), test=np.arange(40, 60), spline=g, vectorial_spline=g,
                 vectorial=vectorial())
     secs = save(tmp_path / 'p.zip', g, report=dict(report=rep, history=hist, data=data))['report']['sections']
-    assert secs == ['summary', 'spots', 'fit_stats', 'convergence', 'aberrations', 'pupil', 'psf', 'examples',
-                    'residuals']
+    assert secs == ['summary', 'spots', 'quality', 'fit_stats', 'convergence', 'aberrations', 'pupil', 'psf',
+                    'examples', 'residuals']
+
+
+def insitu_overlaps(n=120, frac=0.1, seed=2):
+    """spots of an astigmatic Gaussian, a fraction with a second emitter in the ROI, and the InSituEstimator data
+    keys of the first-fit overlap test (deviance, deviance_theta, deviance_psf)"""
+    from torch_psf.estimation import spot_deviance
+    g = AstigmaticGaussianPSF(11, (1.2, 1.4), 0.2, 0.4, z_range=(-0.4, 0.4), device=DEV, pixel_um=0.1)
+    gen = torch.Generator().manual_seed(seed)
+    u = lambda: torch.rand(n, generator=gen)
+    th = torch.stack([u() - 0.5, u() - 0.5, 0.6 * u() - 0.3, 2000 + 2000 * u(), torch.full((n,), 10.0)], 1)
+    th2 = th + torch.tensor([3.0, -2.0, 0.0, 0.0, 0.0])
+    th2[:, 4] = 0
+    mu = g.expected(th) + (u() < frac)[:, None, None] * g.expected(th2)
+    rois = torch.poisson(mu, generator=gen)
+    sp = Spots(rois, torch.arange(n), torch.zeros(n, 2, dtype=torch.long), var=torch.tensor(0.0))
+    tr = np.arange(n * 2 // 3)
+    dv, th1 = spot_deviance(g, rois[:len(tr)])
+    return g, sp, tr, dict(spots=sp, train=tr, test=np.arange(len(tr), n), spline=g, vectorial_spline=g,
+                           deviance=dv, deviance_theta=th1, deviance_psf=g)
+
+
+@pytest.mark.parametrize('rejected', [True, False])
+def test_report_quality_range(tmp_path, rejected):
+    """quality page: q = the stored first-fit deviance and the estimator's threshold; best / last accepted / first
+    rejected bands (the last only with rejected spots); models = the first-fit single-emitter fits"""
+    from torch_psf import psfreport
+    g, sp, tr, data = insitu_overlaps()
+    dv = data['deviance']
+    thr = float(np.quantile(dv, 0.85)) if rejected else float(dv.max()) + 1
+    rep = dict(n_spots=len(sp), n_train=len(tr), n_test=len(sp) - len(tr), n_rejected=int((dv >= thr).sum()),
+               deviance=dict(rule='median', k=3.0, median=float(np.median(dv)), scale=0.1, threshold=thr))
+    b = dict(report=rep, history=[], data=data)
+    ctx = psfreport._Ctx(g, {}, None, None, psfreport.bundle(b, g), None, 1000)
+    qd = psfreport._quality(ctx)
+    assert qd['kind'] == 'rejection' and qd['cutoff'] == thr and np.array_equal(qd['q'], dv)
+    rows = qd['rows']
+    assert [r['rank'] for r in rows['best']] == [0, 1, 2]
+    assert len(rows['accepted']) == 3 and all(r['q'] < thr for r in rows['accepted'])
+    acc_q = np.sort(dv[dv < thr])
+    assert [r['q'] for r in rows['accepted']] == pytest.approx(acc_q[-3:].tolist())
+    if rejected:
+        assert len(rows['rejected']) == 3 and all(r['q'] >= thr for r in rows['rejected'])
+        assert [r['q'] for r in rows['rejected']] == pytest.approx(np.sort(dv[dv >= thr])[:3].tolist())
+    else:
+        assert rows['rejected'] == []
+    i = int(np.argmin(dv))                                    # the model is the stored first fit of that spot
+    mu = g.expected(data['deviance_theta'][i:i + 1])[0].numpy()
+    assert np.allclose(rows['best'][0]['model'], mu) and np.array_equal(rows['best'][0]['data'], sp.rois[i].numpy())
+    assert len(psfreport.s_quality(ctx)) == 1
+    secs = save(tmp_path / 'p.zip', g, report=b)['report']['sections']
+    assert 'quality' in secs and secs.index('quality') == secs.index('spots') + 1
+
+
+def test_report_quality_zstack_reference():
+    """ZStack: q = chi2 per px per bead, no rejection: a labelled reference line and all beads accepted by it or not"""
+    from torch_psf import psfreport
+    nb, nk, P = 8, 5, 9
+    gen = torch.Generator().manual_seed(0)
+    mu = 5 + 200 * torch.rand(nb, nk, P, P, generator=gen)
+    rois = torch.poisson(mu, generator=gen)
+    rois[3] += 300 * (torch.rand(nk, P, P, generator=gen) > 0.9)          # a bead the model does not explain
+    c2 = ((rois - mu) ** 2 / mu).mean((2, 3))
+    data = dict(rois=rois, model=mu, chi2=c2, photons=torch.full((nb, nk), 1e4), bg=torch.full((nb, nk), 5.0),
+                focus_um=torch.linspace(-0.2, 0.2, nk), stack_id=torch.zeros(nb, dtype=torch.long))
+    rep = dict(n_beads=nb, n_planes=nk)
+    ctx = psfreport._Ctx(None, {}, None, None, psfreport.bundle(dict(report=rep, data=data), None), None, 1000)
+    qd = psfreport._quality(ctx)
+    q = c2.mean(1).numpy()
+    assert qd['kind'] == 'reference' and np.allclose(qd['q'], q)
+    assert any('not a rejection' in t for t in qd['notes'])
+    assert [r['label'].split(' ')[1] for r in qd['rows']['rejected']] == ['3']          # above the reference line
+    assert len(psfreport.s_quality(ctx)) == 1
 
 
 def simcode_feats(x, y, order, norm):
