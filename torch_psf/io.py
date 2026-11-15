@@ -2,7 +2,7 @@
 each model class writes and reads its own parameters); the functions here are the module-level entry points.
 
 PSF json schema (format 'torch-psf', version '0.1.0'):
-  type            'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian'
+  type            'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian' | 'fourpi' | 'fourpi_spline'
   optics          {pixel_um, NA, wavelength_um, n_imm, n_med}   (also at the top level as pixelsize_um, wavelength_um, ...)
   zernike_noll, zernike_waves, apod, saf, focus_um, psf_blur_px2, psf_dipole_M, diattenuation, npupil, oversample,
   roisize, z_range_um
@@ -10,6 +10,9 @@ PSF json schema (format 'torch-psf', version '0.1.0'):
                   knots in the npz ('knots')
   gaussian        (types gaussian / astig_gaussian) {sigma_px, gamma_um, d_um, z_range_um, pixel_um}; a plain
                   calibration json with psf_gauss_sigma_um is a 2D Gaussian
+  fourpi          (types fourpi / fourpi_spline) the FourPiPSF parameter dict (FourPiPSF.state(): meta, zt, zb, phi,
+                  tau, a, gamma, d_bot, blur_px2, depth); for fourpi_spline the source model
+  fourpi_spline   (type fourpi_spline) the spline grid as `spline` plus n_channels, tau; knots [3, C, nz, n, n] in the npz
   arrays          name of the sidecar npz (pupil_phase, pupil_amp, knots), relative to the json
   camera          optional Camera dict; provenance: free-form
 A plain calibration json (no 'format') with the vectorial keys at the top level (pixelsize_um, wavelength_um, NA,

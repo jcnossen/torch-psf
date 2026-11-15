@@ -2,7 +2,8 @@
 
 The PSF is the main object: PSF (base class) with render, expected, fisher / crlb, fit (ROIs -> localizations),
 localize (movie -> localizations), save / PSF.load and to_spline; the models VectorialPSF, CubicSplinePSF,
-GaussianPSF and AstigmaticGaussianPSF. PSFs are estimated with ZStackEstimator (bead z-stacks) and InSituEstimator
+GaussianPSF and AstigmaticGaussianPSF, and the multi-channel coherent 4Pi models
+FourPiPSF and FourPiSplinePSF (torch_psf.fourpi; images [N, C, P, P]). PSFs are estimated with ZStackEstimator (bead z-stacks) and InSituEstimator
 (from the SMLM movie itself).
 
 Conventions: x = column, y = row, in px, pixel centres at integers; ROI positions are offsets from the ROI centre;
@@ -13,7 +14,7 @@ default: cuda if available, else cpu. Lower-level pieces: torch_psf.fit (incl. s
 (torch_psf.dataset).
 
 Module layers (each imports only from the layers before it): optics, zernike, fit -> detect, movie, spots, dataset,
-camera -> psf (the base class) -> vectorial, spline, gaussian -> io, estimation, simulate -> estimators -> viewer,
+camera -> psf (the base class) -> vectorial, spline, gaussian -> fourpi -> io, estimation, simulate -> estimators -> viewer,
 __main__. The model classes register themselves by their psf.json type name when they are defined
 (PSF.__init_subclass__), and this __init__ imports all of them, so PSF.load knows every type whenever torch_psf is
 imported; importing a submodule alone (e.g. `from torch_psf.psf import PSF`) runs this __init__ first and so
@@ -29,6 +30,7 @@ from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
 from torch_psf.spline import CubicSplinePSF
 from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
+from torch_psf.fourpi import FourPiPSF, FourPiSplinePSF
 from torch_psf.detect import detect_spots
 from torch_psf.spots import extract_spots
 from torch_psf.estimators import ZStackEstimator, InSituEstimator
