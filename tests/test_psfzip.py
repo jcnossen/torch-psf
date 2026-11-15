@@ -436,3 +436,23 @@ def test_zip_reproducible_across_minutes(tmp_path, monkeypatch):
     save(a, GaussianPSF(11, 1.3, DEV, pixel_um=0.1))
     save(b, GaussianPSF(11, 1.3, DEV, pixel_um=0.1))
     assert a.read_bytes() == b.read_bytes()
+
+
+def test_fourpi_arm_terms_round_trip(tmp_path):
+    """the per-objective terms of the 4Pi arms (NA, apodization, supercritical-angle terms, diattenuation, pupil maps)
+    survive state() / from_state() and a psf.zip"""
+    fp = fourpi()
+    with torch.no_grad():
+        fp.top.NA.fill_(1.33); fp.bot.NA.fill_(1.31)
+        fp.top.apod.copy_(torch.tensor([0.1, -0.05, 0.02])); fp.bot.saf.copy_(torch.tensor([0.01, 0.0, 0.05, -0.02]))
+        fp.top.pupil_phase.copy_(0.02 * fp.top.mask * fp.top.px); fp.bot.pupil_amp.copy_(1 + 0.1 * fp.bot.mask * fp.bot.py)
+    fp.bot.diat = 0.05
+    phi = torch.tensor([0.4, 2.5])
+    q = FourPiPSF.from_state(json.loads(json.dumps(fp.state())), device=DEV)
+    z = save(tmp_path / 'f.zip', fp)
+    r = PSF.load(tmp_path / 'f.zip', device=DEV)
+    with torch.no_grad():
+        ref = fp.render(POS, phi=phi)
+        assert torch.equal(q.render(POS, phi=phi), ref)
+        assert torch.equal(r.render(POS, phi=phi), ref)
+    assert z['source']['model']['fourpi']['arms']['bottom']['diattenuation'] == 0.05

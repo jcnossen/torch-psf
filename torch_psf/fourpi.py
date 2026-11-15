@@ -59,6 +59,33 @@ def _quad(M, x, y):
     return (x.real * yr + x.imag * yi).sum(1)
 
 
+def _arm_state(v):
+    """the per-objective terms of a 4Pi arm (VectorialPSF) beyond its Zernikes: NA, apodization, supercritical-angle
+    terms, diattenuation, free pupil maps (only when not neutral)"""
+    d = dict(NA=float(v.NA.detach()), apod=_list(v.apod), saf=_list(v.saf), diattenuation=None if v.diat is None else float(v.diat))
+    if bool((v.pupil_phase != 0).any()):
+        d['pupil_phase'] = _list(v.pupil_phase)
+    if bool((v.pupil_amp != 1).any()):
+        d['pupil_amp'] = _list(v.pupil_amp)
+    return d
+
+
+def _arm_load(v, d):
+    t = lambda x: torch.as_tensor(x, dtype=torch.float32, device=v.dev)
+    with torch.no_grad():
+        if d.get('NA') is not None:
+            v.NA.fill_(float(d['NA']))
+        if d.get('apod') is not None:
+            v.apod.copy_(t(d['apod']))
+        if d.get('saf') is not None:
+            v.saf.copy_(t(d['saf']))
+        if d.get('pupil_phase') is not None:
+            v.pupil_phase.copy_(t(d['pupil_phase']).reshape(v.pupil_phase.shape))
+        if d.get('pupil_amp') is not None:
+            v.pupil_amp.copy_(t(d['pupil_amp']).reshape(v.pupil_amp.shape))
+    v.diat = None if d.get('diattenuation') is None else float(d['diattenuation'])
+
+
 class FourPiPSF(torch.nn.Module, PSF):
     """Coherent 4Pi PSF on a roisize x roisize patch with C channels -> images [N, C, P, P] (module docstring).
 
@@ -298,6 +325,7 @@ class FourPiPSF(torch.nn.Module, PSF):
             s['depth'] = _list(self.depth)
         s['raw'] = {k: _list(v) if v.dim() else float(v.detach()) for k, v in self.named_parameters()
                     if not k.startswith(('top.', 'bot.'))}
+        s['arms'] = {'top': _arm_state(t), 'bottom': _arm_state(b)}
         return s
 
     @classmethod
@@ -324,6 +352,10 @@ class FourPiPSF(torch.nn.Module, PSF):
             for k, v in (s.get('raw') or {}).items():      # the exact parameters (state() of this class)
                 if k in params:
                     params[k].copy_(torch.as_tensor(v, dtype=params[k].dtype).reshape(params[k].shape))
+            arms = s.get('arms') or {}
+            for name, arm in (('top', p.top), ('bottom', p.bot)):
+                if arms.get(name):
+                    _arm_load(arm, arms[name])
         return p
 
     # ------------------------------------------------------------------ files

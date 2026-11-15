@@ -259,7 +259,7 @@ def bead_theta(spline, stack, z_nom, theta=None, xy_zrange=None):
 
 
 def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0, lam_s=0.0, w_stack=1.0, outer=12,
-                   inner=8, theta=None, log=None, localizer=None, xy_zrange=None, stop=None, var=None):
+                   inner=8, theta=None, log=None, localizer=None, xy_zrange=None, stop=None, var=None, knot_scale=True):
     """Free-knot PSF. Alternates (1) the emitter parameters at fixed knots (Levenberg-Marquardt per ROI) and (2) the
     knots at fixed emitter parameters (L-BFGS, `inner` iterations; the model is linear in the knots, so this
     subproblem is convex), `outer` times.
@@ -269,9 +269,13 @@ def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0,
     loss = NLL(SMLM ROIs) + w_stack NLL(bead stack) + lam_ref sum (K - ref)^2 / (|ref| + eps)
            + lam_s sum of squared second differences / (|knots0| + eps).
     Returns dict(psf, report, history, ...): psf = a CubicSplinePSF with the fitted knots; data = dict(knots, theta (of the SMLM ROIs));
-    report includes z_scale against knots0 and a warning (free knots can warp z)."""
+    report includes z_scale against knots0 and a warning (free knots can warp z).
+    knot_scale: L-BFGS works on the knots divided by max |knots0| (order 1): on the raw knots (~1e-2) its step-size
+    tolerances stop it early."""
     spl, insitu, K0, th_ins = spline, rois, knots0, theta
-    K = K0.clone().requires_grad_(True)
+    ks = float(K0.abs().max()) if knot_scale and float(K0.abs().max()) > 0 else 1.0
+    U = (K0 / ks).clone().requires_grad_(True)          # optimized variable; the knots are K = ks * U
+    K = U.detach() * ks
     eps = 1e-4
     wref = None if ref is None else 1.0 / (ref.abs() + eps)
     wsm = 1.0 / (K0.abs() + eps)
@@ -280,17 +284,19 @@ def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0,
     t0 = time.time()
     P = spl.roisize
     for o in range(outer):
-        spl.knots = K.detach()
+        K = U.detach() * ks
+        spl.knots = K
         if insitu is not None:
             th_ins, nll_i = (localize(spl, insitu, th_ins, var=var, iters=30 if th_ins is None else 5)
                              if localizer is None
                              else localizer(spl, insitu, th_ins))
         if stack is not None:
             th_b, nll_b = bead_theta(spl, stack['d'], stack['z_nom'], th_b, xy_zrange)
-        opt = torch.optim.LBFGS([K], max_iter=inner, history_size=10, line_search_fn='strong_wolfe')
+        opt = torch.optim.LBFGS([U], max_iter=inner, history_size=10, line_search_fn='strong_wolfe')
 
         def closure():
             opt.zero_grad()
+            K = (U.detach() * ks).requires_grad_(True)     # a leaf: knot_loss back-propagates batch by batch
             tot = 0.0
             if insitu is not None:
                 tot += knot_loss(spl, K, insitu, th_ins, var=var)
@@ -308,16 +314,18 @@ def fit_free_knots(spline, knots0, rois=None, stack=None, ref=None, lam_ref=0.0,
             if torch.is_tensor(reg):
                 reg.backward()
                 tot += float(reg.detach())
+            U.grad = K.grad * ks if K.grad is not None else torch.zeros_like(U)     # d loss / dU = ks d loss / dK
             return torch.tensor(tot, device=K.device)
 
         l = opt.step(closure)
         hist.append(dict(it=o, loss=float(l), seconds=time.time() - t0))
         if log is not None:
-            log(o, float(l), time.time() - t0, K.detach())
+            log(o, float(l), time.time() - t0, (U * ks).detach())
         if stop is not None and stop():
             break
     sec = time.time() - t0
-    spl.knots = K.detach()
+    K = (U * ks).detach()
+    spl.knots = K
     rep = dict(method='free_knots', iterations=len(hist), seconds=sec,
                n_emitters=0 if insitu is None else len(insitu),
                at_limit=limit_fraction(spl, th_ins) if th_ins is not None else float('nan'),
