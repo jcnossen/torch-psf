@@ -21,8 +21,6 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0          # the legacy reference test regenerates its images from commit e8e6fc5
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'

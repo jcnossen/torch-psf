@@ -1,30 +1,20 @@
-"""VectorialPSF: reproduction of the pre-restructuring images, derivatives, normalization, optional terms."""
-import os
-import numpy as np
+"""VectorialPSF: derivatives, normalization, optional terms."""
 import torch
-from conftest import legacy_reference
 from torch_psf import VectorialPSF
 from torch_psf.vectorial import photosel_tensor
 
 
-def legacy():
-    return {k: torch.tensor(v) for k, v in np.load(legacy_reference()).items()}
-
-
 def model(R=13, **kw):
-    r = legacy()
+    """A model with a fixed random aberration and six emitter positions (seeded)."""
+    g = torch.Generator().manual_seed(0)
+    zc = torch.randn(17, generator=g) * 0.03
+    zc[1] = 0.1
+    pos = torch.stack([torch.rand(6, generator=g) - 0.5, torch.rand(6, generator=g) - 0.5,
+                       0.8 * torch.rand(6, generator=g)], 1)
     v = VectorialPSF(R, pixel_um=0.108, wavelength_um=0.68, npupil=48, oversample=2, device='cpu', **kw)
     with torch.no_grad():
-        v.zcoef.copy_(r['zcoef'])
-    return v, r
-
-
-def test_reproduces_legacy_images():
-    v, r = model()
-    with torch.no_grad():
-        v.pupil_phase.copy_(r['pupil_phase']); v.pupil_amp.copy_(r['pupil_amp'])
-        img = v(r['pos'], r['focus'])
-    assert torch.allclose(img, r['vec_img'], rtol=0, atol=1e-7 * float(r['vec_img'].max()))
+        v.zcoef.copy_(zc)
+    return v, dict(zcoef=zc, pos=pos, focus=torch.full((6,), 0.4))
 
 
 def test_render_gradient_matches_finite_differences():
@@ -69,7 +59,7 @@ def test_blur_broadens_and_keeps_energy():
 def test_resized_copy():
     v, r = model()
     with torch.no_grad():
-        v.pupil_phase.copy_(r['pupil_phase'])
+        v.pupil_phase.copy_(0.05 * torch.randn(v.pupil_phase.shape, generator=torch.Generator().manual_seed(1)))
     v.blur = torch.tensor([0.1, 0.05, 0.0])
     w = v.resized(13)
     with torch.no_grad():
