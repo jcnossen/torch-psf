@@ -9,9 +9,10 @@ import { Detector, extractRois } from '../gpu/detect';
 import { SplineLocalizer, splineGrid } from '../gpu/spline_lm';
 import { StopToken, Eta, Progress } from '../core/task';
 import { openSource, MovieSource } from './movie';
-import { fitZernikeKnots, knotsAndJacobian, zScale, checkerboard, KnotGridFull, InsituIter } from './insitu';
+import { fitZernikeKnots, knotsAndJacobian, zScale, checkerboard, renderSpline, KnotGridFull, InsituIter } from './insitu';
 import type { InsituForm } from '../ui/protocol';
 import { fitFreeKnots } from './refine';
+import { QualityRange, QualityRoi, qualityBands, median } from '../report/quality';
 
 export interface InsituReport {
   zcoef: number[]; zcoef_start: number[]; noll: number[]; iterations: number; partial: boolean; seconds: number;
@@ -26,6 +27,9 @@ export interface InsituReport {
   refine: { kept: boolean; heldout_refined: number | null; z_scale_vs_vectorial: number; z_offset_um_vs_vectorial: number; outer: number; seconds: number;
     knots: Float32Array | null } | null;
   grid: { zpad: number };
+  /** ROI quality range for the report (overlap rejection only): the first-pass deviance of every training spot, the
+   *  threshold, and the ~9 ROIs shown with their first-pass fits (the other ROIs stay in the worker). */
+  quality: QualityRange | null;
 }
 
 export const FREE_KNOT_WARNING = 'free knots can improve the held-out likelihood and the repeat precision while warping the z axis ' +
@@ -98,12 +102,13 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   const K0 = fit.K0;
   let nRej = 0, thr: number | null = null, nFit = tr.length, history = fit.history, dFit = dTr;
   let devRep: { rule: string; median: number; scale: number; threshold: number; rejected_fraction: number } | null = null;
+  let quality: QualityRange | null = null;
   if (reject && !tok.stopEarly) {
     // spot_deviance with the first-pass PSF tabulated as a spline (localized afresh: zstarts, 30 iterations)
     const K1a = (await knotsAndJacobian(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um)).knots;
     const loc = new SplineLocalizer(dev, g, K1a);
-    let dv: Float32Array;
-    try { dv = (await loc.localize(dTr, tr.length, { var: rvar })).deviance; } finally { loc.destroy(); }
+    let dv: Float32Array, th1: Float32Array;
+    try { const r1 = await loc.localize(dTr, tr.length, { var: rvar }); dv = r1.deviance; th1 = r1.theta; } finally { loc.destroy(); }
     // deviance_rule 'median' (default): median + k max(1.4826 MAD, median sqrt(2 / P^2)); 'poisson': 1 + k sqrt(2 / P^2)
     const med = median(dv);
     let scale: number;
@@ -116,6 +121,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     devRep.rejected_fraction = nRej / tr.length;
     if (devRep.rejected_fraction > 0.25) warnings.push(`${(100 * devRep.rejected_fraction).toFixed(0)} % of the training spots were rejected as overlaps`);
     if (devRep.median > 1.3) warnings.push(`median deviance per px ${devRep.median.toFixed(2)} (1 for Poisson statistics): check the camera gain / offset / excess noise`);
+    quality = qualitySpots(dTr, dv, th1, thr, K1a, g, (i) => cf[ord[tr[i]]], devRep, k);
     const dKeep = new Float32Array(keep.length * P2);
     keep.forEach((i, q) => dKeep.set(dTr.subarray(i * P2, (i + 1) * P2), q * P2));
     dFit = dKeep;
@@ -159,7 +165,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     seconds: (performance.now() - tFit0) / 1000,
     n_spots: n, n_train: tr.length, n_test: te.length, n_rejected: nRej, deviance_threshold: thr, frames_read: done, frames_total: mv.n, heldout,
     z_scale: zs.scale, z_offset_um: zs.offset, at_limit: lim / Math.max(1, nFit), history, refine, grid: { zpad: 5 },
-    heldout_chi2_median: heldoutChi2, deviance: devRep, frames_requested: nFrames, n_chunks: nChunks,
+    heldout_chi2_median: heldoutChi2, deviance: devRep, frames_requested: nFrames, n_chunks: nChunks, quality,
     warnings: tr.length < form.nspots ? [...warnings, `only ${tr.length} training spots found (${form.nspots} requested)`] : warnings };
 }
 
@@ -174,8 +180,24 @@ export function spreadOrder(n: number): number[] {
   return out;
 }
 
-/** numpy.median (the mean of the two middle values for an even count). */
-function median(a: ArrayLike<number>): number {
-  const s = Float64Array.from(a).sort(), n = s.length;
-  return n % 2 ? s[(n - 1) >> 1] : 0.5 * (s[n / 2 - 1] + s[n / 2]);
+/** The quality range of the training spots: q = first-pass deviance per pixel, cutoff = the rejection threshold; the
+ *  shown ROIs (copies) with the model of their first-pass fit (photons x spline + bg). */
+function qualitySpots(dTr: Float32Array, dv: Float32Array, theta: Float32Array, thr: number, K: Float32Array, g: KnotGridFull,
+  frameOf: (i: number) => number, dr: { rule: string }, k: number): QualityRange {
+  const P = g.roisize, P2 = P * P;
+  const b = qualityBands(dv, (i) => dv[i] < thr);
+  const roi = (i: number): QualityRoi => {
+    const t = theta.subarray(i * 5, i * 5 + 5), psf = renderSpline(K, g, t[0], t[1], t[2]);
+    const model = Float32Array.from(psf, (v) => t[3] * v + t[4]);
+    return { q: dv[i], rank: b.rank[i], data: dTr.slice(i * P2, (i + 1) * P2), model, width: P, height: P,
+      photons: t[3], bg: t[4], z: t[2], label: `training spot ${i}, frame ${frameOf(i)}` };
+  };
+  let nRej = 0; for (const v of dv) if (!(v < thr)) nRej++;
+  const rule = dr.rule === 'poisson' ? `1 + ${k} sqrt(2 / P^2)` : `median + ${k} x max(1.4826 MAD, median sqrt(2 / P^2))`;
+  return {
+    q: Float32Array.from(dv), cutoff: thr, cutoffKind: 'rejection', qLabel: 'Poisson deviance per px (first pass)', unit: 'training spots',
+    notes: [`q = Poisson deviance per px of a training spot after its single-emitter fit with the first-pass PSF (the values the estimator used; about 1 when the model explains the spot, overlapping emitters give more). Model images: that fit.`,
+      `Rejection (overlap rule ${rule}): q >= ${thr.toFixed(3)}; ${nRej} of ${dv.length} spots rejected, the PSF was refitted without them.`],
+    best: b.best.map(roi), lastAccepted: b.lastAccepted.map(roi), firstRejected: b.firstRejected.map(roi),
+  };
 }

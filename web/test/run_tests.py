@@ -88,6 +88,12 @@ def main():
                     print(f"{'PASS' if t['pass'] else 'FAIL'}  {t['name']:40s} {t['ms']:8.0f} ms  {t.get('msg', '')}")
                 ok = all(t['pass'] for t in res['tests']) and len(res['tests']) > 0
                 print('ALL PASS' if ok else 'SOME FAILED')
+                # files a test hands over (window.__testArtifacts: name -> base64), e.g. the PDF report for an external check
+                import base64
+                for name, b64 in (pg.evaluate('window.__testArtifacts || {}') or {}).items():
+                    path = os.path.join(HERE, 'out', os.path.basename(name))
+                    open(path, 'wb').write(base64.b64decode(b64))
+                    print(f'saved {path}')
             if a.screenshot:
                 from screenshot import drive_app
                 drive_app(pg, base, os.path.join(WEB, 'docs'))

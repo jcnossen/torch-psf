@@ -354,6 +354,7 @@ export function startApp(root: HTMLElement) {
 
   // --- the one button: Estimate PSF (then localize the movie with it)
   let startZ: number[] | null = null;
+  let insituForm: InsituForm | null = null, insituRows: [string, string][] = [], beadRows: [string, string][] = [];
   onInsitu = (r) => { insitu = r; fillPresets(); showInsitu(r); if (r.refine?.kept) showRefinedVolume(); else showInsituVolume(); };
   async function runMovie(kind: 'estimate' | 'localize') {
     if (!player) { $('mtext').textContent = 'No movie yet.'; return; }
@@ -363,6 +364,7 @@ export function startApp(root: HTMLElement) {
     if (form.roisize % 2 !== 1 || form.roisize < 5) { $('mtext').textContent = 'The ROI size must be odd (>= 5).'; return; }
     running = 'movie'; busy(true);
     startZ = kind === 'estimate' ? [...psf.zcoef] : null;
+    if (kind === 'estimate') insituForm = form;
     recon = new Recon(player.H, player.W, form.optics.pixel_um); locsByFrame.clear();
     cloud?.start(player.W, player.H, 1000 * form.optics.pixel_um); cloud?.setFilter(n('r-crlb'));
     setNum('r-zlo', n('m-zlo')); setNum('r-zhi', n('m-zhi'));
@@ -429,6 +431,7 @@ export function startApp(root: HTMLElement) {
       rows.push(['vs the demo truth (rms over Noll 5-21)', `start ${rms(r.zcoef_start).toFixed(4)} w, fitted ${rms(r.zcoef).toFixed(4)} w`]);
     }
     $('i-table').innerHTML = rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
+    insituRows = rows;
     drawZernikeBars(r.zcoef, r.zcoef_start);
   }
   function drawZernikeBars(z: number[], start: number[] | null) {
@@ -448,6 +451,20 @@ export function startApp(root: HTMLElement) {
         n_train: insitu.n_train, n_test: insitu.n_test, iterations: insitu.iterations, partial: insitu.partial, heldout_nll_px_diff: insitu.heldout?.diff ?? null,
         z_scale_vs_start: insitu.z_scale, z_range_um: [n('m-zlo'), n('m-zhi')], gain_e_per_adu: n('o-gain'), offset_adu: n('o-offset') } });
     download(JSON.stringify(j, null, 1), 'psf_insitu.json', 'application/json');
+  };
+  $('i-pdf').onclick = async () => {
+    if (!insitu || !insituForm) return;
+    const st = $('i-status');
+    st.textContent = 'writing the report...';
+    try {
+      const R = await import('../report/fromapp'), r = insitu, f = insituForm;
+      const spec: VolumeSpec = { optics: f.optics, npupil: 64, noll: r.noll, zcoef: r.zcoef, nxy: 48, dxy_um: 0.04, zmin: f.zlo, zmax: f.zhi, nz: 41, ze_um: 0, focus_um: f.focus_um };
+      const vol = await call({ type: 'volume', spec });
+      const bytes = await R.makeFitReport(R.insituReportData(r, { form: f, results: insituRows, source: source === 'demo' ? 'simulated demo' : (source as File[]).map((x) => x.name).join(', '),
+        truth: truthZ ? DEFAULT_NOLL.map((j) => truthZ![j] ?? 0) : null, locs: recon?.rows() ?? null, volume: { data: vol.volume, spec } }));
+      download(bytes, 'fit_report.pdf', 'application/pdf');
+      st.textContent = `fit_report.pdf (${(bytes.length / 1024).toFixed(0)} kB)`;
+    } catch (e) { st.textContent = 'error: ' + (e as Error).message; }
   };
   function showLocs(s: MovieSummary) {
     const rows = recon!.rows(), N = rows.length / NCOL;
@@ -516,6 +533,7 @@ export function startApp(root: HTMLElement) {
       ['time: read / fit', `${r.read_seconds.toFixed(2)} s / ${r.fit_seconds.toFixed(2)} s`],
     ];
     $('res-table').innerHTML = rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join('');
+    beadRows = rows;
     drawZernikeSets($('zern') as HTMLCanvasElement, r.noll, [{ z: r.zcoef, color: '#e8a33d', label: 'fitted' }]);
     const bs = $<HTMLSelectElement>('bead');
     bs.innerHTML = r.beads.map((b, k) => `<option value="${k}">bead ${k + 1}${b.heldout ? ' (held out)' : ''}: stack ${b.stack + 1}, corner (${b.x0}, ${b.y0})</option>`).join('');
@@ -562,6 +580,19 @@ export function startApp(root: HTMLElement) {
     $('x-status').textContent = 'computing...';
     try { const r = await call({ type: 'export', kind, params: expParams() }); download(r.bytes, r.name); $('x-status').textContent = `${r.name} (${(r.bytes.length / 1024).toFixed(0)} kB)`; }
     catch (e) { $('x-status').textContent = 'error: ' + (e as Error).message; }
+  };
+  $('x-pdf').onclick = async () => {
+    const r = fitResult!, f = readForm();
+    $('x-status').textContent = 'writing the report...';
+    try {
+      const R = await import('../report/fromapp');
+      const bytes = await R.makeFitReport(R.beadReportData(r, { form: f, results: beadRows, settings: {
+        'stage sign / z step (\u00b5m)': [f.sign, f.dz_um], 'bead centre height (\u00b5m)': f.ze_um, 'camera gain (e/ADU) / offset (ADU)': [f.gain, f.offset],
+        'ROI size (px)': f.roisize, 'pupil sampling / oversampling': [f.npupil, f.oversample], 'fit z-step scale': f.fitDz, 'fit xy drift': f.fitDrift,
+        'held-out beads': f.holdout, 'max. iterations': f.maxIter } }));
+      download(bytes, 'fit_report.pdf', 'application/pdf');
+      $('x-status').textContent = `fit_report.pdf (${(bytes.length / 1024).toFixed(0)} kB)`;
+    } catch (e) { $('x-status').textContent = 'error: ' + (e as Error).message; }
   };
   $('x-knots').onclick = () => viaWorker('knots');
   $('x-tif').onclick = () => viaWorker('tif');
@@ -708,7 +739,8 @@ const TEMPLATE = `
     <canvas id="i-zern" width="460" height="160"></canvas>
     <p class="note">Zernike coefficients (waves rms) by Noll index</p>
     <table id="i-table"></table>
-    <div class="buttons"><button id="i-json">PSF json</button></div>
+    <div class="buttons"><button id="i-json">PSF json</button><button id="i-pdf">fit report (PDF)</button></div>
+    <p id="i-status" class="note"></p>
   </details>
   <details class="panel" data-key="results" open id="p-results" hidden><summary><h2>Bead fit result</h2></summary>
       <table id="res-table"></table>
@@ -727,7 +759,7 @@ const TEMPLATE = `
       <h3>Export</h3>
       <div class="exp">${num('e-focus', 'imaging focus (um)', 0.0, 'any', 'focal-plane position above the coverslip for the exported PSF / spline')}
         ${num('e-roi', 'spline ROI (px)', 13, '1')}${num('e-zmin', 'spline z from (um)', 0)}${num('e-zmax', 'to (um)', 0.8)}</div>
-      <div class="buttons"><button id="x-json">PSF json</button><button id="x-knots">spline knots .npz</button><button id="x-tif">model z-stack .tif</button></div>
+      <div class="buttons"><button id="x-json">PSF json</button><button id="x-knots">spline knots .npz</button><button id="x-tif">model z-stack .tif</button><button id="x-pdf">fit report (PDF)</button></div>
       <p id="x-status" class="note"></p>
   </details>
   </div>
