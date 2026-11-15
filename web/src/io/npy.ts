@@ -1,4 +1,5 @@
 // .npy / .npz read and write (npz: a zip of .npy files; written uncompressed ("stored"), read stored or deflated).
+import { crc32, inflateRaw, writeZipStored, ZipReader } from './zip';
 
 export interface NdArray { dtype: string; shape: number[]; data: Float32Array | Float64Array | Int32Array | Uint32Array | Uint16Array | Uint8Array | Int16Array | Int8Array | BigInt64Array; }
 
@@ -58,93 +59,17 @@ export function writeNpy(data: NdArray['data'], shape: number[]): Uint8Array {
   return out;
 }
 
-// --- zip (stored entries, CRC-32)
-let crcTable: Uint32Array | null = null;
-export function crc32(b: Uint8Array): number {
-  if (!crcTable) {
-    crcTable = new Uint32Array(256);
-    for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crcTable[n] = c >>> 0; }
-  }
-  let c = 0xffffffff;
-  for (let i = 0; i < b.length; i++) c = crcTable[(c ^ b[i]) & 0xff] ^ (c >>> 8);
-  return (c ^ 0xffffffff) >>> 0;
-}
+// --- npz: a zip of .npy members (zip.ts)
+export { crc32, inflateRaw };
 
 export function writeNpz(arrays: Record<string, { data: NdArray['data']; shape: number[] }>): Uint8Array {
-  const enc = new TextEncoder();
-  const parts: Uint8Array[] = [];
-  const central: Uint8Array[] = [];
-  let off = 0;
-  for (const [name, a] of Object.entries(arrays)) {
-    const body = writeNpy(a.data, a.shape);
-    const fn = enc.encode(name + '.npy');
-    const crc = crc32(body);
-    const lh = new Uint8Array(30 + fn.length);
-    const dv = new DataView(lh.buffer);
-    dv.setUint32(0, 0x04034b50, true); dv.setUint16(4, 20, true); dv.setUint16(8, 0, true);
-    dv.setUint32(14, crc, true); dv.setUint32(18, body.length, true); dv.setUint32(22, body.length, true);
-    dv.setUint16(26, fn.length, true); lh.set(fn, 30);
-    const ch = new Uint8Array(46 + fn.length);
-    const cv = new DataView(ch.buffer);
-    cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true);
-    cv.setUint32(16, crc, true); cv.setUint32(20, body.length, true); cv.setUint32(24, body.length, true);
-    cv.setUint16(28, fn.length, true); cv.setUint32(42, off, true); ch.set(fn, 46);
-    parts.push(lh, body); central.push(ch);
-    off += lh.length + body.length;
-  }
-  const csize = central.reduce((s, c) => s + c.length, 0);
-  const end = new Uint8Array(22);
-  const ev = new DataView(end.buffer);
-  ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, central.length, true); ev.setUint16(10, central.length, true);
-  ev.setUint32(12, csize, true); ev.setUint32(16, off, true);
-  const all = [...parts, ...central, end];
-  const out = new Uint8Array(all.reduce((s, c) => s + c.length, 0));
-  let p = 0;
-  for (const c of all) { out.set(c, p); p += c.length; }
-  return out;
+  return writeZipStored(Object.entries(arrays).map(([name, a]) => ({ name: name + '.npy', data: writeNpy(a.data, a.shape) })));
 }
 
-export async function inflateRaw(b: Uint8Array): Promise<Uint8Array> {
-  const ds = new DecompressionStream('deflate-raw');
-  const s = new Blob([b]).stream().pipeThrough(ds);
-  return new Uint8Array(await new Response(s).arrayBuffer());
-}
-
+/** Every .npy member of a zip (name without .npy -> array); other members are ignored. */
 export async function parseNpz(buf: ArrayBuffer): Promise<Record<string, NdArray>> {
-  const b = new Uint8Array(buf);
-  const dv = new DataView(buf);
-  let e = b.length - 22;
-  while (e >= 0 && dv.getUint32(e, true) !== 0x06054b50) e--;
-  if (e < 0) throw new Error('npz: no zip directory');
-  const n = dv.getUint16(e + 10, true);
-  let p = dv.getUint32(e + 16, true);
+  const z = new ZipReader(buf);
   const out: Record<string, NdArray> = {};
-  for (let i = 0; i < n; i++) {
-    const method = dv.getUint16(p + 10, true);
-    let csize = dv.getUint32(p + 20, true);
-    const fnl = dv.getUint16(p + 28, true), exl = dv.getUint16(p + 30, true), cml = dv.getUint16(p + 32, true);
-    let lho = dv.getUint32(p + 42, true);
-    const name = new TextDecoder().decode(b.slice(p + 46, p + 46 + fnl));
-    if (csize === 0xffffffff || lho === 0xffffffff) {   // zip64 extra field
-      let q = p + 46 + fnl;
-      const qe = q + exl;
-      while (q < qe) {
-        const id = dv.getUint16(q, true), sz = dv.getUint16(q + 2, true);
-        if (id === 1) {
-          let r = q + 4;
-          if (dv.getUint32(p + 24, true) === 0xffffffff) r += 8;
-          if (csize === 0xffffffff) { csize = Number(dv.getBigUint64(r, true)); r += 8; }
-          if (lho === 0xffffffff) lho = Number(dv.getBigUint64(r, true));
-        }
-        q += 4 + sz;
-      }
-    }
-    const dstart = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
-    let body = b.slice(dstart, dstart + csize);
-    if (method === 8) body = await inflateRaw(body);
-    else if (method !== 0) throw new Error('npz: unsupported compression ' + method);
-    out[name.replace(/\.npy$/, '')] = parseNpy(body.buffer);
-    p += 46 + fnl + exl + cml;
-  }
+  for (const name of z.names) if (name.endsWith('.npy')) out[name.replace(/\.npy$/, '')] = parseNpy((await z.read(name)).buffer as ArrayBuffer);
   return out;
 }

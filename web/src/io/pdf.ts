@@ -193,8 +193,9 @@ export class PdfDoc {
     return this.addImage(out, d.width, d.height);
   }
 
-  /** The PDF file. compress = false (or no CompressionStream) writes all streams uncompressed. */
-  async save(opts: { compress?: boolean } = {}): Promise<Uint8Array> {
+  /** The PDF file. compress = false (or no CompressionStream) writes all streams uncompressed; creationDate = false
+   *  leaves out /CreationDate (a reproducible file, as in psf.zip). */
+  async save(opts: { compress?: boolean; creationDate?: boolean } = {}): Promise<Uint8Array> {
     const compress = opts.compress ?? true;
     if (!this.pages.length) this.addPage();
     const chunks: Uint8Array[] = [];
@@ -221,7 +222,7 @@ export class PdfDoc {
     const d = new Date(), p2 = (v: number) => String(v).padStart(2, '0');
     const date = `D:${d.getUTCFullYear()}${p2(d.getUTCMonth() + 1)}${p2(d.getUTCDate())}${p2(d.getUTCHours())}${p2(d.getUTCMinutes())}${p2(d.getUTCSeconds())}Z`;
     const inf = this.info;
-    obj(8, `<< /Producer ${textString('torch-psf web pdf.ts')} /CreationDate (${date})${inf.title ? ' /Title ' + textString(inf.title) : ''}` +
+    obj(8, `<< /Producer ${textString('torch-psf web pdf.ts')} ${opts.creationDate === false ? '' : ` /CreationDate (${date})`}${inf.title ? ' /Title ' + textString(inf.title) : ''}` +
       `${inf.author ? ' /Author ' + textString(inf.author) : ''}${inf.subject ? ' /Subject ' + textString(inf.subject) : ''}${inf.creator ? ' /Creator ' + textString(inf.creator) : ''} >>`);
     for (let i = 0; i < nImg; i++) {
       const im = this.images[i];

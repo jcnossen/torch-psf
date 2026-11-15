@@ -40,12 +40,14 @@ CACHE = os.path.join(HERE, '.cache')
 
 
 GEN_SMLM = os.path.join(WEB, '..', 'tests', 'make_web_smlm_reference.py')
+GEN_PSFZIP = os.path.join(WEB, '..', 'tests', 'make_web_psfzip_reference.py')
 
 
 def ensure_references():
     """(Re)generate the reference data in test/.cache/ when missing or when a generator has changed."""
     import hashlib
-    for gen, out, stamp_name in ((GEN, CACHE, 'stamp.txt'), (GEN_SMLM, os.path.join(CACHE, 'smlm'), 'stamp_smlm.txt')):
+    for gen, out, stamp_name in ((GEN, CACHE, 'stamp.txt'), (GEN_SMLM, os.path.join(CACHE, 'smlm'), 'stamp_smlm.txt'),
+                                 (GEN_PSFZIP, os.path.join(CACHE, 'psfzip'), 'stamp_psfzip.txt')):
         h = hashlib.sha256(open(gen, 'rb').read()).hexdigest()
         stamp = os.path.join(CACHE, stamp_name)
         if os.path.exists(stamp) and open(stamp).read().strip() == h:

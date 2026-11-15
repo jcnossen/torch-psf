@@ -4,6 +4,7 @@ import './test_forward';
 import './test_tiff';
 import './test_fit';
 import './test_export';
+import './test_psfzip';
 import './test_pdf';
 import './test_bench';
 import './test_smlm';
