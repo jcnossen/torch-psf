@@ -1,4 +1,4 @@
-"""Command line of torch-psf (the same PSF json schema as the web app's export).
+"""Command line of torch-psf (PSF files are written with PSF.save: the PSF json, plus an .npz when there are arrays).
 
   python -m torch_psf beads stack.tif [stack2.tif ...] --dz-um 0.01 --pixel-um 0.108 --na 1.49 -o psf.json
   python -m torch_psf insitu movie.tif --psf beads.json --focus-um 0.4 -o insitu.json

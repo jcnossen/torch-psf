@@ -1,5 +1,5 @@
 """The interface a downstream localization pipeline builds on (kept stable; no data or code of that pipeline here):
-movie reader interface, Camera with per-pixel maps and ROI corners, load_psf of a plain calibration json, the generic
+movie reader interface, Camera with per-pixel maps and ROI corners, PSF.load of a plain calibration json, the generic
 Levenberg-Marquardt / Fisher functions, the closed-form linear solve and the track fit with a per-group PSF hook
 (e.g. photoselection per illumination-pattern angle)."""
 import numpy as np

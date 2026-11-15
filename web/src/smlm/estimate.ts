@@ -91,7 +91,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   if (tr.length < 50) throw new Error(`only ${tr.length} spots for the fit; lower the threshold or use more frames`);
   const take = (idx: number[]) => { const a = new Float32Array(idx.length * P2); idx.forEach((k, q) => a.set(all.subarray(k * P2, (k + 1) * P2), q * P2)); return a; };
   const dTr = take(tr), dTe = take(te);
-  // 3. fit (route K) on the estimate_psf_insitu grid
+  // 3. fit (route K) on the InSituEstimator grid
   const g = splineGrid(P, form.zlo, form.zhi, 2, 0.04, 5, 3.0) as KnotGridFull;
   const cfg = { ...form.optics, roisize: 0, npupil: form.npupil, oversample: form.oversample, zernike_noll: form.noll };
   const reject = form.rejectOverlap ?? true, k = form.devianceK ?? 3.0;
