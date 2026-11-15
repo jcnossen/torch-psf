@@ -882,7 +882,7 @@ def write_report(psf, meta, stack, z_um, report=None, source=None, max_spots=100
     ctx = _Ctx(psf, meta, stack, z_um, bundle(report, psf), source, max_spots)
     bio = _io.BytesIO()
     written = []
-    with PdfPages(bio, metadata=dict(Title='torch-psf fit report', Creator='torch_psf.psfreport')) as pdf:
+    with PdfPages(bio, metadata=dict(Title='torch-psf fit report', Creator='torch_psf.psfreport', CreationDate=None)) as pdf:
         for name, fn in SECTIONS:
             try:
                 figs = fn(ctx)

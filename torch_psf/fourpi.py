@@ -296,6 +296,8 @@ class FourPiPSF(torch.nn.Module, PSF):
                  blur_px2=float(self.blur_px2.detach()))
         if self.asym:
             s['depth'] = _list(self.depth)
+        s['raw'] = {k: _list(v) if v.dim() else float(v.detach()) for k, v in self.named_parameters()
+                    if not k.startswith(('top.', 'bot.'))}
         return s
 
     @classmethod
@@ -318,6 +320,10 @@ class FourPiPSF(torch.nn.Module, PSF):
             p.phi.copy_(t(s['phi'])); p.tau_logit.copy_(torch.log(torch.tensor(s['tau'])).to(p.dev))
             p.a_log.fill_(math.log(s['a'])); p.gamma_logit.fill_(math.log(s['gamma'] / max(1 - s['gamma'], 1e-6)))
             p.d_bot.copy_(t(s['d_bot'])); p.logblur.fill_(math.log(s['blur_px2']))
+            params = dict(p.named_parameters())
+            for k, v in (s.get('raw') or {}).items():      # the exact parameters (state() of this class)
+                if k in params:
+                    params[k].copy_(torch.as_tensor(v, dtype=params[k].dtype).reshape(params[k].shape))
         return p
 
     # ------------------------------------------------------------------ files
