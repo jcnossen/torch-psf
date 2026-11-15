@@ -7,120 +7,6 @@ before it is merged. Units: px for lateral positions (x = column, y = row, pixel
 relative to its centre pixel), um for z, focus, wavelengths and pixel sizes, photons (e-) for intensities, photons / px
 for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 
-## Changes
-
-### 2026-11-15: multi-channel PSFs (additive; zero-offset 4Pi renders bit-identical)
-
-`MultiChannelPSF` (new, `torch_psf.multichannel`) is the base class of the multi-channel models: `ChannelsPSF` (new;
-independent channels) and `FourPiPSF` / `FourPiSplinePSF` (now its subclasses). The 4Pi models gain `fit`,
-`fit_theta`, `fisher`, `crlb`, `covariance`, `mu_and_jacobian` (before: `NotImplementedError`) and per-channel
-`channel_offsets`; `FourPiSplinePSF.render(..., knots=)`; `PSFZip.multichannel()`. Unchanged: `FourPiPSF.render(pos,
-grad, phi, M)`, `forward`, `expected(theta [N, 5], phi)`, `state` / `from_state` (key `channel_offsets` only when
-nonzero), `to_spline`, the psf.zip layout. See [Multi-channel PSFs](#multi-channel-psfs-torch_psfmultichannel).
-
-### 2026-11-15: module renames (breaking for submodule imports; no aliases; no behaviour change)
-
-The top-level names are unchanged (`from torch_psf import Optics, Camera, photon_transfer, ...`). Only imports from the
-submodules below change; the old module paths are removed (no re-exports).
-
-| old module path | new module path |
-|---|---|
-| `torch_psf.insitu` (package: `beads`, `knots`, `tracks`, `heldout`, `zscale`) | `torch_psf.estimation` (same submodules and names: `torch_psf.estimation.fit_beads`, `torch_psf.estimation.knots.knot_loss`, ...) |
-| `torch_psf.config.Optics` | `torch_psf.optics.Optics` |
-| `torch_psf.config.default_device`, `resolve_device` | `torch_psf.optics.default_device`, `resolve_device` |
-| `torch_psf.config.Camera` | `torch_psf.camera.Camera` |
-| `torch_psf.calibrate.photon_transfer` | `torch_psf.camera.photon_transfer` |
-| `torch_psf.varpro.solve_linear` | `torch_psf.fit.solve_linear` |
-| module layers: config, zernike, fit, varpro -> detect, movie, spots, dataset, calibrate -> psf -> vectorial, spline, gaussian -> io, insitu, simulate -> estimators -> viewer, `__main__` | optics, zernike, fit -> detect, movie, spots, dataset, camera -> psf -> vectorial, spline, gaussian -> io, estimation, simulate -> estimators -> viewer, `__main__` |
-
-### 2026-11-14: class design (breaking; no aliases)
-
-| old | new |
-|---|---|
-| `ConvSplinePSF` | `CubicSplinePSF` (same knot layout and math) |
-| `ConvSplinePSF.from_vectorial(vec, roisize, z_range, ...)` | `vec.to_spline(roisize, z_range, ...)` (any 3D model: `PSF.to_spline`) |
-| `GaussianPSF(..., gamma_um=, d_um=, z_range=)` (astigmatic) | `AstigmaticGaussianPSF(roisize, sigma_px, gamma_um, d_um, z_range)`; `GaussianPSF(roisize, sigma_px)` is 2D only |
-| `torch_psf.localize(psf, rois)` (top level) | `psf.fit(rois)` -> localization table; the low-level `torch_psf.fit.localize` (theta, nll) stays |
-| `torch_psf.crlb(psf, theta)` (top level) | `psf.crlb(theta)`; `torch_psf.fit.crlb` stays |
-| `localize_movie(movie, psf, camera)` | `psf.localize(movie, camera)` |
-| `load_psf(path)` / `save_psf(path, psf)` | `PSF.load(path)` / `psf.save(path)` (implementation: `torch_psf.io.load` / `save`) |
-| `estimate_psf_beads(stacks, dz_um, ...)` | `ZStackEstimator(model, start / optics, camera, ...).estimate(stacks, dz_um)` -> PSF |
-| `estimate_psf_insitu(movie, ...)` | `InSituEstimator(start / optics, camera, ..., refine=False).estimate(movie)` -> PSF |
-| `PSFEstimate` (.psf, .report, .history, .data, .save) | removed: estimators return the PSF; `estimator.report`, `.history`, `.data` |
-| `fit_beads`, `fit_zernike_knots`, `fit_pupil_knots`, `fit_free_knots`, `fit_tracks` return PSFEstimate | they return `dict(psf, report, history, ...)` (same fields as the former `.data`) |
-| `torch_psf.estimate.z_scale` | `torch_psf.insitu.z_scale` |
-| psf.json type `gaussian` with gamma (3D) | type `astig_gaussian`; `gaussian` is 2D |
-| in-situ default pipeline | now rejects spots the single-emitter model does not explain (Poisson deviance per pixel > 1 + 3 sqrt(2 / P^2) after a first pass; refit on the rest; `reject_overlap=True`, `deviance_k=3`) |
-| (new) | `simulate.filament_sites`, `simulate_movie(sites=...)`, `table.to_csv`, `insitu.spot_deviance`, `PSF.expected`, `PSF.fisher`, `n_dims` |
-| `ConvSplinePSF.render(..., grad=True)`: d/dz = 0 outside the knot z range | **math change**: x, y, z are clamped and the derivatives are those at the clamped position (d/dz not zeroed), as the earlier lookup-table code did; inside the range nothing changes |
-| ConvSplinePSF: odd roisize only, fixed knot layout | even roisize allowed; `knots=` with `knot_u0_px` / `knot_z0_um` wraps a stored knot array of another layout (the offset limit is reduced to what it supports) |
-| `load_psf(path)` | `PSF.load(path_or_dict)` (a parsed dict is accepted) |
-| spline knots only from a vectorial model | `PSF.to_spline` works for every model; 2D models with an explicit `z_range` (constant in z) |
-| `fit_tracks(...)` | adds `fix_zernike`, `fix_focus`; `report['nll_per_px']` is the NLL after the last step (`nll_per_px_before_last_step` the value the last step started from) |
-| `fit_beads(...)` | adds `fit_dz_scale` (z-step scale), `fit_height` (bead height), `intensity='bead_x_plane'` (per-plane factors, e.g. bleaching); held-out beads (weight 0) are refitted (position / photons / bg, PSF fixed) before they are scored (`report['heldout_nll_per_px']`); `bead_diameter_um` as before. ZStackEstimator exposes the same options |
-
-### 2026-11-14: Dataset (breaking)
-
-| old | new |
-|---|---|
-| localization table (numpy structured array `table.LOC_DTYPE`: frame, x, y, z, photons, bg, crlb_x / y / z / photons / bg, loglik, chi2, at_limit) | `torch_psf.Dataset` (dict of tensors): `pos` [n, D] px (x, y, z; **z in px** of the lateral pixel size, always), `crlb` [n, D] (same units), `frame`, `n_frames` (1), `id`, `photons`, `bg`, `crlb_photons`, `crlb_bg`, `loglik`, `chi2`, `at_limit`; meta `pixel_nm`, `image_size`, `n_frames`, `method` |
-| `PSF.fit` / `PSF.localize` return the table | they return a Dataset (`fit(..., pixel_um=None)`, `localize(..., pixel_um=None)` override the pixel size used for z) |
-| `table.to_csv` | `Dataset.save('x.csv')` (ThunderSTORM) or `.hdf5` (docs/DATASET_FORMAT.md); `save_picasso` |
-| `CubicSplinePSF` | has `pixel_um` (set by `VectorialPSF.to_spline`, stored in the spline file) |
-| (follow-up) z unit | one unit per Dataset: z in px of the lateral pixel size, always. Every model has `pixel_um` (constructor argument of CubicSplinePSF, `from_zstack`, GaussianPSF, AstigmaticGaussianPSF; VectorialPSF has it anyway); fitting / localizing a 3D model without one raises ValueError (pass `pixel_um=` to fit / localize or set it on the model) |
-
-### 2026-11-14: follow-ups (defaults changed: marked **default**)
-
-| old | new |
-|---|---|
-| `VectorialPSF.to(device)` returned a resized copy; `CubicSplinePSF.to` / the Gaussians returned new objects | `.to(device)` has torch.nn.Module semantics for every PSF: in place, returns self (VectorialPSF: also dtype, `.cuda()`, `.cpu()`; the optional blur / dipM / dipw / diat tensors move along). A copy of another ROI size: `resized()` |
-| `fit_beads(drift=True)`: linear drift per stack (px per plane, lr 1e-4) | **default** `drift_order=3`: cubic polynomial in t = plane index / half the stack (t in [-1, 1]), no constant term, lr 2e-3; `drift_order=1` = linear. Returned `drift` is [nstacks, order, 2] px (coefficients). On six real bead stacks (19 beads, 151 planes, one stack held out) the cubic drift gave a lower training NLL (-82.40 vs -82.27 per px) and a lower held-out NLL (-52.58 vs -52.56 per px) than the linear one |
-| held-out beads refitted: position / photons / bg | also the drift of their stack |
-| bead size and height independent | with `bead_diameter_um` and `fit_height` the sphere diameter is tied to 2 x the fitted centre height (a bead lies on the coverslip); without fit_height the diameter is fixed and the starting / fixed height is `emitter_z_um`; the result reports `bead_diameter_um` |
-| `ZStackEstimator(...)` | adds `emitter_z_um` (starting bead centre height; **default** bead_diameter_um / 2, else 0), `fit_na`, `fit_n_med`, `drift_order` (**default** 3, passed to fit_beads; drift is on by default as before) |
-| `Dataset.estimate_drift` stored `meta['drift_info']` = dict(method, n, version) | stores `meta['drift']` = the run record: method, entry point (`dme.dme_prior.dme_prior_estimate`), version, package path, parameters (n_frames, dims, n_rows, time, row rule), `dme_info` (the choices DME made), result per axis (ptp_px, rms_px); `return_info=True` also returns it. DME is found through `DME_PATH` (a checkout) if set, else the installed package. `set_drift(info=)` stores into `meta['drift']` |
-
-### 2026-11-14: read noise in the in-situ likelihoods (no default number changes)
-
-| old | new |
-|---|---|
-| `InSituEstimator` fitted, scored and rejected spots with the plain Poisson likelihood: the camera read noise (`Spots.var` = `Camera.variance`) was ignored in the Zernike / pupil fits, the deviance rejection, the free-knot refinement, the held-out NLL and the held-out chi2 fit | all of them use the read-noise variance (scalar readnoise^2 / excess_noise^2 in photons^2, or per-pixel sCMOS maps cropped per ROI) when a camera with read noise is given; the d + var ~ Poisson(mu + var) likelihood of `fit.poisson_nll` / `lm_poisson`. On `simulate_reference_movie` (gain 0.5, read noise 1.5 e-) the held-out chi2 of the true PSF goes from 1.11 to 1.02 and the median deviance from 1.14 to 1.05. Report numbers that change: `heldout_chi2_median`, `deviance` (median / threshold / rejected fraction), absolute held-out NLL values (the likelihood includes var; differences between models are comparable as before). No option or default value changed |
-| `fit_zernike_knots`, `fit_pupil_knots`, `fit_free_knots`, `vectorial_gradient` | take `var=None` (scalar or [N, P, P], aligned with the ROIs) |
-| `PSF.fit(camera=...)` / `PSF.localize(camera=...)` | unchanged: they already used `Camera.variance` (localize through `Spots.var`); chi2 ~1.00-1.02 on the reference movie |
-
-The bead fit (`fit_beads` / `ZStackEstimator`) still uses the plain Poisson likelihood (bright beads: read noise negligible).
-
-### 2026-11-14: real-data follow-ups (defaults changed: marked **default**)
-
-| old | new |
-|---|---|
-| `TiffMovie`: frames = TIFF pages; an ImageJ TIFF > 4 GB (one IFD, frames contiguous) read as 1 frame; part files found by replacing the first '.tif' anywhere in the path | ImageJ / single-IFD files: frame count and memory map from the first image series; multi-page files (Andor SOLIS): one frame per page, read through one strided memory map when the page data are evenly spaced uncompressed blocks (else page by page); parts = `<base>_X1<ext>`, ... next to the file. Same pixels, faster reads |
-| `extract_spots(...)` read chunks from the start of the range | adds `sample='sequential'` (as before) or `'spread'` (bit-reversed chunk order: with `max_spots` the chunks read are spread over the whole range; spots returned in frame order); `Spots.frame_ranges` = the chunks read; an empty result is an empty Spots |
-| `InSituEstimator`: spots from the first 500-frame chunks of the range until 2 (nspots + nheldout) | **default** `sample='spread'`, `chunk=50`: spots from chunks spread over the whole range. report: `frames_requested`, `frames_read`, `frame_span`, `n_chunks`, `spots_per_frame`; a warning when fewer training spots than nspots were found |
-| overlap rejection above 1 + deviance_k sqrt(2 / P^2) (exact Poisson only); `report['deviance_threshold']` | **default** `deviance_rule='median'`: rejected above median + deviance_k x max(1.4826 MAD, median sqrt(2 / P^2)) (robust to a gain error or EMCCD statistics, which scale all deviances); `'poisson'` = the earlier rule. `report['deviance']` = rule, median, scale, threshold, rejected_fraction, quantiles; warnings when more than `warn_rejected` (0.25) are rejected or the median deviance is > 1.3 |
-| `Camera(type='emccd')`: a label; the excess noise had to be folded into the gain by hand | `Camera.excess_noise` (F^2; default 1 = no change): `to_photons` divides by it and `variance` by its square, so fits / CRLB / deviances use Poisson-equivalent photons (= photoelectrons / F^2; EMCCD: true gain with excess_noise=2, or gain / 2 with 1) |
-| (new) | `torch_psf.calibrate.photon_transfer(movie, frames, nblocks, block, mask_radius, threshold, offset_adu, excess_noise)` (also `tp.photon_transfer`) -> (Camera, report): offset and gain from background pixels (spots masked by detection, 4-sigma clip, consecutive-frame differences) |
-| no gain check in the reports | `chi2_median` (median over spots of the mean (d - mu)^2 / (mu + var) per pixel; ~1 if the camera model is right) in `Dataset.meta` of `PSF.fit` / `PSF.localize`, `fit_beads` / `ZStackEstimator.report` (`chi2_median`, `heldout_chi2_median`), `InSituEstimator.report['heldout_chi2_median']` (held-out spots fitted with the returned PSF; warning outside 0.7 .. 1.4) |
-| `InSituEstimator` start from optics: Noll 5..21, npupil 64 fixed | `zernike_indices`, `npupil`, `oversample_pupil` (as ZStackEstimator) |
-| focus / wavelength by hand | `InSituEstimator(scan_focus_um=[...], scan_wavelength_um=[...], scan_iters=None)`: each combination fitted (scan_iters, default iters / 2), the lowest held-out NLL is used; `report['scan']`; warning when the best value is at the edge |
-| `PSF.localize` passed only detection options to fit; progress per 5000-frame block | `iters`, `zstarts`, `batch` passed to `fit`; progress after every chunk |
-| `CubicSplinePSF.to_spline(other roisize)` raised | `CubicSplinePSF.resized(roisize)` (the same knots, shared; a larger ROI than the knots cover lowers xy_limit) and `to_spline(roisize)` = `resized` |
-| `est.data['spline']` = the spline of the vectorial fit, also when the refined spline was returned | **changed**: `data['spline']` = the spline of the returned PSF (refined if kept); `data['vectorial_spline']` = the vectorial fit's spline; `data['psf']` = the returned PSF; `data['vectorial']` as before |
-| `psf.save` stored the provenance passed to it | `PSF.provenance` (dict): the estimators set it to `{estimator, settings, report}` (ZStackEstimator: `{estimator, model, dz_um, report}`); `save(provenance=None)` writes it, `PSF.load` reads it back. The command line no longer passes `provenance=dict(report=...)` itself (the file still has `provenance.report`) |
-| `Dataset.frc`: full complex128 FFTs of the whole field | float32 histograms and real FFTs (same result to 1e-8; ~4x less memory); `region=(x0, y0, x1, y1)` px and `mask` (rows) options |
-| (new) | `Dataset.load_smlm(path, pixel_nm, frame_base=1, offset_px=0.5)` and `Dataset.load('x.smlm', pixel_nm=...)`: ShareLoc .smlm (binary table; ThunderSTORM conventions) |
-| `detect_spots(noise='mad')`: one noise level per chunk | adds `noise='mad_frame'` (per-frame MAD; for movies whose density / background changes within a chunk) |
-
-Not done: partial ROIs at the image border (detections closer than (P - 1) / 2 + 2 px to the edge are still dropped), an image-plane blur term in the in-situ fit.
-
-### 2026-11-14: imports (no behaviour change; files identical)
-
-| old | new |
-|---|---|
-| `PSF.load` / `torch_psf.io` imported the model classes | registry: each model class sets `type_name` (its psf.json `type`: `vectorial`, `spline`, `gaussian`, `astig_gaussian`) and is registered by `PSF.__init_subclass__`; `PSF.load` looks the type up (`PSF._registry`). Each class writes / reads its own parameters (`_file_dict`, `_from_file`); `psf.save` writes the common part. `torch_psf/__init__` imports all models, so they are registered whenever torch_psf (or any submodule) is imported. A new model class: set `type_name` and implement the two methods |
-| `torch_psf.io.save` / `load` / `load_spline_source` / `load_camera` held the implementation | thin wrappers of `psf.save`, `PSF.load`, `CubicSplinePSF.load_source`, `Camera.from_json` (new) |
-| function-level imports | all imports at module top, in layers (each importing only from earlier ones): config, zernike, fit, varpro -> detect, movie, spots, dataset -> psf -> spline -> vectorial, gaussian -> io, insitu, simulate -> estimators -> viewer, `__main__`. Still imported where used: the optional dme (`Dataset.estimate_drift`) and scikit-image (viewer meshes) |
-
 ## Dataset (`torch_psf.dataset.Dataset`; format: docs/DATASET_FORMAT.md)
 
 `Dataset(fields, meta=None, drift=None, drift_applied=False)`, `Dataset.from_arrays(pos, frame, crlb, photons, bg,
@@ -207,11 +93,11 @@ PSF
   chi2, at_limit.
 - **4Pi**: `FourPiPSF` channel offsets are the same image shift of both arms (a phase ramp on both pupil fields, in
   each arm's frame), computed with one pupil evaluation per spot and one image transform per channel; with all
-  offsets zero the earlier single evaluation runs (renders bit-identical). `to_spline` bakes the offsets into the
-  tables (the spline's own offsets are zero); `FourPiSplinePSF.channel_offsets` shift each channel's table
-  evaluation instead (stored in its torch-psf json, not in psf.zip, which refuses them). The earlier calls keep their
-  meaning: `render(pos, grad, phi, M)`, `forward(pos, M, phi_extra, intensity, bg)`, `expected(theta [N, 5], phi)`
-  (one background).
+  offsets zero all channels share one evaluation. `to_spline` bakes the offsets into the tables (the spline's own
+  offsets are zero); `FourPiSplinePSF.channel_offsets` shift each channel's table evaluation instead (stored in its
+  torch-psf json, not in psf.zip, which refuses them). Besides the multi-channel interface: `render(pos, grad, phi,
+  M)`, `forward(pos, M, phi_extra, intensity, bg)`; `expected(theta)` takes the multi-channel theta
+  [N, 4 + C + 1].
 - **psf.zip**: `PSFZip.read(path).multichannel()` = the coupled model, or a `ChannelsPSF` of the channel models with
   their `intensity_ratio` (offsets zero; the channel `mapping` gives per-spot offsets). The format is unchanged.
 

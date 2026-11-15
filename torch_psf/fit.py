@@ -96,19 +96,6 @@ def lm_poisson(model_fn, d, th0, var=None, weight=None, clamp=None, fixed=(), it
     return th, nll
 
 
-def fd_model(f, eps):
-    """model_fn for lm_poisson from a model without derivatives: f(theta [N, p]) -> mu [N, ...]; central differences
-    with steps eps [p]."""
-    def model_fn(th):
-        cols = []
-        for p in range(th.shape[1]):
-            tp, tm = th.clone(), th.clone()
-            tp[:, p] += eps[p]; tm[:, p] -= eps[p]
-            cols.append((f(tp) - f(tm)) / (2 * eps[p]))
-        return f(th), torch.stack(cols, 1)
-    return model_fn
-
-
 def initial_theta(d, z=0.0, bg_quantile=0.2, min_photons=50.0):
     """Starting values (x = y = 0, z, photons = sum above the background, bg = a low quantile of the patch)."""
     bg = d.flatten(1).quantile(bg_quantile, 1)

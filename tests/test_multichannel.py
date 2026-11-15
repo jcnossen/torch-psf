@@ -1,13 +1,11 @@
-"""MultiChannelPSF / ChannelsPSF and the 4Pi models as multi-channel PSFs: bit identity with the earlier 4Pi code at zero
-offsets, the channel offsets, the joint Jacobian, fits, the CRLB, to_spline with offsets, state / file round trips.
+"""MultiChannelPSF / ChannelsPSF and the 4Pi models as multi-channel PSFs: reference values of the 4Pi renders, the
+channel offsets, the joint Jacobian, fits, the CRLB, to_spline with offsets, state / file round trips.
 CPU only and small (CI)."""
 import math
 import pytest
 import torch
 from torch_psf import (PSF, MultiChannelPSF, ChannelsPSF, FourPiPSF, FourPiSplinePSF, AstigmaticGaussianPSF,
                        GaussianPSF, VectorialPSF)
-from torch_psf.fourpi import _quad
-from torch_psf.vectorial import gauss_blur_os, dipole_tensor
 
 DEV = 'cpu'
 POS = torch.tensor([[0.2, -0.4, 0.05], [-0.7, 0.3, -0.12], [0.0, 0.0, 0.2]])
@@ -38,165 +36,9 @@ def gauss_pair(offsets=((0.0, 0.0), (0.6, -0.4)), ratio=(1.0, 0.8), R=13):
                        channel_offsets=offsets, intensity_ratio=ratio)
 
 
-# ====================================================================================== the 4Pi code of master 32bc538
-def _m_arm_fields(self, arm, pos, sgn_mu):
-    P, kz_med, kz_imm, kx, ky = arm.pupil_fields()
-    B = pos.shape[0]
-    W = (torch.einsum('j,jnm->nm', arm.zcoef, arm.Z) + arm.pupil_phase) * (2 * math.pi)
-    x = pos[:, 0, None, None] * self.pixel_um
-    y = pos[:, 1, None, None] * self.pixel_um
-    z = pos[:, 2, None, None]
-    if self.depth is None:
-        zph = torch.exp(1j * kz_med * z)
-    else:
-        dep = self.depth[0] if arm is self.top else self.depth[1]
-        if self.zmode == 'emitter':
-            zph = torch.exp(1j * kz_med * (dep + z).clamp(min=0.0))
-        else:
-            zph = torch.exp(1j * kz_med * dep.clamp(min=0.0)) * torch.exp(-1j * kz_imm * z)
-    Pb = P[None] * (torch.exp(1j * (W[None] - kx * x - ky * y)) * zph)[:, None]
-    ns = (self.roisize + 2 * self.BLUR_PAD) * self.os
-    u = (torch.arange(ns, device=P.device) - (ns - 1) / 2) / self.os * self.pixel_um
-    Fx = torch.exp(1j * u[:, None] * kx[0][None, :])
-    Fy = torch.exp(1j * u[:, None] * ky[:, 0][None, :])
-    E = (Fy @ Pb.to(torch.complex64) @ Fx.T).reshape(B, 3, 2, ns, ns)
-    E = E * sgn_mu.to(E.real.dtype)[None, :, None, None, None]
-    dk = (kx[0, 1] - kx[0, 0]) * (ky[1, 0] - ky[0, 0])
-    energy = (P.real ** 2 + P.imag ** 2).sum() / 3 * dk / (2 * math.pi) ** 2
-    return E * (dk / (2 * math.pi) ** 2), energy
-
-
-def _m_fields(self, pos):
-    dev = pos.device
-    Et, energy = _m_arm_fields(self, self.top, pos, torch.ones(3, device=dev))
-    pb = pos + self.d_bot[None]
-    if self.mirror == 'y':
-        pb = torch.stack([pb[:, 0], -pb[:, 1], -pb[:, 2]], 1)
-        Eb, _ = _m_arm_fields(self, self.bot, pb, torch.tensor([1.0, -1.0, -1.0], device=dev))
-        Eb = torch.flip(Eb, dims=[-2])
-        Eb = torch.stack([Eb[:, :, 0], -Eb[:, :, 1]], 2)
-    else:
-        pb = torch.stack([-pb[:, 0], pb[:, 1], -pb[:, 2]], 1)
-        Eb, _ = _m_arm_fields(self, self.bot, pb, torch.tensor([-1.0, 1.0, -1.0], device=dev))
-        Eb = torch.flip(Eb, dims=[-1])
-        Eb = torch.stack([-Eb[:, :, 0], Eb[:, :, 1]], 2)
-    return Et, Eb, energy
-
-
-def _m_forward(self, pos, M=None, phi_extra=None, intensity=None, bg=None):
-    B, dev = pos.shape[0], pos.device
-    Et, Eb, energy = _m_fields(self, pos)
-    a, g = self.a, self.gamma
-    Mt = dipole_tensor(M if M is not None else self.dipM, None, dev)
-    if Mt is None:
-        Mt = torch.eye(3, device=dev) / 3
-    if Mt.dim() == 2:
-        Mt = Mt[None].expand(B, 3, 3)
-    Mc = Mt.to(Et.real.dtype)
-    C = self.n_channels
-    out = []
-    for c in range(C):
-        p = int(self.pol[c])
-        et, eb = Et[:, :, p], Eb[:, :, p]
-        ph = torch.as_tensor(self.phi[c] + (phi_extra if phi_extra is not None else 0.0), device=dev)
-        e_ph = torch.exp(1j * ph.to(torch.float32))
-        e_ph = e_ph.reshape(-1, 1, 1, 1) if e_ph.dim() > 0 else e_ph
-        out.append(_quad(Mc, et, et) + a * a * _quad(Mc, eb, eb) + 2 * a * g * _quad(Mc, et, eb * e_ph))
-    I = torch.stack(out, 1) / (1 + a * a)
-    bv = self.blur_px2
-    I = gauss_blur_os(I.reshape(B * C, *I.shape[-2:]), torch.stack([bv, bv, torch.zeros_like(bv)]), self.os,
-                      self.BLUR_PAD)
-    R, o = self.roisize, self.os
-    I = I.reshape(B, C, R, o, R, o).mean((3, 5)) * self.pixel_um ** 2 / energy
-    I = I * self.tau[None, :, None, None] * 2
-    if intensity is not None:
-        I = I * intensity[:, None, None, None]
-    if bg is not None:
-        I = I + (bg[:, :, None, None] if bg.dim() == 2 else bg[:, None, None, None])
-    return I
-
-
-def _m_render(self, pos, grad=False, phi=None, M=None):
-    Phi = torch.zeros(len(pos), device=pos.device) if phi is None else torch.as_tensor(phi, device=pos.device,
-                                                                                       dtype=torch.float32)
-    if not grad:
-        return _m_forward(self, pos, M=M, phi_extra=Phi)
-    fn = lambda p, f: _m_forward(self, p, M=M, phi_extra=f)
-    out, val = [], None
-    for k in range(4):
-        tp, tf = torch.zeros_like(pos), torch.zeros_like(Phi)
-        if k < 3:
-            tp[:, k] = 1
-        else:
-            tf[:] = 1
-        v, d = torch.func.jvp(fn, (pos, Phi), (tp, tf))
-        val = v if val is None else val
-        out.append(d)
-    return (val, *out)
-
-
-def _m_spline_render(spl, pos, grad=False, phi=None):
-    Phi = torch.zeros(len(pos)) if phi is None else phi
-    cP, sP = torch.cos(Phi)[:, None, None, None], torch.sin(Phi)[:, None, None, None]
-    out = [[L.render(pos, grad) for L in row] for row in spl.luts]
-    if not grad:
-        inc, cr, ci = torch.stack([torch.stack(r, 1) for r in out])
-        return inc + cP * cr - sP * ci
-    v, dx, dy, dz = [torch.stack([torch.stack([o[k] for o in r], 1) for r in out]) for k in range(4)]
-    f = lambda c: c[0] + cP * c[1] - sP * c[2]
-    return f(v), f(dx), f(dy), f(dz), -sP * v[1] - cP * v[2]
-
-
-def _m_knots(p, P, zr, oversample, dz_um, zpad):
-    """FourPiPSF.to_spline knots of master (with the master forward)"""
-    from torch_psf.spline import CubicSplinePSF
-    geo = CubicSplinePSF(P, zr, oversample=oversample, dz_um=dz_um, zpad=zpad, xy_limit=P / 2 + 1, device='cpu')
-    big = p if p.roisize == geo.Pl else p.resized(geo.Pl)
-    S, Pl, nz = oversample, geo.Pl, geo.nz
-    zs = geo.z0 + dz_um * torch.arange(nz, dtype=torch.float64)
-    a = torch.arange(S, dtype=torch.float64) / S
-    Zg, B, A = torch.meshgrid(zs, a, a, indexing='ij')
-    pos = torch.stack([A.reshape(-1), B.reshape(-1), Zg.reshape(-1)], 1).float()
-    with torch.no_grad():
-        comps = [torch.cat([_m_forward(big, q, phi_extra=torch.full((len(q),), ph)) for q in pos.split(128)])
-                 for ph in (0.0, math.pi, 0.5 * math.pi)]
-    g0, gpi, g90 = comps
-    inc, cr, ci = 0.5 * (g0 + gpi), 0.5 * (g0 - gpi), 0.5 * (g0 + gpi) - g90
-    C = p.n_channels
-    return torch.stack([comp.reshape(nz, S, S, C, Pl, Pl).flip(1).flip(2).permute(3, 0, 4, 1, 5, 2)
-                        .reshape(C, nz, Pl * S, Pl * S) for comp in (inc, cr, ci)])
-
-
-def test_zero_offsets_bit_identical_to_master():
-    th5 = torch.cat([POS, torch.tensor([[1000.0], [2000.0], [500.0]]), torch.tensor([[5.0], [3.0], [1.0]])], 1)
-    for i, kw in enumerate((dict(), dict(asym=True, mirror='x', zmode='stage'), dict(asym=True))):
-        p = fourpi(**kw)
-        if i == 2:
-            p.dipM = torch.diag(torch.tensor([0.4, 0.4, 0.2]))
-        with torch.no_grad():
-            assert torch.equal(p(POS, phi_extra=PHI), _m_forward(p, POS, phi_extra=PHI))
-            I, bg = torch.tensor([100.0, 200.0, 300.0]), torch.tensor([1.0, 2.0, 3.0])
-            assert torch.equal(p(POS, phi_extra=PHI, intensity=I, bg=bg), _m_forward(p, POS, phi_extra=PHI, intensity=I, bg=bg))
-            assert torch.equal(p.render(POS, phi=PHI), _m_render(p, POS, phi=PHI))
-            assert torch.equal(p.render(POS), _m_render(p, POS))
-            assert torch.equal(p.expected(th5, phi=PHI),
-                               th5[:, 3, None, None, None] * _m_render(p, POS, phi=PHI) + th5[:, 4, None, None, None])
-            # explicit zero offsets take the same path
-            assert torch.equal(p.render(POS, phi=PHI, offsets=torch.zeros(3, 4, 2)), _m_render(p, POS, phi=PHI))
-        for a, b in zip(p.render(POS, grad=True, phi=PHI), _m_render(p, POS, grad=True, phi=PHI)):
-            assert torch.equal(a, b)
-    p = fourpi(R=11, npupil=24)
-    spl = p.to_spline(11, (-0.2, 0.2), oversample=2, dz_um=0.03, zpad=2)
-    assert torch.equal(spl.knots, _m_knots(p, 11, (-0.2, 0.2), 2, 0.03, 2))
-    assert torch.equal(spl.render(POS, phi=PHI), _m_spline_render(spl, POS, phi=PHI))
-    for a, b in zip(spl.render(POS, grad=True, phi=PHI), _m_spline_render(spl, POS, True, PHI)):
-        assert torch.equal(a, b)
-    # the multi-channel path of the spline (render_channels, used by fit) is bit-identical too at zero offsets
-    assert torch.equal(spl.render_channels(POS[:, None].expand(3, 4, 3), PHI[:, None]), spl.render(POS, phi=PHI))
-
-
+# ====================================================================================== 4Pi reference values
 def test_fourpi_reference_values():
-    """a few numbers of the master renders (any platform, loose tolerance: guards both copies of the formula)"""
+    """a few numbers of the 4Pi renders of master 32bc538 (any platform, loose tolerance)"""
     p = fourpi(R=9, npupil=16)
     with torch.no_grad():
         s = p.render(POS, phi=PHI).sum((2, 3))

@@ -1,21 +1,7 @@
-"""CubicSplinePSF: legacy reproduction, accuracy against the vectorial model, derivatives, knot gradient, z-stacks."""
-import os
-import numpy as np
+"""CubicSplinePSF: accuracy against the vectorial model, derivatives, knot gradient, z-stacks."""
 import torch
-from conftest import DEV, legacy_reference
+from conftest import DEV
 from torch_psf import VectorialPSF, CubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF
-
-
-def test_reproduces_legacy_spline():
-    r = {k: torch.tensor(v) for k, v in np.load(legacy_reference()).items()}
-    s = CubicSplinePSF(13, (0.0, 0.8), oversample=2, dz_um=0.05, zpad=2, xy_limit=3.0, device='cpu')
-    big = VectorialPSF(s.Pl, pixel_um=0.108, wavelength_um=0.68, npupil=48, oversample=2, device='cpu', focus_um=0.4)
-    with torch.no_grad():
-        big.zcoef.copy_(r['zcoef'])
-    s.knots = s.knots_from_vectorial(big)
-    out = s.render(r['pos'], grad=True)
-    for a, k in zip(out, ('spline_img', 'spline_dx', 'spline_dy', 'spline_dz')):
-        assert torch.allclose(a, r[k], rtol=0, atol=1e-6 * float(r[k].abs().max())), k
 
 
 def test_spline_matches_vectorial():

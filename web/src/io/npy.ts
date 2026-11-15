@@ -1,5 +1,5 @@
-// .npy / .npz read and write (npz: a zip of .npy files; written uncompressed ("stored"), read stored or deflated).
-import { crc32, inflateRaw, writeZipStored, ZipReader } from './zip';
+// .npy read and write, .npz read (npz: a zip of .npy files, stored or deflated).
+import { crc32, inflateRaw, ZipReader } from './zip';
 
 export interface NdArray { dtype: string; shape: number[]; data: Float32Array | Float64Array | Int32Array | Uint32Array | Uint16Array | Uint8Array | Int16Array | Int8Array | BigInt64Array; }
 
@@ -61,10 +61,6 @@ export function writeNpy(data: NdArray['data'], shape: number[]): Uint8Array {
 
 // --- npz: a zip of .npy members (zip.ts)
 export { crc32, inflateRaw };
-
-export function writeNpz(arrays: Record<string, { data: NdArray['data']; shape: number[] }>): Uint8Array {
-  return writeZipStored(Object.entries(arrays).map(([name, a]) => ({ name: name + '.npy', data: writeNpy(a.data, a.shape) })));
-}
 
 /** Every .npy member of a zip (name without .npy -> array); other members are ignored. */
 export async function parseNpz(buf: ArrayBuffer): Promise<Record<string, NdArray>> {

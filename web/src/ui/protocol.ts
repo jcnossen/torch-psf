@@ -43,8 +43,7 @@ export interface InsituForm extends MovieForm {
   nspots: number; nheldout: number; iters: number; tile: number;
   rejectOverlap?: boolean; devianceK?: number;            // torch_psf InSituEstimator(reject_overlap=True, deviance_k=3)
   refine?: boolean; refineOuter?: number;                 // InSituEstimator(refine=False, refine_outer=12)
-  sample?: 'spread' | 'sequential'; sampleChunk?: number;  // InSituEstimator(sample='spread', chunk=50)
-  devianceRule?: 'median' | 'poisson';                    // InSituEstimator(deviance_rule='median')
+  sampleChunk?: number;                                   // InSituEstimator(chunk=50)
 }
 /** torch_psf.camera.photon_transfer keywords (smlm/camera.ts): nblocks 8, block 400 (reduced when block x H x W is too
  *  large for the browser: CameraCalibration.block_used), mask_radius 4, threshold 4, offset_adu none (given: the
@@ -64,6 +63,6 @@ export type Req =
   | { id: number; type: 'camera'; source: MovieSourceSpec; opts: CameraOpts }
   | { id: number; type: 'demo' }
   | { id: number; type: 'movieHeader'; files: File[] }
-  | { id: number; type: 'export'; kind: 'knots' | 'tif'; params: { focus_um: number; splineRoi: number; zmax: number; zmin: number } }
+  | { id: number; type: 'export' }                         // the bead-fit model z-stack (.tif)
   | { id: number; type: 'psfzip'; req: PsfZipRequest }
   | { type: 'stop'; signal: 'enough' | 'abort' };

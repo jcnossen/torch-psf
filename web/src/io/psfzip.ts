@@ -1,12 +1,10 @@
 // psf.zip (format 'torch-psf', version 0.2.0; docs/PSF_FORMAT.md, Python: torch_psf/psfzip.py): psf.json with one
 // channel (a vectorial model, or a spline with its vectorial model as `source`), the .npy arrays it references,
-// zstack.tif (ImageJ hyperstack ZCYX, float32), preview.png (stored) and fit_report.pdf. Reading: a psf.zip, a 0.2.0
-// psf.json, a 0.1.0 PSF json or a plain calibration json -> the vectorial model (channel 0, or the `source` of a
-// spline channel); only the .npy members that psf.json references are parsed, dtypes parseNpy cannot read are skipped.
+// zstack.tif (ImageJ hyperstack ZCYX, float32), preview.png (stored) and fit_report.pdf. Reading: a psf.zip -> the
+// vectorial model (channel 0, or the `source` of a spline channel); only the .npy members that psf.json references are parsed, dtypes parseNpy cannot read are skipped.
 import type { Optics } from '../psf/vectorial';
 import type { SplineModel, VectorialModel, ZStack } from '../psf/zstack';
 import { NdArray, parseNpy, writeNpy } from './npy';
-import { readPsfJson } from './psfjson';
 import { pyFloat, writeImageJHyperstack } from './imagejtif';
 import { ZipReader, isZip, writeZip } from './zip';
 
@@ -125,7 +123,7 @@ export async function writePsfZip(p: PsfZipParts): Promise<{ bytes: Uint8Array; 
 
 // ------------------------------------------------------------------------------------------------ reading
 export interface PsfFileInfo {
-  kind: 'psf.zip' | 'psf.json 0.2' | 'psf json 0.1' | 'calibration json';
+  kind: 'psf.zip';
   optics: Optics; noll: number[]; zcoef: number[]; focus_um: number;
   roisize?: number; npupil?: number; oversample?: number; z_range_um?: [number, number] | null;
   channelType: string;                  // type of channel 0 ('vectorial', 'spline', ...)
@@ -220,13 +218,9 @@ export async function readPsfZip(buf: ArrayBuffer | Uint8Array, opts: { cameraEx
   return { kind: 'psf.zip', ...psfFromMeta(meta, arrays, notes) };
 }
 
-/** A PSF file the app can start from: psf.zip, 0.2 psf.json, 0.1.0 PSF json or a calibration json. */
+/** A PSF file the app can start from: a psf.zip. */
 export async function readPsfFile(f: Blob | ArrayBuffer | Uint8Array): Promise<PsfFileInfo> {
   const b = f instanceof Uint8Array ? f : new Uint8Array(f instanceof ArrayBuffer ? f : await f.arrayBuffer());
-  if (isZip(b)) return readPsfZip(b);
-  const text = new TextDecoder().decode(b), j = JSON.parse(text);
-  if (j && Array.isArray(j.channels)) return { kind: 'psf.json 0.2', ...psfFromMeta(j, {}, ['psf.json without its zip: no arrays']) };
-  const r = readPsfJson(text);
-  return { kind: j.format === FORMAT ? 'psf json 0.1' : 'calibration json', ...r, channelType: j.type ?? 'vectorial', roisize: j.roisize, npupil: j.npupil, oversample: j.oversample,
-    z_range_um: j.z_range_um ?? null, camera: j.camera ?? null, arrays: {}, notes: [] };
+  if (!isZip(b)) throw new Error('not a zip file');
+  return readPsfZip(b);
 }

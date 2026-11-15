@@ -1,5 +1,5 @@
 // In-situ PSF estimation from SMLM spots by the knot route: a port of torch_psf.estimation.fit_zernike_knots (route 'K')
-// and torch_psf.pipeline.estimate_psf_insitu. Per iteration: knots of the CubicSplinePSF from the vectorial model at
+// and torch_psf InSituEstimator. Per iteration: knots of the CubicSplinePSF from the vectorial model at
 // the current Zernikes (with the Zernike derivatives of every knot image, for the vector-Jacobian product), emitter
 // parameters by Levenberg-Marquardt on the spline (zstarts and 30 iterations the first time, 3 afterwards), the NLL
 // gradient on the knots, its VJP to the Zernikes, an Adam step (lr 2e-3, betas 0.9 / 0.999, eps 1e-12).

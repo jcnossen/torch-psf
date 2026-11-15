@@ -115,7 +115,7 @@ json.dump(dict(params=r['params'], optics=dict(pixel_um=0.108, NA=1.49, waveleng
 print('insitu: spots', rep.get('n_spots'), 'train', rep.get('n_train'), 'rejected', rep.get('n_rejected'), 'final', np.round(psf_fit.zcoef.tolist(), 4).tolist())
 print('heldout', rep.get('heldout'), 'z_scale', rep.get('z_scale'), 'at_limit', rep.get('at_limit'))
 
-# the gradient at the start: spline grid of estimate_psf_insitu (zpad 5), theta by localize, knot gradient, VJP
+# the gradient at the start: spline grid of InSituEstimator (zpad 5), theta by localize, knot gradient, VJP
 spl5 = CubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 big = start.resized(spl5.Pl)
 pf = emitter_height_pos_fn(0.4)

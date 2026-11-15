@@ -5,8 +5,6 @@ import { VecEngine } from './gpu/ops';
 import { TiffMovie, partIndex } from './io/tiff';
 import { findBeads, extractRoi, BeadFitter, Stack, Bead } from './fit/beads';
 import { StopToken, AbortError, Eta } from './core/task';
-import { buildKnots } from './psf/spline';
-import { writeNpz } from './io/npy';
 import { writeTiffStack } from './io/tifwrite';
 import { DEFAULT_NOLL, VectorialConfig } from './psf/vectorial';
 import type { Req, VolumeSpec, FitForm, FitSummary } from './ui/protocol';
@@ -132,21 +130,12 @@ async function fit(files: File[], form: FitForm): Promise<{ summary: FitSummary;
   return { summary, transfer: [vol.buffer] };
 }
 
-async function exportFile(kind: 'knots' | 'tif', p: { focus_um: number; splineRoi: number; zmax: number; zmin: number }): Promise<{ bytes: Uint8Array; name: string }> {
+/** The bead-fit model z-stack (.tif): the normalized PSF (x = y = 0) at the planes of the first stack. */
+async function exportZstack(): Promise<{ bytes: Uint8Array; name: string }> {
   if (!fitter || !lastForm) throw new Error('no fit result');
   const { device } = await getDevice();
   const f = lastForm, st = fitter.st;
   const cfg: VectorialConfig = { ...f.optics, roisize: f.roisize, npupil: f.npupil, oversample: 3, zernike_noll: DEFAULT_NOLL };
-  if (kind === 'knots') {
-    const k = await buildKnots(device, cfg, st.zcoef, { roisize: p.splineRoi, focus_um: p.focus_um, zmax: p.zmax, zmin: p.zmin, S: 2, hz: 0.04, zpad: 3, xmax: 3 });
-    const sc = (v: number) => ({ data: new Float64Array([v]), shape: [] as number[] });
-    const bytes = writeNpz({
-      knots: { data: k.knots, shape: [k.nz, k.nv, k.nu] }, z0: sc(k.z0), hz: sc(k.hz), S: { data: new Int32Array([k.S]), shape: [] },
-      u0: sc(k.u0), roisize: { data: new Int32Array([k.roisize]), shape: [] }, xmax: sc(k.xmax), focus_um: sc(k.focus_um),
-      zernike_noll: { data: Int32Array.from(DEFAULT_NOLL), shape: [DEFAULT_NOLL.length] }, zernike_waves: { data: Float64Array.from(st.zcoef), shape: [st.zcoef.length] },
-    });
-    return { bytes, name: 'psf_spline.npz' };
-  }
   // model z-stack: the normalized PSF (x = y = 0) at the planes of the first stack, z step with the fitted scale
   const eng = new VecEngine(device, { ...cfg, oversample: f.oversample }, []);
   try {
@@ -208,7 +197,7 @@ ctx.onmessage = async (ev: MessageEvent<Req>) => {
       const copy = d.adu.slice();
       post({ id: m.id, type: 'result', adu: copy, T: d.T, H: d.H, W: d.W, zernike: d.zernike, optics: d.optics, params: d.params, n_events: d.truth.length / 5 }, [copy.buffer]);
     } else if (m.type === 'export') {
-      const r = await exportFile(m.kind, m.params);
+      const r = await exportZstack();
       post({ id: m.id, type: 'result', bytes: r.bytes, name: r.name }, [r.bytes.buffer]);
     } else if (m.type === 'psfzip') {
       const { device } = await getDevice();

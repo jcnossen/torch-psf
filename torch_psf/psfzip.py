@@ -12,7 +12,7 @@ One zip holds every channel of a setup:
     psf = PSF.load('psf.zip')                               # single-channel or coupled (4Pi) file
     pz = PSFZip.read('psf.zip'); pz.channels[1].to_ref(x, y); pz.channels[0].model_at(x, y)
 
-The reader turns a single-channel (or coupled) zip into the 0.1.0 json dict of that model (read_legacy), so every
+The reader turns a single-channel (or coupled) zip into the 0.1.0 json dict of that model (legacy), so every
 model class reads it with its own _from_file; this module therefore needs no model class (the registry of PSF
 supplies them) and PSF.read_file imports it lazily.
 """
@@ -268,12 +268,6 @@ def _rebuild_knots(meta, g, device=None):
     sp = src_psf.to_spline(roisize=g['roisize'], z_range=tuple(g['z_range']), oversample=g['oversample'],
                            dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'])
     return sp.knots.detach().cpu().numpy().astype(np.float32)
-
-
-def read_legacy(path, channel=None):
-    """PSF.read_file for a psf.zip."""
-    meta, arrays = read_zip(path)
-    return legacy(meta, arrays, channel)
 
 
 def camera_from_meta(meta, arrays):

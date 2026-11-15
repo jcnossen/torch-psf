@@ -596,23 +596,10 @@ def _quality(ctx):
     tr = np.asarray(d.get('train', []))
     if sp is None or not dvr or not len(tr):
         return None
-    if d.get('deviance') is not None and d.get('deviance_psf') is not None:
-        q, psf, th = np.asarray(d['deviance'], float), d['deviance_psf'], d.get('deviance_theta')
-        how, first = 'the first-fit PSF (the values the estimator used)', True
-    elif d.get('vectorial_spline') is not None:                         # older data: recomputed with the final fit
-        tr = tr[:ctx.max_spots]
-        psf, th = d['vectorial_spline'], None
-        how = (f'the final vectorial PSF (recomputed for {len(tr)} training spots: the first-fit values were not '
-               f'stored)')
-        q, first = None, False
-    else:
+    if d.get('deviance') is None or d.get('deviance_psf') is None or d.get('deviance_theta') is None:
         return None
+    q, psf, th = np.asarray(d['deviance'], float), d['deviance_psf'], d['deviance_theta']
     ii = torch.as_tensor(tr, device=sp.rois.device)
-    var = sp.var[ii] if (sp.var is not None and sp.var.dim() > 0) else (
-        None if sp.var is None or float(sp.var) == 0 else sp.var)
-    if q is None:
-        q, th = spot_dev(psf, sp.rois[ii], var)
-        q = np.asarray(q, float)
     thr = float(dvr['threshold'])
     acc = q < thr
     o = np.argsort(q, kind='stable')
@@ -621,13 +608,7 @@ def _quality(ctx):
     bands = _bands(q, acc)
     sel = np.concatenate(list(bands.values())).astype(int)
     st = torch.as_tensor(sel, device=ii.device)
-    if th is None:
-        r_, v_ = sp.rois[ii[st]], var
-        if v_ is not None and v_.dim() > 0:
-            v_ = v_[st]
-        _, th_sel = spot_dev(psf, r_, v_)
-    else:
-        th_sel = torch.as_tensor(_np(th)[sel])
+    th_sel = torch.as_tensor(_np(th)[sel])
     dev_ = getattr(psf, 'dev', None) or th_sel.device
     th_sel = th_sel.to(dev_)
     mu = _np(psf.expected(th_sel))
@@ -643,13 +624,14 @@ def _quality(ctx):
                     bg=float(thn[j, 4]), z=float(thn[j, 2]) if has_z else None,
                     label=f'training spot {int(i)}' + ('' if fr is None else f', frame {int(fr[tr[i]])}'))
     rule = (f'median + {dvr.get("k")} x max(1.4826 MAD, median sqrt(2 / P^2))' if dvr.get('rule') == 'median' else
-            f'1 + {dvr.get("k")} sqrt(2 / P^2)' if dvr.get('rule') == 'poisson' else f'rule {dvr.get("rule")}')
-    notes = [f'q = Poisson deviance per px of a training spot after its single-emitter fit with {how} (about 1 when '
-             f'the model explains the spot; overlapping emitters give more). Model images: that fit.',
+            f'rule {dvr.get("rule")}')
+    notes = [f'q = Poisson deviance per px of a training spot after its single-emitter fit with the first-fit PSF (the '
+             f'values the estimator used; about 1 when the model explains the spot; overlapping emitters give more). '
+             f'Model images: that fit.',
              f'Rejection (InSituEstimator overlap rule {rule}): q >= {thr:.3f}; {int((~acc).sum())} of {len(q)} '
              f'spots rejected, the PSF was refitted without them.']
     return dict(q=q, accepted=acc, cutoff=thr, kind='rejection', notes=notes, unit='training spots',
-                qlabel='Poisson deviance per px (first fit)' if first else 'Poisson deviance per px (final fit)', rows={b: [row(i) for i in ix] for b, ix in bands.items()})
+                qlabel='Poisson deviance per px (first fit)', rows={b: [row(i) for i in ix] for b, ix in bands.items()})
 
 
 def spot_dev(psf, rois, var):

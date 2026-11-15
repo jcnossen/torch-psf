@@ -1,7 +1,7 @@
-// Exports: spline knots vs torch_psf CubicSplinePSF (knots_from_vectorial), npz round trip, float32 TIFF round trip.
+// Exports: spline knots vs torch_psf CubicSplinePSF (knots_from_vectorial), float32 TIFF round trip.
 import { test, check, fetchBuf, fetchJson, maxAbs, maxAbsDiff } from './harness';
 import { getDevice } from '../src/gpu/device';
-import { parseNpz, writeNpz } from '../src/io/npy';
+import { parseNpz } from '../src/io/npy';
 import { buildKnots } from '../src/psf/spline';
 import { writeTiffStack } from '../src/io/tifwrite';
 import { TiffMovie } from '../src/io/tiff';
@@ -21,11 +21,8 @@ test('export: spline knots vs torch_psf CubicSplinePSF', async () => {
   return `knots ${m.shape.join('x')}, max rel err ${e.toExponential(1)}`;
 });
 
-test('export: npz and float32 TIFF round trips', async () => {
+test('export: float32 TIFF round trip', async () => {
   const a = new Float32Array(3 * 5 * 7).map((_, i) => Math.sin(i) * 100);
-  const z = writeNpz({ knots: { data: a, shape: [3, 5, 7] }, hz: { data: new Float64Array([0.04]), shape: [] } });
-  const r = await parseNpz(z.buffer);
-  check(r.knots.shape.join() === '3,5,7' && maxAbsDiff(r.knots.data as Float32Array, 0, a, 0, a.length) === 0 && r.hz.data[0] === 0.04, 'npz round trip');
   const t = writeTiffStack(a, 3, 5, 7);
   const mv = await TiffMovie.open([new File([t], 'm.tif')]);
   const b = await mv.read(0, 3);

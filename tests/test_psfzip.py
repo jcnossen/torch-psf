@@ -156,7 +156,9 @@ def test_report_zstack_estimator(tmp_path):
 
 
 def test_report_insitu_style_data(tmp_path):
-    """the InSituEstimator report / history / data keys (spots refitted with data['spline'])"""
+    """the InSituEstimator report / history / data keys (spots refitted with data['spline']; the first-fit overlap
+    test: deviance, deviance_theta, deviance_psf)"""
+    from torch_psf.estimation import spot_deviance
     g = AstigmaticGaussianPSF(11, (1.2, 1.4), 0.2, 0.4, z_range=(-0.4, 0.4), device=DEV, pixel_um=0.1)
     n = 60
     gen = torch.Generator().manual_seed(1)
@@ -171,8 +173,9 @@ def test_report_insitu_style_data(tmp_path):
                                                                           heldout_nll_per_px=2.0)),
                warnings=['example warning'])
     hist = [dict(stage='vectorial', it=i, value=100.0 / (i + 1), seconds=0.1 * i) for i in range(10)]
+    dv, th1 = spot_deviance(g, rois[:40])
     data = dict(spots=sp, train=np.arange(40), test=np.arange(40, 60), spline=g, vectorial_spline=g,
-                vectorial=vectorial())
+                vectorial=vectorial(), deviance=dv, deviance_theta=th1, deviance_psf=g)
     secs = save(tmp_path / 'p.zip', g, report=dict(report=rep, history=hist, data=data))['report']['sections']
     assert secs == ['summary', 'spots', 'quality', 'fit_stats', 'convergence', 'aberrations', 'pupil', 'psf',
                     'examples', 'residuals']

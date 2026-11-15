@@ -61,9 +61,6 @@ def test_deviance_rule():
     thr, med, scale = est._deviance_threshold(dv)
     assert abs(med - 1.2) < 0.05 and 1.4 < thr < 1.75
     assert 0.08 < (dv >= thr).mean() < 0.13            # ~ the overlaps only
-    est.deviance_rule = 'poisson'
-    thr_p, _, _ = est._deviance_threshold(dv)
-    assert abs(thr_p - (1 + 3 * np.sqrt(2 / 225))) < 1e-9 and (dv >= thr_p).mean() > 0.2
 
 
 def test_camera_excess_noise():

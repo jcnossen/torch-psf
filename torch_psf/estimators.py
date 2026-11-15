@@ -265,7 +265,7 @@ class InSituEstimator(Estimator):
     """In-situ PSF from an SMLM movie: detection, spot ROIs sampled over the whole frame range, a checkerboard split
     into training / held-out spots, the vectorial Zernike fit by the knot route (torch_psf.estimation.fit_zernike_knots;
     method 'pupil' adds free pupil maps), rejection of spots the single-emitter model does not explain (overlapping
-    emitters; see deviance_rule), an optional scan of the focus and / or the wavelength by held-out NLL, an optional
+    emitters; see Overlap rejection), an optional scan of the focus and / or the wavelength by held-out NLL, an optional
     cubic-spline refinement (refine=True: free knots regularised towards the vectorial spline, kept only if the
     held-out NLL improves), the held-out comparison and a chi2 check of the camera model.
 
@@ -274,13 +274,11 @@ class InSituEstimator(Estimator):
     (default: the start's focus_um). camera: Camera / calibration json / None (movie in photons). roisize (px),
     z_range (um): emitter heights. nspots / nheldout: training / held-out spots (tile px checkerboard).
     Spots: the movie is read in chunks of `chunk` frames in a bit-reversed order over the requested range
-    (sample='spread', torch_psf.spots.extract_spots) until 2 (nspots + nheldout) spots are found, so they come from the
-    whole range, not from its start (sample='sequential': the earlier behaviour).
-    Overlap rejection (reject_overlap): Poisson deviance per pixel of each training spot after the first fit;
-    deviance_rule 'median' (default): rejected above median + deviance_k x max(1.4826 MAD, median sqrt(2 / P^2)),
-    robust to a camera gain error or EMCCD statistics, which scale all deviances; 'poisson': above
-    1 + deviance_k sqrt(2 / P^2) (exact Poisson statistics only). A warning is added when more than warn_rejected of
-    the spots are rejected.
+    (torch_psf.spots.extract_spots(sample='spread')) until 2 (nspots + nheldout) spots are found, so they come from the
+    whole range, not from its start.
+    Overlap rejection (reject_overlap): Poisson deviance per pixel of each training spot after the first fit; rejected
+    above median + deviance_k x max(1.4826 MAD, median sqrt(2 / P^2)), robust to a camera gain error or EMCCD
+    statistics, which scale all deviances. A warning is added when more than warn_rejected of the spots are rejected.
     Focus / wavelength (for 2D data the focus is weakly determined): scan_focus_um and / or scan_wavelength_um = lists of
     values; each combination is fitted (scan_iters iterations) and the one with the lowest held-out NLL is used.
     Spline grid: oversample, dz_um, xy_limit (>= 3 px recommended). Detection: threshold, isolation, detect_kw.
@@ -297,23 +295,21 @@ class InSituEstimator(Estimator):
 
     def __init__(self, start=None, optics=None, camera=None, focus_um=None, roisize=15, z_range=(0.0, 0.8),
                  nspots=8000, nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0,
-                 deviance_rule='median', warn_rejected=0.25, refine=False, refine_lam_ref=3000.0,
+                 warn_rejected=0.25, refine=False, refine_lam_ref=3000.0,
                  refine_lam_s=1000.0, refine_outer=12, oversample=2, dz_um=0.04, xy_limit=3.0, threshold=6.0,
-                 isolation=None, tile=16, chunk=50, sample='spread', zernike_indices=tuple(range(5, 22)), npupil=64,
+                 isolation=None, tile=16, chunk=50, zernike_indices=tuple(range(5, 22)), npupil=64,
                  oversample_pupil=3, scan_focus_um=None, scan_wavelength_um=None, scan_iters=None, device=None,
                  progress=None, stop=None, **detect_kw):
         super().__init__(device, progress, stop)
         self.start, self.optics, self.camera, self.focus_um = start, optics, _camera(camera), focus_um
         self.roisize, self.z_range, self.nspots, self.nheldout = roisize, tuple(z_range), nspots, nheldout
         self.method, self.iters, self.reject_overlap, self.deviance_k = method, iters, reject_overlap, deviance_k
-        if deviance_rule not in ('median', 'poisson'):
-            raise ValueError(f"deviance_rule must be 'median' or 'poisson', not {deviance_rule!r}")
-        self.deviance_rule, self.warn_rejected = deviance_rule, warn_rejected
+        self.warn_rejected = warn_rejected
         self.refine, self.refine_lam_ref, self.refine_lam_s, self.refine_outer = (refine, refine_lam_ref,
                                                                                    refine_lam_s, refine_outer)
         self.grid = dict(oversample=oversample, dz_um=dz_um, zpad=5, xy_limit=xy_limit)
         self.threshold, self.isolation, self.tile, self.detect_kw = threshold, isolation, tile, detect_kw
-        self.chunk, self.sample = chunk, sample
+        self.chunk = chunk
         self.zernike_indices, self.npupil, self.oversample_pupil = tuple(zernike_indices), npupil, oversample_pupil
         self.scan_focus_um, self.scan_wavelength_um, self.scan_iters = scan_focus_um, scan_wavelength_um, scan_iters
 
@@ -340,9 +336,6 @@ class InSituEstimator(Estimator):
 
     def _deviance_threshold(self, dv):
         P2 = self.roisize ** 2
-        if self.deviance_rule == 'poisson':
-            med, scale = float(np.median(dv)), float(np.sqrt(2.0 / P2))
-            return 1 + self.deviance_k * scale, med, scale
         med = float(np.median(dv))
         mad = 1.4826 * float(np.median(np.abs(dv - med)))
         scale = max(mad, med * float(np.sqrt(2.0 / P2)))
@@ -358,7 +351,7 @@ class InSituEstimator(Estimator):
         vec0.z_range = zr
         mv = open_movie(movie)
         f0, f1 = (0, mv.n) if frames is None else (int(frames[0]), int(frames[1]))
-        sp = extract_spots(mv, R, self.camera, (f0, f1), chunk=self.chunk, device=self.dev, sample=self.sample,
+        sp = extract_spots(mv, R, self.camera, (f0, f1), chunk=self.chunk, device=self.dev, sample='spread',
                            max_spots=2 * (self.nspots + self.nheldout), threshold=self.threshold,
                            isolation=self.isolation, **self.detect_kw)
         warnings = []
@@ -419,7 +412,7 @@ class InSituEstimator(Estimator):
             keep = dv < thr
             n_rej = int((~keep).sum())
             frac = n_rej / max(len(dv), 1)
-            self.report['deviance'] = dict(rule=self.deviance_rule, k=self.deviance_k, median=med, scale=scale,
+            self.report['deviance'] = dict(rule='median', k=self.deviance_k, median=med, scale=scale,
                                            threshold=float(thr), rejected_fraction=frac,
                                            quantiles=dict(zip(('q05', 'q25', 'q50', 'q75', 'q95'),
                                                               np.quantile(dv, [.05, .25, .5, .75, .95]).tolist())))
@@ -477,7 +470,7 @@ class InSituEstimator(Estimator):
 
     def _settings(self):
         keep = ('focus_um', 'roisize', 'z_range', 'nspots', 'nheldout', 'method', 'iters', 'reject_overlap',
-                'deviance_k', 'deviance_rule', 'refine', 'threshold', 'isolation', 'tile', 'chunk', 'sample',
+                'deviance_k', 'refine', 'threshold', 'isolation', 'tile', 'chunk',
                 'zernike_indices', 'npupil', 'scan_focus_um', 'scan_wavelength_um', 'scan_iters')
         d = {k: getattr(self, k) for k in keep}
         d['camera'] = None if self.camera is None else self.camera.to_dict()

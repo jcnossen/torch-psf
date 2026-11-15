@@ -236,11 +236,11 @@ class PSF:
     @staticmethod
     def read_file(path):
         """(parsed json, arrays or None, type name) of a PSF json, a psf.zip (single-channel or coupled; the 0.1.0
-        dict of its model, torch_psf.psfzip.read_legacy) or a plain calibration json (path or parsed dict; array files
+        dict of its model, torch_psf.psfzip.legacy) or a plain calibration json (path or parsed dict; array files
         of a dict are resolved against the current directory)."""
         from torch_psf import psfzip             # lazy: psfzip imports this module
         if psfzip.is_psf_zip(path):
-            return psfzip.read_legacy(path)
+            return psfzip.legacy(*psfzip.read_zip(path))
         if isinstance(path, dict):
             d, base = path, '.'
         else:
