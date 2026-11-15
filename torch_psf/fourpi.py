@@ -21,8 +21,7 @@ Geometry (both arms focused at z = 0):
                different camera regions): channel c shows the emitter at (x + dx_c, y + dy_c, z), i.e. the same image
                shift of both arms (a phase ramp on both pupil fields).
 Multi-channel interface (torch_psf.multichannel.MultiChannelPSF): theta = [x, y, z, I, bg_0 .. bg_{C-1}, phi], phi =
-the global 4Pi phase Phi; fit / fisher / crlb on all channels jointly. expected(theta [N, 5], phi) (one background)
-keeps its earlier meaning.
+the global 4Pi phase Phi; fit / fisher / crlb on all channels jointly.
 Normalization: with tau_c = 1 / C, balanced polarizations and the interference averaged out, the sum over the channels
 integrates to ~1 for an in-focus, aberration-free emitter (the top arm's pupil energy is the reference).
 
@@ -156,10 +155,6 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
     def asym(self):
         """True for the asymmetric-arm geometry (depth_um set)."""
         return self.depth is not None
-
-    @property
-    def R(self):
-        return self.roisize
 
     @property
     def tau(self):
@@ -352,7 +347,7 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
 
     def _render_c(self, pos_c, Phi, grad, M):
         if not self.channel_offsets.requires_grad and bool((pos_c[:, 1:] == pos_c[:, :1]).all()):
-            # one position for all channels: one evaluation (the earlier code path)
+            # one position for all channels: one evaluation
             pos = pos_c[:, 0]
             fn = lambda p, f: self._forward_ref(p, M=M, phi_extra=f)
         else:
@@ -371,18 +366,6 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
             val = v if val is None else val
             out.append(d)
         return (val, *out)
-
-    def expected(self, theta, phi=None, offsets=None):
-        """Expected images [N, C, P, P]. theta [N, 5] = (x, y, z, photons, bg) with one background and the phase as
-        phi [N] (default 0): photons * render + bg; or theta [N, 4 + C + 1] = (x, y, z, photons, bg_0 .. bg_{C-1}, phi)
-        (MultiChannelPSF.expected; phi must then be None)."""
-        theta = torch.as_tensor(theta, dtype=torch.float32, device=self.dev)
-        if theta.shape[-1] == 5:
-            return (theta[:, 3, None, None, None] * self.render(theta[:, :3], phi=phi, offsets=offsets)
-                    + theta[:, 4, None, None, None])
-        if phi is not None:
-            raise ValueError('phi is a column of theta [N, 4 + C + 1]; pass phi only with theta [N, 5]')
-        return MultiChannelPSF.expected(self, theta, offsets)
 
     def default_extra_starts(self):
         """Four phase starts for the multi-start fit: 0, pi / 2, pi, 3 pi / 2."""
@@ -597,17 +580,6 @@ class FourPiSplinePSF(MultiChannelPSF):
         f = lambda c: c[0] + cP * c[1] - sP * c[2]
         return f(v), f(dx), f(dy), f(dz), -sP * v[1] - cP * v[2]
 
-    def evaluate_ch(self, pos, Phi, c):
-        """One channel: [N, P, P]."""
-        inc, cr, ci = (row[c].render(pos) for row in self.luts)
-        return inc + torch.cos(Phi)[:, None, None] * cr - torch.sin(Phi)[:, None, None] * ci
-
-    def evaluate_ch_grad(self, pos, Phi, c):
-        """One channel with derivatives: [value, d/dx, d/dy, d/dz, d/dPhi], each [N, P, P]."""
-        cP, sP = torch.cos(Phi)[:, None, None], torch.sin(Phi)[:, None, None]
-        a, b, e = (row[c].render(pos, True) for row in self.luts)
-        return [a[k] + cP * b[k] - sP * e[k] for k in range(4)] + [-sP * b[0] - cP * e[0]]
-
     def render(self, pos, grad=False, phi=None, knots=None, offsets=None):
         """[N, C, P, P] at pos [N, 3] and phi [N] (default 0), with the channel offsets (+ per-spot offsets
         [N, C, 2] px); grad: (value, d/dx, d/dy, d/dz, d/dphi). knots: optional [3, C, nz, n, n] used instead of the
@@ -638,15 +610,6 @@ class FourPiSplinePSF(MultiChannelPSF):
         out = tuple(torch.stack(v, 1) for v in vals)
         return out if grad else out[0]
 
-    def __call__(self, pos, phi=None, intensity=None, bg=None, offsets=None):
-        out = self.render(pos, phi=phi, offsets=offsets)
-        if intensity is not None:
-            out = out * intensity[:, None, None, None]
-        if bg is not None:
-            out = out + (bg[:, :, None, None] if bg.dim() == 2 else bg[:, None, None, None])
-        return out
-
-    expected = FourPiPSF.expected
     default_extra_starts = FourPiPSF.default_extra_starts
     wrap_extra = FourPiPSF.wrap_extra
 

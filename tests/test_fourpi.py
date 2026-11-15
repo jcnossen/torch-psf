@@ -116,9 +116,9 @@ def test_spline_matches_model_and_phase():
     with torch.no_grad():
         a, b = spl.render(pk, phi=Phi[:2]), p(pk, phi_extra=Phi[:2])
     assert float((a - b).abs().max() / b.abs().max()) < 1e-5
-    # one-channel and component views agree with evaluate
+    # the per-channel path (render_channels) and the component view agree with evaluate
     v = spl.evaluate(pos, Phi)
-    assert torch.allclose(spl.evaluate_ch(pos, Phi, 2), v[:, 2], atol=1e-7)
+    assert torch.allclose(spl.render_channels(pos[:, None].expand(3, 4, 3), Phi[:, None]), v, atol=1e-7)
     inc, cr, ci = spl.components(pos)
     assert torch.allclose(inc + torch.cos(Phi)[:, None, None, None] * cr - torch.sin(Phi)[:, None, None, None] * ci, v, atol=1e-7)
 
@@ -138,9 +138,9 @@ def test_spline_gradients_and_file(tmp_path):
             f1 += e; f2 -= e
         fd = (spl.render(p1, phi=f1) - spl.render(p2, phi=f2)) / (2 * e)
         assert float((fd - out[k + 1]).abs().max() / out[k + 1].abs().max()) < 5e-3, k
-    g = spl.evaluate_ch_grad(pos, Phi, 1)
+    g = spl.render_channels(pos[:, None].expand(2, 4, 3), Phi[:, None], grad=True)
     for k in range(5):
-        assert torch.allclose(g[k], out[k][:, 1], atol=1e-7)
+        assert torch.allclose(g[k], out[k], atol=1e-7)
     spl.save(tmp_path / 'spl.json')
     s2 = PSF.load(tmp_path / 'spl.json', device=DEV)
     assert isinstance(s2, FourPiSplinePSF) and s2.source_state['meta']['R'] == 11
