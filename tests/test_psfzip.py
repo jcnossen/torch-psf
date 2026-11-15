@@ -320,3 +320,32 @@ def test_grid_mapping_and_names(tmp_path):
     assert np.allclose(x0, [6.5, 12.5]) and np.allclose(y0, [0.0, 20.0])
     x, y = c.from_ref(x0, y0)
     assert np.allclose(x, [4.0, 10.0], atol=1e-3) and np.allclose(y, [0.0, 19.0], atol=1e-2)
+
+
+def test_convert_calibration_lossless(tmp_path):
+    """A SIMCODE-style calibration json (PSF keys at the top level, camera, pattern, sample metadata) converts to a
+    psf.zip with the same PSF and camera; the other keys go to provenance / patterns / acquisition."""
+    import json
+    import torch_psf as tp
+    from torch_psf import psfzip
+    calib = dict(pixelsize_um=0.1083, wavelength_um=0.68, NA=1.49, n_imm=1.518, n_med=1.33,
+                 zernike_noll=[5, 6, 7, 8, 11], zernike_waves=[0.02, -0.03, 0.01, 0.0, 0.015], focus_um=0.2,
+                 camera=dict(gain_e_per_adu=0.43, offset_adu=104.0, readnoise_e=1.2),
+                 pattern=dict(pitch_nm=[224.1, 224.3], depth=[0.92, 0.95]), pattern_note='two angles',
+                 tirf_depth_um=0.12, emitter_z_median_um=0.05, emitter_z_range_um=[0.0, 0.4],
+                 source='test calibration', psf_v2=dict(script='psf_refit.py'))
+    p = tmp_path / 'calib_test.json'
+    p.write_text(json.dumps(calib))
+    out = tmp_path / 'calib_test.psf.zip'
+    meta = psfzip.convert_calibration(p, out, roisize=11, device='cpu')
+    assert meta['acquisition'] == dict(tirf_depth_um=0.12, emitter_z_median_um=0.05, emitter_z_range_um=[0.0, 0.4])
+    assert meta['patterns']['type'] == 'simcode' and meta['patterns']['pitch_nm'] == [224.1, 224.3]
+    assert meta['patterns']['note'] == 'two angles'
+    assert meta['provenance']['source'] == 'test calibration'
+    assert meta['provenance']['converted_from']['json'] == calib
+    z = psfzip.PSFZip.read(out, roisize=11, device='cpu')
+    assert z.acquisition['tirf_depth_um'] == 0.12
+    a = tp.PSF.load(str(p), roisize=11, device='cpu')
+    th = torch.tensor([[0.3, -0.2, 0.1, 1000.0, 5.0]])
+    assert torch.allclose(a.expected(th), z.psf.expected(th), atol=1e-6)
+    assert abs(z.camera.gain_e_per_adu - 0.43) < 1e-9 and abs(z.camera.offset_adu - 104.0) < 1e-9

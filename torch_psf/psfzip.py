@@ -319,7 +319,8 @@ class Channel:
 @dataclasses.dataclass
 class PSFZip:
     """A read psf.zip: meta (psf.json), psf (the model of a single-channel or coupled file; None for independent
-    multi-channel files), channels (list of Channel), camera, arrays ({member: numpy})."""
+    multi-channel files), channels (list of Channel), camera, arrays ({member: numpy}); acquisition (meta['acquisition'],
+    {} when absent) and patterns (meta['patterns'] or None) as properties."""
     meta: dict
     psf: object
     channels: list
@@ -357,6 +358,14 @@ class PSFZip:
 
     def channel(self, c):
         return self.channels[_channel_index(self.meta, c)]
+
+    @property
+    def acquisition(self):
+        return self.meta.get('acquisition') or {}
+
+    @property
+    def patterns(self):
+        return self.meta.get('patterns')
 
 
 # ====================================================================================================== rendering
@@ -588,7 +597,7 @@ def _optics_of(chans, sb, models):
 
 
 def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, zstack_px=1.0, zstack_planes=25,
-             channels=None, patterns=None, report_max_spots=1000):
+             channels=None, patterns=None, acquisition=None, report_max_spots=1000):
     """Write a psf.zip (docs/PSF_FORMAT.md). Returns the psf.json dict.
 
     psf: a PSF model, or a list of independent channel models (biplane, multicolour, dual view: one zip for the
@@ -600,7 +609,9 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     provenance['report'] when present, else the model pages only. zstack_px: sample spacing of zstack.tif (camera px,
     1 / integer), zstack_planes: planes over the z range. channels: per-channel extras, a list of dicts (name,
     mapping, field, crop, flip, intensity_ratio, or other keys kept as given). patterns: optional pattern /
-    modulation metadata block (SIMFLUX / SIMCODE). report_max_spots: spots refitted for the report histograms."""
+    modulation metadata block (SIMFLUX / SIMCODE). acquisition: optional dict of sample / acquisition metadata that is
+    not the PSF (e.g. TIRF depth, emitter height distribution), stored verbatim. report_max_spots: spots refitted for
+    the report histograms."""
     from torch_psf import psfreport
     models = _channel_models(psf)
     extras = list(channels or [])
@@ -641,6 +652,8 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
         meta['source'] = sb
     if patterns is not None:
         meta['patterns'] = _plain(patterns)
+    if acquisition is not None:
+        meta['acquisition'] = _plain(acquisition)
     # zstack, preview, report
     stack, zs = render_zstack(psf, zstack_planes, zstack_px)
     px = (optics or {}).get('pixel_um')
@@ -671,3 +684,78 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
         z.writestr(REPORT_NAME, pdf)
     return meta
 
+
+
+# ====================================================================================================== conversion
+def convert_calibration(json_path, out_path, roisize=None, device=None, provenance=None, **kw):
+    """A calibration json (SIMCODE calib_*.json or a torch-psf 0.1.0 PSF json with its .npz) -> psf.zip, losslessly:
+    the PSF (PSF.load), the camera (io.load_camera, with its maps, when the json has a camera), every top-level key
+    that is neither a PSF / optics / camera key goes to: provenance (source, psf_v2), patterns (a SIMCODE `pattern`
+    dict, as {type: 'simcode', ...}, plus pattern_note) or the `acquisition` block (sample / acquisition metadata such
+    as tirf_depth_um, emitter_z_*); the complete original json is kept in
+    provenance['converted_from'] = {file, json}. Paths in the json (maps, arrays) resolve against the json's folder.
+    kw: passed to save_zip. Returns the psf.json dict."""
+    import os
+    from torch_psf import io
+    json_path = os.path.abspath(str(json_path))
+    out_path = os.path.abspath(str(out_path))
+    with open(json_path) as f:
+        orig = json.load(f)
+    cwd = os.getcwd()
+    os.chdir(os.path.dirname(json_path))
+    try:
+        psf = io.load(json_path, roisize=roisize, device=device)
+        try:
+            cam = io.load_camera(json_path)
+        except Exception:
+            cam = None
+    finally:
+        os.chdir(cwd)
+    prov = dict(provenance or {})
+    prov['converted_from'] = dict(file=os.path.basename(json_path), json=orig)
+    d, _ = psf._file_dict(None)
+    known = set(json.dumps(d).replace('{', ' ').replace('}', ' ').split('"')[1::2])     # every key / string in it
+    known |= {'format', 'version', 'type', 'arrays', 'provenance', 'pixelsize_um', 'pixel_um', 'wavelength_um', 'NA',
+              'n_imm', 'n_med', 'optics', 'camera'}
+    if cam is not None:
+        known |= set(cam.to_dict().keys())
+    rest = {k: v for k, v in orig.items() if k not in known}
+    for k in ('source', 'psf_v2', 'provenance_note'):          # how the calibration was made -> provenance
+        if k in rest:
+            prov[k] = rest.pop(k)
+    patterns = kw.pop('patterns', None)
+    if patterns is None and isinstance(rest.get('pattern'), dict):   # SIMCODE / SIMFLUX pattern calibration
+        patterns = dict(type='simcode', **rest.pop('pattern'))
+        if 'pattern_note' in rest:
+            patterns['note'] = rest.pop('pattern_note')
+    meta = save_zip(out_path, psf, camera=cam, provenance=prov, patterns=patterns, acquisition=rest or None, **kw)
+    return meta
+
+
+def _main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(prog='python -m torch_psf.psfzip',
+                                 description='Convert calibration / PSF json files (SIMCODE calib_*.json, torch-psf '
+                                             '0.1.0 json + npz) to psf.zip (docs/PSF_FORMAT.md).')
+    ap.add_argument('json', nargs='+', help='calibration / PSF json file(s)')
+    ap.add_argument('-o', '--out', default=None, help='output file (one input) or folder (several); default: next to '
+                                                     'the input, <name>.psf.zip')
+    ap.add_argument('--roisize', type=int, default=None)
+    ap.add_argument('--device', default=None)
+    a = ap.parse_args(argv)
+    import os
+    for j in a.json:
+        base = os.path.splitext(os.path.basename(j))[0] + '.psf.zip'
+        if a.out is None:
+            o = os.path.join(os.path.dirname(os.path.abspath(j)), base)
+        elif len(a.json) > 1 or os.path.isdir(a.out):
+            os.makedirs(a.out, exist_ok=True)
+            o = os.path.join(a.out, base)
+        else:
+            o = a.out
+        m = convert_calibration(j, o, roisize=a.roisize, device=a.device)
+        print(f'{j} -> {o}  ({m["psf_type"]}, acquisition keys: {sorted((m.get("acquisition") or {}).keys())})')
+
+
+if __name__ == '__main__':
+    _main()
