@@ -1,5 +1,7 @@
 # torch-psf
 
+**Web viewer:** [jcnossen.github.io/torch-psf](https://jcnossen.github.io/torch-psf/) runs the PSF fit in the browser (WebGPU), without installation.
+
 A PSF library for single-molecule localization microscopy (SMLM), in plain PyTorch, batched on the GPU. The PSF is
 the main object: every model renders the PSF with its x / y / z derivatives, and the base class `PSF` gives each of
 them the Cramér-Rao bound, maximum-likelihood fitting of spots, localization of whole movies, files and conversion to
