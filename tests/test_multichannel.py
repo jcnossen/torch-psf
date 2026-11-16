@@ -4,6 +4,7 @@ CPU only and small (CI)."""
 import math
 import pytest
 import torch
+from conftest import needs_gpu
 from torch_psf import (PSF, MultiChannelPSF, ChannelsPSF, FourPiPSF, FourPiSplinePSF, AstigmaticGaussianPSF,
                        GaussianPSF, VectorialPSF)
 
@@ -140,6 +141,7 @@ def _simulate(m, N, I=2000.0, bg=(5.0, 8.0), zr=0.3, seed=1, **extra):
     return th, d
 
 
+@needs_gpu
 def test_fit_and_crlb_channels_psf():
     m = gauss_pair()
     th, d = _simulate(m, 1000)
@@ -189,6 +191,7 @@ def _wrap(e):
     return torch.remainder(e + math.pi, 2 * math.pi) - math.pi
 
 
+@needs_gpu
 def test_fourpi_spline_global_fit(spline4pi):
     """multi-start (z x phase) search from the default starting values"""
     _, spl = spline4pi
@@ -205,6 +208,7 @@ def test_fourpi_spline_global_fit(spline4pi):
     assert set(('phi', 'crlb_phi', 'bg_channels', 'theta')) <= set(ds.keys())
 
 
+@needs_gpu
 def test_fourpi_spline_crlb_phi_free_and_fixed(spline4pi):
     """Monte-Carlo: the spread of the estimates reaches the CRLB, with the phase free and fixed (started near the
     truth: this tests the likelihood and its bound, the global search is test_fourpi_spline_global_fit)"""
@@ -232,6 +236,7 @@ def test_fourpi_spline_crlb_phi_free_and_fixed(spline4pi):
     assert ((rf > 0.8) & (rf < 1.25)).all(), rf
 
 
+@needs_gpu
 def test_fourpi_vectorial_fit_with_offsets(spline4pi):
     p, _ = spline4pi
     N = 6

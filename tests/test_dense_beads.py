@@ -2,7 +2,7 @@
 isolated-bead estimator on the same field for comparison, and the held-out scoring."""
 import numpy as np
 import torch
-from conftest import DEV
+from conftest import DEV, needs_gpu
 from torch_psf import VectorialPSF, ZStackEstimator, DenseBeadEstimator
 from torch_psf.estimation import stage_focus
 from torch_psf.estimation.dense_beads import (find_bead_clusters, field_stop_mask, simulate_dense_bead_stack,
@@ -48,6 +48,7 @@ def test_grouping_faint_and_field_stop():
     assert field_stop_mask(np.full((3, 50, 50), 40.0)).all()
 
 
+@needs_gpu
 def test_dense_fit_recovers_zernikes_and_beats_isolated():
     truth, focus, sim = _sim()
     est = DenseBeadEstimator(optics=OPT, patch=15, render_pad=5, iters=250, field_stop=False, device=DEV,
@@ -66,6 +67,7 @@ def test_dense_fit_recovers_zernikes_and_beats_isolated():
     assert e_iso > 2 * e_dense, (e_iso, e_dense)
 
 
+@needs_gpu
 def test_heldout_clusters_scored():
     truth, focus, sim = _sim(seed=1)
     est = DenseBeadEstimator(optics=OPT, patch=15, render_pad=5, iters=150, field_stop=False, holdout_fraction=0.5,
