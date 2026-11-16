@@ -313,12 +313,13 @@ def _chunks(data, active, max_renders):
 def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), emitter_z_um=0.0, train=None,
                     drift=True, drift_order=3, focus_offset='tilt', bg='linear', intensity='free',
                     fit_dz_scale=False, warmup=50, heldout_iters=200, max_renders=3000, reject=None, reject_at=None,
-                    lr_focus=1e-2, lr_drift=1e-2, log=None, stop=None):
+                    lr_focus=1e-2, lr_drift=1e-2, lr_apod=1e-2, log=None, stop=None):
     """Joint fit of a shared VectorialPSF (copied, roisize = data.R) to the bead clusters `data` (BeadClusters),
     imaged at the focus positions focus_um [nk] (um, focal plane relative to the coverslip, see stage_focus). Poisson
     likelihood, Adam (lr for the PSF parameters; cosine decay to 0.1 lr over the last 30 % of the iterations).
 
-    fit: vectorial parameters to fit ('zcoef', 'NA', 'n_med'); () = PSF fixed (only the bead / cluster / stack terms:
+    fit: vectorial parameters to fit ('zcoef', 'NA', 'n_med', 'apod' (the radial pupil amplitude, Adam step
+    lr_apod)); () = PSF fixed (only the bead / cluster / stack terms:
     a refit, e.g. to score a PSF). emitter_z_um: bead (centre) height. train [C] bool: clusters in the fit (default
     all); the others are refitted afterwards with the PSF fixed and scored (heldout_iters). drift / drift_order: per
     stack polynomial xy drift over the planes (no constant term). focus_offset: None, 'stack' (one per stack), 'tilt'
@@ -339,7 +340,7 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     focus = torch.as_tensor(focus_um, dtype=torch.float32, device=dev)
     assert len(focus) == nk, (len(focus), nk)
     psf = vectorial.resized(R)
-    for k in ('zcoef', 'NA', 'n_med'):
+    for k in ('zcoef', 'NA', 'n_med', 'apod'):
         getattr(psf, k).requires_grad_(k in fit)
     train = np.ones(C, bool) if train is None else np.asarray(train, bool).copy()
     d = data.d
@@ -372,8 +373,10 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
         bg_params.append(bgg)
     elif bg != 'const':
         raise ValueError(bg)
-    groups = [dict(params=[getattr(psf, k) for k in fit], lr=lr, name='psf'), dict(params=[xy], lr=1e-2),
+    groups = [dict(params=[getattr(psf, k) for k in fit if k != 'apod'], lr=lr, name='psf'), dict(params=[xy], lr=1e-2),
               dict(params=int_params, lr=1e-2), dict(params=bg_params, lr=0.3)]
+    if 'apod' in fit:
+        groups.append(dict(params=[psf.apod], lr=lr_apod, name='psf'))
     kk = torch.arange(nk, device=dev, dtype=torch.float32) - (nk - 1) / 2
     tpow = torch.stack([(kk / max((nk - 1) / 2, 1.0)) ** (k + 1) for k in range(int(drift_order))], 0)   # [order, nk]
     dr = None
@@ -398,8 +401,7 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     if fit_dz_scale:
         log_s = torch.zeros((), device=dev, requires_grad=True)
         groups.append(dict(params=[log_s], lr=1e-3, name='psf'))
-    if not fit:
-        groups = groups[1:]
+    groups = [g for g in groups if g['params']]
     opt = torch.optim.Adam(groups)
     for g in opt.param_groups:
         g['lr0'] = g['lr']
@@ -469,7 +471,7 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     rep = dict(method='dense_beads', n_beads=int(sum(data.cl_bead[c + 1] - data.cl_bead[c] for c in range(C) if train[c])),
                n_clusters=int(train.sum()), n_planes=nk, patch=P, iterations=len(hist), nll_per_px=tot / max(ntrain_px, 1),
                rejected_clusters=rejected, seconds=time.time() - t0)
-    for p in [psf.zcoef, psf.NA, psf.n_med] + ([log_s] if log_s is not None else []):
+    for p in [psf.zcoef, psf.NA, psf.n_med, psf.apod] + ([log_s] if log_s is not None else []):
         p.requires_grad_(False)
     # statistics of the training clusters (before the held-out refit touches the shared drift / focus terms)
     rej = np.zeros(C, bool)

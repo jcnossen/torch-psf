@@ -20,13 +20,14 @@ def sphere_points(diameter_um, n=32, seed=0):
 
 def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), emitter_z_um=0.0, stack_id=None,
               drift=False, bead_diameter_um=None, nball=32, chunk=None, log=None, stop=None, weights=None,
-              fit_dz_scale=False, fit_height=False, intensity='free', heldout_iters=150, drift_order=3):
+              fit_dz_scale=False, fit_height=False, intensity='free', heldout_iters=150, drift_order=3, lr_apod=1e-2):
     """Fit a VectorialPSF (copied; roisize = the ROI size) to bead stacks [nbeads, nk, P, P] (photons) imaged at the
     focus positions focus_um [nk] (focal plane relative to the coverslip, um; a stage scan gives
     focus = f0 + sign dz k). The beads sit at height emitter_z_um. Poisson likelihood, Adam (lr for the PSF
     parameters).
 
-    fit: names of the vectorial parameters to fit ('zcoef', 'NA', 'n_med', 'apod'). stack_id [nbeads] (long) and
+    fit: names of the vectorial parameters to fit ('zcoef', 'NA', 'n_med', 'apod'; apod with the Adam step
+    lr_apod). stack_id [nbeads] (long) and
     drift=True: per stack a lateral xy drift over the planes, a polynomial of degree drift_order (1 = linear, default 3:
     cubic) in the plane index without a constant term (the constant is the bead position). bead_diameter_um: the bead
     is modelled as nball points on a sphere (else a point). With fit_height the sphere stays tied to the fitted
@@ -67,8 +68,11 @@ def fit_beads(stack, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), em
         raise ValueError(intensity)
     bg = bg0.clone().requires_grad_(True)
     f = focus[None].expand(nb, -1).reshape(-1)
-    groups = [dict(params=[getattr(psf, k) for k in fit], lr=lr), dict(params=[xy], lr=1e-2),
+    groups = [dict(params=[getattr(psf, k) for k in fit if k != 'apod'], lr=lr), dict(params=[xy], lr=1e-2),
               dict(params=int_params, lr=1e-2), dict(params=[bg], lr=0.3)]
+    if 'apod' in fit:
+        groups.append(dict(params=[psf.apod], lr=lr_apod))
+    groups = [g for g in groups if g['params']]
     dr = None
     if drift:
         sid = torch.zeros(nb, dtype=torch.long, device=dev) if stack_id is None else stack_id.to(dev)

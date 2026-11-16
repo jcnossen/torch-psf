@@ -115,8 +115,8 @@ class ZStackEstimator(Estimator):
     of each stack over the planes, a polynomial of this degree; default cubic), fit_dz_scale (fit the z-step scale),
     emitter_z_um (starting bead centre height; default bead_diameter_um / 2, else 0), fit_height (fit it),
     bead_diameter_um (finite bead size; with fit_height the diameter is tied to 2 x the fitted height: a bead lies on
-    the coverslip), fit_na / fit_n_med (fit NA / the medium index), intensity ('free' or 'bead_x_plane': per-plane
-    factors, e.g. bleaching); see estimation.fit_beads.
+    the coverslip), fit_na / fit_n_med / fit_apod (fit NA / the medium index / the radial pupil amplitude apod),
+    intensity ('free' or 'bead_x_plane': per-plane factors, e.g. bleaching); see estimation.fit_beads.
     Spline grid: oversample, spline_dz_um, xy_limit.
 
     estimate(stacks, dz_um) -> PSF. Plane k of a stack is at focus sign dz_um (k - (nk - 1) / 2) um (the stack centre
@@ -126,8 +126,8 @@ class ZStackEstimator(Estimator):
 
     def __init__(self, model='vectorial', start=None, optics=None, camera=None, roisize=21, nbeads=8, sign=1.0,
                  iters=300, holdout=None, drift=True, drift_order=3, fit_dz_scale=False, fit_height=False,
-                 emitter_z_um=None, bead_diameter_um=None, fit_na=False, fit_n_med=False, intensity='free',
-                 regularize=3000.0, oversample=2, spline_dz_um=None, xy_limit=3.0,
+                 emitter_z_um=None, bead_diameter_um=None, fit_na=False, fit_n_med=False, fit_apod=False,
+                 intensity='free', regularize=3000.0, oversample=2, spline_dz_um=None, xy_limit=3.0,
                  zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, device=None, progress=None,
                  stop=None):
         super().__init__(device, progress, stop)
@@ -138,7 +138,7 @@ class ZStackEstimator(Estimator):
         self.holdout, self.drift, self.regularize = holdout, drift, regularize
         self.fit_dz_scale, self.fit_height, self.bead_diameter_um, self.intensity = (fit_dz_scale, fit_height,
                                                                                      bead_diameter_um, intensity)
-        self.drift_order, self.fit_na, self.fit_n_med = drift_order, fit_na, fit_n_med
+        self.drift_order, self.fit_na, self.fit_n_med, self.fit_apod = drift_order, fit_na, fit_n_med, fit_apod
         # starting bead (centre) height: given, else the bead radius (a bead lies on the coverslip), else 0
         self.emitter_z_um = (float(emitter_z_um) if emitter_z_um is not None else
                              0.5 * float(bead_diameter_um) if bead_diameter_um else 0.0)
@@ -183,7 +183,8 @@ class ZStackEstimator(Estimator):
             return psf
         vec = _start_vectorial(self.start, self.optics, P, self.dev, self.zernike_indices, self.npupil,
                                self.oversample_pupil)
-        fit = ('zcoef',) + (('NA',) if self.fit_na else ()) + (('n_med',) if self.fit_n_med else ())
+        fit = (('zcoef',) + (('NA',) if self.fit_na else ()) + (('n_med',) if self.fit_n_med else ())
+               + (('apod',) if self.fit_apod else ()))
         r = fit_beads(d, focus, vec, iters=self.iters, fit=fit, stack_id=sid, drift=self.drift,
                       drift_order=self.drift_order, weights=w, emitter_z_um=self.emitter_z_um,
                       fit_dz_scale=self.fit_dz_scale, fit_height=self.fit_height,
@@ -193,6 +194,8 @@ class ZStackEstimator(Estimator):
         psf.focus_um = 0.0
         if self.fit_na or self.fit_n_med:
             self.report.update(NA=float(psf.NA), n_med=float(psf.n_med))
+        if self.fit_apod:
+            self.report['apod'] = psf.apod.detach().cpu().tolist()
         for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um', 'chi2_median', 'heldout_chi2_median'):
             if k in r['report']:
                 self.report[k] = r['report'][k]
@@ -280,8 +283,8 @@ class DenseBeadEstimator(Estimator):
     kept out of the fit, or holdout_fraction: a random fraction of the clusters (seed holdout_seed); held-out clusters
     are refitted with the PSF fixed and scored (report heldout_nll_per_px, heldout_deviance_per_px); plane_step: use
     every n-th plane; reject: drop clusters whose chi2 is above reject x the median (debris, unresolved aggregates).
-    drift / drift_order / focus_offset / bg / intensity / fit_dz_scale / fit_na / fit_n_med / emitter_z_um / warmup /
-    max_renders: see estimation.fit_dense_beads.
+    drift / drift_order / focus_offset / bg / intensity / fit_dz_scale / fit_na / fit_n_med / fit_apod (the radial
+    pupil amplitude apod) / emitter_z_um / warmup / max_renders: see estimation.fit_dense_beads.
 
     estimate(stacks, dz_um) -> VectorialPSF (roisize patch, focus_um 0). report: n_detected, n_clusters, n_beads,
     cluster_sizes ({size: count}), dropped ({reason: clusters}), patch, render_pad, nll_per_px, deviance_per_px,
@@ -292,7 +295,8 @@ class DenseBeadEstimator(Estimator):
                  warmup=50, holdout=None, holdout_fraction=0.0, holdout_seed=0, region=None, field_stop='auto',
                  threshold=6.0, min_dist=3, faint=0.1, max_members=8, max_box=None, drift=True, drift_order=3,
                  focus_offset='tilt', bg='linear', intensity='free', fit_dz_scale=False, fit_na=False,
-                 fit_n_med=False, emitter_z_um=0.0, plane_step=1, reject=None, extent_rel=0.02, max_patch=31,
+                 fit_n_med=False, fit_apod=False, emitter_z_um=0.0, plane_step=1, reject=None, extent_rel=0.02,
+                 max_patch=31,
                  zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, max_renders=3000, device=None,
                  progress=None, stop=None):
         super().__init__(device, progress, stop)
@@ -304,6 +308,7 @@ class DenseBeadEstimator(Estimator):
         self.fit_kw = dict(drift=drift, drift_order=drift_order, focus_offset=focus_offset, bg=bg, intensity=intensity,
                            fit_dz_scale=fit_dz_scale, emitter_z_um=float(emitter_z_um), max_renders=max_renders)
         self.fit_na, self.fit_n_med, self.plane_step, self.reject = fit_na, fit_n_med, plane_step, reject
+        self.fit_apod = fit_apod
         self.extent_rel, self.max_patch = extent_rel, max_patch
         self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
 
@@ -373,7 +378,8 @@ class DenseBeadEstimator(Estimator):
                            n_faint_members=int(sum(np.sum(c['faint']) for c in clusters)),
                            cluster_sizes={int(k): int((sizes == k).sum()) for k in np.unique(sizes)}, dropped=dropped,
                            patch=P, render_pad=pad)
-        fit = ('zcoef',) + (('NA',) if self.fit_na else ()) + (('n_med',) if self.fit_n_med else ())
+        fit = (('zcoef',) + (('NA',) if self.fit_na else ()) + (('n_med',) if self.fit_n_med else ())
+               + (('apod',) if self.fit_apod else ()))
         r = fit_dense_beads(data, focus, vec, iters=self.iters, fit=fit, train=train, warmup=self.warmup,
                             reject=self.reject, log=self._log('dense_beads'), stop=self.stop, **self.fit_kw)
         psf = r['psf'].resized(P)
@@ -383,6 +389,8 @@ class DenseBeadEstimator(Estimator):
                 self.report[k] = v
         if self.fit_na or self.fit_n_med:
             self.report.update(NA=float(psf.NA), n_med=float(psf.n_med))
+        if self.fit_apod:
+            self.report['apod'] = psf.apod.detach().cpu().tolist()
         off = torch.tensor(self.region[:2] if self.region is not None else (0, 0), device=self.dev).float()
         r['xy_frame'] = r['xy'] + off
         self.data, self.result, self.focus_um = data, r, focus
@@ -606,3 +614,112 @@ class InSituEstimator(Estimator):
         d['camera'] = None if self.camera is None else self.camera.to_dict()
         d['detect_kw'] = dict(self.detect_kw)
         return d
+
+
+class PhaseDiversityEstimator(Estimator):
+    """PSF from z-stacks of a thin object (beads on the coverslip at any density) by phase diversity
+    (torch_psf.estimation.phase_diversity): every plane images the same object through the PSF at a known focus, the
+    object is eliminated (stage 1: Gonsalves' reduced least-squares form on windowed patches) or profiled out
+    (stage 2, method='poisson': Poisson likelihood with an extended free object solved by Newton / CG), and the
+    VectorialPSF parameters (Zernikes; fit_na, fit_apod (radial pupil amplitude), fit_n_med, fit_pupil (a free pupil
+    phase map, L2 penalty pupil_l2)) are fitted by autograd. No bead detection, grouping or bead model: overlapping
+    beads, aggregates and debris are part of the object; beads off the coverslip (other heights) are not modelled.
+
+    Same starting point (start / optics), camera, region and field stop handling as DenseBeadEstimator; plane k at
+    focus sign dz_um (k - (nk - 1) / 2) (+ a focus offset per patch). patch (px) / step: the patch grid (patches with
+    at least min_valid of their pixels inside the field stop and a peak of min_signal robust sd); a shared pupil over
+    all patches (holdout: index of a stack kept out of the fit; its patches are refitted with the PSF fixed and
+    scored: report heldout_deviance_per_px), then with per_patch=True one pupil per patch (started from the shared
+    one, patch_ls_iters / patch_iters iterations): self.field (list of per-patch dicts: centre, Zernikes, NA, apod,
+    focus offset, deviance) and self.patch_psfs. focus_offset / drift / drift_order / intensity / bg / fit_dz_scale /
+    emitter_z_um / render_size / oversample / window / eps / ls_iters / iters / cg_iters / max_planes: see
+    estimation.fit_phase_diversity.
+
+    estimate(stacks, dz_um) -> VectorialPSF (roisize `roisize`, focus_um 0); report, patches (PDPatches), result."""
+
+    def __init__(self, start=None, optics=None, camera=None, patch=64, step=None, region=None, field_stop='auto',
+                 min_valid=0.5, min_signal=8.0, sign=1.0, method='poisson', fit_na=False, fit_apod=False,
+                 fit_n_med=False, fit_pupil=False, pupil_l2=1.0, ls_iters=200, iters=300, per_patch=False,
+                 patch_ls_iters=0, patch_iters=200, holdout=None, plane_step=1, focus_offset='patch', drift='poly',
+                 drift_order=3, intensity='plane', bg='const', fit_dz_scale=False, emitter_z_um=0.0, render_size=41,
+                 oversample=1, window=0.25, eps=1e-4, cg_iters=6, roisize=21, zernike_indices=tuple(range(5, 22)),
+                 npupil=64, oversample_pupil=3, max_planes=600, device=None, progress=None, stop=None):
+        super().__init__(device, progress, stop)
+        self.start, self.optics, self.camera = start, optics, _camera(camera)
+        self.patch, self.step, self.region, self.field_stop = patch, step, region, field_stop
+        self.min_valid, self.min_signal, self.sign, self.method = min_valid, min_signal, sign, method
+        self.fit = (('zcoef',) + (('NA',) if fit_na else ()) + (('apod',) if fit_apod else ())
+                    + (('n_med',) if fit_n_med else ()) + (('pupil_phase',) if fit_pupil else ()))
+        self.ls_iters, self.iters, self.per_patch = ls_iters, iters, per_patch
+        self.patch_ls_iters, self.patch_iters, self.holdout, self.plane_step = (patch_ls_iters, patch_iters, holdout,
+                                                                                 plane_step)
+        self.fit_kw = dict(focus_offset=focus_offset, drift=drift, drift_order=drift_order, intensity=intensity, bg=bg,
+                           fit_dz_scale=fit_dz_scale, emitter_z_um=float(emitter_z_um), render_size=render_size,
+                           oversample=oversample, window=window, eps=eps, cg_iters=cg_iters, max_planes=max_planes,
+                           pupil_l2=pupil_l2 if fit_pupil else 0.0)
+        self.roisize, self.zernike_indices, self.npupil, self.oversample_pupil = (roisize, zernike_indices, npupil,
+                                                                                  oversample_pupil)
+
+    _stacks = DenseBeadEstimator._stacks
+
+    def estimate(self, stacks, dz_um):
+        from torch_psf.estimation.dense_beads import field_stop_mask
+        from torch_psf.estimation.phase_diversity import PDPatches, fit_phase_diversity
+        self._reset()
+        st = self._stacks(stacks)
+        nk_full = (st[0].shape[0] - 1) * self.plane_step + 1
+        focus = stage_focus(nk_full, dz_um, self.sign).to(self.dev)[::self.plane_step]
+        vec = _start_vectorial(self.start, self.optics, self.roisize, self.dev, self.zernike_indices, self.npupil,
+                               self.oversample_pupil)
+        masks = []
+        for a in st:
+            if isinstance(self.field_stop, np.ndarray):
+                masks.append(self.field_stop)
+            elif self.field_stop == 'auto':
+                masks.append(field_stop_mask(a.cpu().numpy()))
+            else:
+                masks.append(None)
+        pt = PDPatches.from_stacks(st, self.patch, self.step, masks=masks, min_valid=self.min_valid,
+                                   min_signal=self.min_signal)
+        train = np.ones(pt.n, bool) if self.holdout is None else pt.stack.cpu().numpy() != self.holdout
+        if not train.any():
+            raise ValueError('no training patches')
+        self.report.update(n_stacks=len(st), n_planes=len(focus), dz_um=dz_um * self.plane_step, sign=self.sign,
+                           n_patches=int(train.sum()), patch=self.patch, fit=list(self.fit))
+        r = fit_phase_diversity(pt.subset(np.nonzero(train)[0]), focus, vec, fit=self.fit, method=self.method,
+                                ls_iters=self.ls_iters, iters=self.iters, log=self._log('phase_diversity'),
+                                stop=self.stop, **self.fit_kw)
+        psf = r['psf']
+        psf.focus_um = 0.0
+        for k, v in r['report'].items():
+            if k not in ('n_patches', 'patch'):
+                self.report[k] = v
+        if (~train).any():
+            rh = fit_phase_diversity(pt.subset(np.nonzero(~train)[0]), focus, psf, fit=(), method='poisson',
+                                     ls_iters=0, iters=max(self.iters // 2, 1), **self.fit_kw)
+            self.report.update(heldout_deviance_per_px=rh['report']['deviance_per_px'],
+                               heldout_n_patches=int((~train).sum()))
+            self.heldout_result = rh
+        self.field, self.patch_psfs = [], []
+        if self.per_patch:
+            for i in np.nonzero(train)[0]:
+                if self._stopped():
+                    break
+                ri = fit_phase_diversity(pt.subset([i]), focus, psf, fit=self.fit, method=self.method,
+                                         ls_iters=self.patch_ls_iters, iters=self.patch_iters, **self.fit_kw)
+                p = ri['psf']
+                p.focus_um = 0.0
+                self.patch_psfs.append(p)
+                off = np.asarray(self.region[:2] if self.region is not None else (0, 0), float)
+                self.field.append(dict(index=int(i), stack=int(pt.stack[i]), corner=(pt.corner[i] + off).tolist(),
+                                       center=(pt.centers[i] + off).tolist(), zernike_noll=list(p.zidx),
+                                       zcoef=p.zcoef.detach().cpu().tolist(), NA=float(p.NA),
+                                       apod=p.apod.detach().cpu().tolist(),
+                                       focus_offset_um=float(ri['focus_offset'][0]),
+                                       deviance_per_px=float(ri['report'].get('deviance_per_px', float('nan'))),
+                                       valid_fraction=float(pt.valid[i].mean())))
+            self.report['n_field_patches'] = len(self.field)
+        self.patches, self.result, self.focus_um, self.train = pt, r, focus, train
+        self.report['seconds'] = time.time() - self._t0
+        psf.provenance = dict(estimator='PhaseDiversityEstimator', dz_um=float(dz_um), report=self.report)
+        return psf
