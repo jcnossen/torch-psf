@@ -43,10 +43,11 @@ calibration is used. The only tracked data file is a one-bead real crop of publi
 
 ## Using it
 
-The page is laid out as a workflow. The step bar on top (SMLM movie: Input > Detect spots > Fit PSF > Localize >
-Export; bead z-stack: Input > Fit PSF > Export; localization file: Input > Export) selects which settings the left
-sidebar shows and outlines the views that step feeds; finished steps get a check. "Next" walks through the steps,
-"Run all" estimates the PSF and localizes the movie in one go. The Input step holds the data (SMLM movie, bead
+The page is laid out as a workflow. The left sidebar has one "Run all" button at the top (with the progress bar and
+Stop early / Abort), then tabs for the stages (SMLM movie: Input, Detect spots, Fit PSF, Localize, Export; bead
+z-stack: Input, Fit PSF, Export; localization file: Input, Export). A tab shows the settings of that stage and
+outlines the views it feeds; finished stages get a check. "Run all" runs every stage in one go (for a movie: spot
+detection, the PSF fit, localization) and opens the tab of the stage that is running. The Input tab holds the data (SMLM movie, bead
 z-stack or localization file), the optics (pixel size and wavelength in nm, NA, refractive indices) and the camera
 (sCMOS / EMCCD, gain, offset, read noise); less common settings are under each step's "Advanced" fold.
 
@@ -74,7 +75,7 @@ Noll 5 / 6 / 11 = 0.02 / 0.10 / 0.03 waves, blinking sites on curved filaments, 
 torch_psf.simulate.simulate_reference_movie with filament_sites) and plays it in the Movie panel (autoplay, frame slider). Drop
 your own movie (TIFF, streamed) to replace it.
 
-"Estimate PSF" (Fit PSF step) runs torch_psf's InSituEstimator, ported step by step: spot detection and ROIs, a 16 px checkerboard
+The PSF fit (Fit PSF stage of "Run all") runs torch_psf's InSituEstimator, ported step by step: spot detection and ROIs, a 16 px checkerboard
 split into spots for the fit and held-out spots, the in-situ fit of the vectorial PSF by the knot route
 (fit_zernike_knots: knots of the spline from the vectorial model, Levenberg-Marquardt localization on the spline, the
 NLL gradient on the knots, one vector-Jacobian product to the Zernikes, Adam), the held-out NLL of the start and the

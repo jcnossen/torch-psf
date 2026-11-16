@@ -1,8 +1,8 @@
-// The web app (UI thread), laid out as a workflow: a step bar on top (Input > Detect spots > Fit PSF > Localize >
-// Export for an SMLM movie; Input > Fit PSF > Export for a bead z-stack; Input > Export for a localization file),
-// the settings of the selected step in the left sidebar, and the views in cards: the movie and the reconstruction
-// side by side with one shared zoom / pan, a compact PSF view, and the fit summary. Selecting a step outlines the
-// cards it feeds. All GPU work runs in the compute worker (../worker.ts).
+// The web app (UI thread), laid out as a workflow: the left sidebar has "Run all" at the top and tabs for the stages
+// (Input, Detect spots, Fit PSF, Localize, Export for an SMLM movie; Input, Fit PSF, Export for a bead z-stack; Input,
+// Export for a localization file) with the settings of each; the views are cards: the movie and the reconstruction
+// side by side with one shared zoom / pan, a compact PSF view, and the fit summary. A tab outlines the cards it feeds;
+// during a run the tab of the running stage opens. All GPU work runs in the compute worker (../worker.ts).
 import { View3D, Volume } from './view3d';
 import { drawArray } from './colormap';
 import { DEFAULT_NOLL, Optics } from '../psf/vectorial';
@@ -107,12 +107,9 @@ export function startApp(root: HTMLElement) {
   };
   function renderSteps() {
     const CHECK = '<svg viewBox="0 0 20 20"><path d="M5.5 10.2l3 3 6-6.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    $('steps').innerHTML = STEPS[mode].map(([k, lab], i) =>
-      `${i ? '<span class="chev" aria-hidden="true"></span>' : ''}<button class="step${stepDone(k) ? ' done' : ''}" data-step="${k}" ${k === step ? 'aria-current="step"' : ''}>` +
-      `<span class="dot">${stepDone(k) ? CHECK : i + 1}</span><span class="sl">${lab}</span></button>`).join('');
-    for (const b of $('steps').querySelectorAll<HTMLButtonElement>('button.step')) b.onclick = () => setStep(b.dataset.step as Step);
-    const nav = $('steps'), cur = nav.querySelector<HTMLElement>('[aria-current]');   // narrow screens: keep the current step in view
-    if (cur && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = cur.offsetLeft - nav.offsetLeft - (nav.clientWidth - cur.offsetWidth) / 2;
+    $('steps').innerHTML = STEPS[mode].map(([k, lab]) =>
+      `<button class="stab${stepDone(k) ? ' done' : ''}" role="tab" data-step="${k}" aria-selected="${k === step}">${stepDone(k) ? CHECK : ''}<span>${lab}</span></button>`).join('');
+    for (const b of $('steps').querySelectorAll<HTMLButtonElement>('button.stab')) b.onclick = () => setStep(b.dataset.step as Step);
   }
   const inMode = (el: HTMLElement) => !el.dataset.mode || el.dataset.mode.split(' ').includes(mode);
   function applyLayout() {
@@ -124,24 +121,20 @@ export function startApp(root: HTMLElement) {
     for (const id of ['c-movie', 'c-recon', 'c-psf', 'c-fit']) $(id).classList.toggle('feed', feeds.includes(id));
     $('tab-movie').hidden = mode !== 'movie'; $('tab-stack').hidden = mode !== 'stack'; $('tab-locs').hidden = mode !== 'locs';
     for (const b of root.querySelectorAll<HTMLButtonElement>('.tabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === mode));
-    const nb = $<HTMLButtonElement>('next'), labels: Partial<Record<Step, string>> = { input: 'Next: Detect spots  →', detect: 'Next: Fit PSF  →', fit: 'Estimate PSF', localize: 'Localize' };
-    nb.textContent = labels[step] ?? ''; nb.hidden = !labels[step];
-    $<HTMLButtonElement>('m-run').hidden = step === 'fit';
-    const sb = $<HTMLButtonElement>('snext'); sb.textContent = 'Next: Fit PSF  →'; sb.hidden = step !== 'input';
-    $<HTMLButtonElement>('run').classList.toggle('primary', step !== 'input');
     $('fit-title').textContent = mode === 'stack' ? 'Bead fit' : 'PSF fit';
-    // the run controls (progress, next / run all, stop) sit right under the title of the current step
-    const sec = [...root.querySelectorAll<HTMLElement>('.side-body > section')].find((s) => !s.hidden);
-    const anchor = sec?.querySelector<HTMLElement>(':scope > .sub') ?? sec?.querySelector<HTMLElement>(':scope > h2');
-    if (anchor && anchor.nextElementSibling !== $('runbox')) anchor.after($('runbox'));
-    const first = STEPS[mode][0][0] === step;
-    $<HTMLButtonElement>('back').hidden = first; $<HTMLButtonElement>('sback').hidden = first;
     renderSteps();
     cloud?.request(); renderMovie();
   }
   function setStep(s: Step) { step = s; applyLayout(); try { localStorage.setItem('tpsf.step', s); } catch { /* no storage */ } }
-  const prevStep = () => { const k = STEPS[mode].findIndex(([s]) => s === step); if (k > 0) setStep(STEPS[mode][k - 1][0]); };
-  for (const id of ['back', 'sback']) $(id).onclick = prevStep;
+  /** During a run: open the tab of the stage that is running (once per stage, so a tab the user picks stays open). */
+  let autoStage = '';
+  const STAGE_TAB: Record<string, Step> = { spots: 'detect', fit: 'fit', report: 'fit', refine: 'fit', spline: 'localize', localize: 'localize', read: 'fit' };
+  function followStage(stage: string) {
+    if (stage === autoStage) return;
+    autoStage = stage;
+    const t = STAGE_TAB[stage];
+    if (t && t !== step && STEPS[mode].some(([k]) => k === t)) setStep(t);
+  }
   function setMode(m: Mode, keepStep = false) {
     mode = m;
     if (!keepStep || !STEPS[m].some(([k]) => k === step)) step = 'input';
@@ -158,7 +151,7 @@ export function startApp(root: HTMLElement) {
     (e) => {
       status.textContent = 'WebGPU unavailable'; status.dataset.ok = '0';
       $('nogpu').hidden = false; $('nogpu').textContent = String(e.message || e) || WEBGPU_HELP;
-      for (const b of ['m-run', 'run', 'next', 'snext']) $<HTMLButtonElement>(b).disabled = true;
+      for (const b of ['m-run', 'run', 'm-loc']) $<HTMLButtonElement>(b).disabled = true;
     });
 
   // ================================================================ PSF card
@@ -449,11 +442,12 @@ export function startApp(root: HTMLElement) {
 
   // --- progress, stop
   let running: 'stack' | 'movie' = 'movie';
-  const mRun = $<HTMLButtonElement>('m-run'), nextBtn = $<HTMLButtonElement>('next');
+  const mRun = $<HTMLButtonElement>('m-run');
   const busy = (b: boolean) => {
     root.classList.toggle('busy', b);
     for (const id of ['m-enough', 'm-abort', 'enough', 'abort']) $<HTMLButtonElement>(id).disabled = !b;
-    for (const id of ['m-run', 'next', 'run', 'snext']) $<HTMLButtonElement>(id).disabled = b;
+    for (const id of ['m-run', 'run', 'm-loc']) $<HTMLButtonElement>(id).disabled = b;
+    if (b) autoStage = '';
   };
   busy(false);
   for (const id of ['m-enough', 'enough']) $(id).onclick = () => worker.postMessage({ type: 'stop', signal: 'enough' });
@@ -463,6 +457,7 @@ export function startApp(root: HTMLElement) {
     const frac = p.total ? Math.min(1, p.done / p.total) : 0;
     const [bar, txt] = running === 'movie' ? ['mbar', 'mtext'] : ['pbar', 'ptext'];
     $(bar).style.width = (100 * frac).toFixed(1) + '%';
+    followStage(p.stage);
     const fmt = (v: unknown) => typeof v === 'number' ? Number.isInteger(v) ? String(v) : (Math.abs(v) < 1e-2 || Math.abs(v) > 1e4 ? v.toExponential(3) : v.toFixed(4)) : String(v);
     const info = Object.entries(p.info ?? {}).filter(([k]) => k !== 'zcoef').map(([k, v]) => `${k.replace(/_/g, ' ')} ${fmt(v)}`).join(', ');
     const t = p.elapsed_s !== undefined ? ` | ${p.elapsed_s.toFixed(1)} s` + (p.eta_s !== undefined ? `, ~${p.eta_s.toFixed(0)} s left` : '') : '';
@@ -602,12 +597,7 @@ export function startApp(root: HTMLElement) {
     } finally { busy(false); follow = false; }
   }
   mRun.onclick = () => runMovie('estimate');
-  nextBtn.onclick = () => {
-    if (step === 'input') setStep('detect');
-    else if (step === 'detect') setStep('fit');
-    else if (step === 'fit') runMovie('estimate');
-    else if (step === 'localize') runMovie('localize');
-  };
+  $('m-loc').onclick = () => runMovie('localize');
 
   async function showInsituVolume() {
     if (!insitu) return;
@@ -747,7 +737,6 @@ export function startApp(root: HTMLElement) {
   };
   (window as any).__setFiles = setFiles;
   $<HTMLInputElement>('file').onchange = (e) => setFiles((e.target as HTMLInputElement).files!);
-  $('snext').onclick = () => setStep('fit');
   $('run').onclick = async () => {
     running = 'stack';
     if (!files.length) { $('ptext').textContent = 'Open a bead z-stack TIFF first.'; return; }
@@ -987,12 +976,24 @@ const TEMPLATE = `
     <div><div class="name">torch-psf <span>web</span></div>
       <a class="gh" href="https://github.com/jcnossen/torch-psf" target="_blank" rel="noopener">github.com/jcnossen/torch-psf</a></div>
   </div>
-  <nav class="steps" id="steps" aria-label="workflow"></nav>
   <div id="gpu-status">Checking WebGPU...</div>
 </header>
 <div id="nogpu" class="warn" hidden></div>
 <div class="shell">
 <aside class="side">
+ <div class="side-run" id="runbox">
+  <div class="foot" data-mode="movie">
+    <div class="progress"><div id="mbar"></div></div><p id="mtext" class="hint">Run all detects spots, fits a vectorial PSF to the isolated ones, then localizes the movie with it; the tab of each stage opens while it runs.</p>
+    <div class="btnrow idle"><button id="m-run" class="primary" title="detect spots, fit the PSF, localize the movie">Run all</button></div>
+    <div class="btnrow running"><button id="m-enough" title="stop now and keep the current estimate">Stop early</button><button id="m-abort">Abort</button></div>
+  </div>
+  <div class="foot" data-mode="stack">
+    <div class="progress"><div id="pbar"></div></div><p id="ptext" class="hint"></p>
+    <div class="btnrow idle"><button id="run" class="primary" title="fit the PSF to the bead stacks">Run all</button></div>
+    <div class="btnrow running"><button id="enough">Use what we have</button><button id="abort">Abort</button></div>
+  </div>
+ </div>
+ <nav class="stabs" id="steps" role="tablist" aria-label="workflow"></nav>
  <div class="side-body">
   <section data-step="input">
     <h2>Input</h2><p class="sub">Load data and describe the microscope.</p>
@@ -1049,12 +1050,13 @@ const TEMPLATE = `
       ${field('m-schunk', 'Sampling chunk', 50, 'frames', '1', 'the PSF fit samples spots from chunks spread over the whole movie (bit-reversed order; torch_psf InSituEstimator chunk=50)')}
       ${field('m-devk', 'Overlap rejection k', 3, '0 = off', 'any', 'after the first pass, spots whose Poisson deviance per pixel is above median + k x scale are dropped and the fit is repeated (torch_psf InSituEstimator deviance_k)')}
     </details>
-    <p class="hint">Estimate PSF also localizes the movie with the fitted PSF. Defaults of torch_psf InSituEstimator; every step is a port of the Python code and is tested against it.</p>
+    <p class="hint">Run all also localizes the movie with the fitted PSF. Defaults of torch_psf InSituEstimator; every step is a port of the Python code and is tested against it.</p>
   </section>
 
   <section data-step="localize" data-mode="movie">
     <h2>Localize</h2><p class="sub">Fit every detected spot with the PSF (x, y, z, photons, background) by maximum likelihood, with Cramér-Rao bounds${cite('smith', 'huang')}.</p>
-    <p class="hint">Runs automatically after Estimate PSF, with the fitted PSF (the refined spline if it was kept). Localize again here after changing the detection settings; it uses the last estimate, or the start PSF if there is none.</p>
+    <div class="btncol"><button id="m-loc" title="localize with the last estimate (or the start PSF), without fitting the PSF again">Localize only</button></div>
+    <p class="hint">Runs automatically at the end of Run all, with the fitted PSF (the refined spline if it was kept). Localize again here after changing the detection settings; it uses the last estimate, or the start PSF if there is none.</p>
   </section>
 
   <section data-step="fit" data-mode="stack">
@@ -1085,18 +1087,6 @@ const TEMPLATE = `
       <p id="x-status" class="hint"></p>
     </div>
   </section>
- </div>
- <div class="side-foot" id="runbox">
-  <div class="foot" data-mode="movie">
-    <div class="progress"><div id="mbar"></div></div><p id="mtext" class="hint">Estimate PSF collects isolated spots, fits a vectorial PSF to them, then localizes the movie with it.</p>
-    <div class="btnrow idle"><button id="back" class="back" title="previous step">Back</button><button id="next" class="primary"></button><button id="m-run" title="Estimate the PSF and localize the movie">Run all</button></div>
-    <div class="btnrow running"><button id="m-enough" title="stop now and keep the current estimate">Stop early</button><button id="m-abort">Abort</button></div>
-  </div>
-  <div class="foot" data-mode="stack">
-    <div class="progress"><div id="pbar"></div></div><p id="ptext" class="hint"></p>
-    <div class="btnrow idle"><button id="sback" class="back" title="previous step">Back</button><button id="snext" class="primary"></button><button id="run">Fit PSF</button></div>
-    <div class="btnrow running"><button id="enough">Use what we have</button><button id="abort">Abort</button></div>
-  </div>
  </div>
 </aside>
 
@@ -1157,7 +1147,7 @@ const TEMPLATE = `
     <header><h3 id="fit-title">PSF fit</h3><span class="meta" id="i-meta"></span><span class="tools">
       <button class="tb" id="i-report-btn" data-mode="movie">Report</button></span></header>
     <div id="fit-insitu" data-mode="movie">
-      <div id="i-empty" class="emptytxt">Run <b>Estimate PSF</b> to fit the PSF to this movie.</div>
+      <div id="i-empty" class="emptytxt">Press <b>Run all</b> to fit the PSF to this movie.</div>
       <div id="p-insitu" class="fitbox" hidden>
         <div><canvas id="i-zern" width="330" height="160"></canvas><p class="note">Zernike coefficients (waves rms) by Noll index${cite('noll')}</p></div>
         <div id="i-kv" class="kv"></div>
@@ -1165,7 +1155,7 @@ const TEMPLATE = `
       <div id="i-report" hidden><table id="i-table" class="kvt"></table></div>
     </div>
     <div id="fit-bead" data-mode="stack">
-      <div id="b-empty" class="emptytxt">Open a bead z-stack and run <b>Fit PSF</b>.</div>
+      <div id="b-empty" class="emptytxt">Open a bead z-stack and press <b>Run all</b>.</div>
       <div id="p-results" hidden>
         <table id="res-table" class="kvt"></table>
         <canvas id="zern" width="460" height="150"></canvas>
