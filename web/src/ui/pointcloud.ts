@@ -11,6 +11,7 @@
 //  - point cap (default 2,000,000 visible points): above it a fixed hash-ranked subset, weighted by visible / drawn.
 import { NCOL } from '../smlm/movie';
 import { GpuCloud } from '../gpu/cloud';
+import { trackPinch } from './gestures';
 
 export interface CloudOptions {
   mode: 'precision' | 'fixed';
@@ -53,17 +54,30 @@ export class PointCloudView {
     this.overlay.className = 'cloud-overlay';
     cv.parentElement!.style.position = 'relative';
     cv.parentElement!.appendChild(this.overlay);
-    let last: { x: number; y: number; orbit: boolean } | null = null;
-    cv.addEventListener('pointerdown', (e) => { last = { x: e.clientX, y: e.clientY, orbit: e.shiftKey || e.button === 2 }; cv.setPointerCapture(e.pointerId); });
+    let last: { x: number; y: number; orbit: boolean; id: number } | null = null;
+    // two fingers: pinch zooms about their midpoint, moving them pans
+    const pinch = trackPinch(cv, (f, mx, my, dx, dy) => {
+      this.cx += mx * this.scale * (1 - f) - dx * this.scale; this.cy += my * this.scale * (1 - f) - dy * this.scale;
+      this.scale *= f; this.request();
+    });
+    cv.addEventListener('pointerdown', (e) => {
+      if (!last) last = { x: e.clientX, y: e.clientY, orbit: e.shiftKey || e.button === 2, id: e.pointerId };
+      cv.setPointerCapture(e.pointerId);
+    });
     cv.addEventListener('pointermove', (e) => {
-      if (!last) return;
+      if (!last || e.pointerId !== last.id) return;
+      if (pinch.pinching()) { last.x = e.clientX; last.y = e.clientY; return; }
       const dx = e.clientX - last.x, dy = e.clientY - last.y; last.x = e.clientX; last.y = e.clientY;
       const dpr = window.devicePixelRatio || 1;
       if (last.orbit) { this.rot = (((this.rot - dx * 0.4) % 360) + 360) % 360; this.tilt = Math.max(0, Math.min(180, this.tilt + dy * 0.4)); }
       else { this.cx -= dx * dpr * this.scale; this.cy -= dy * dpr * this.scale; }
       this.request();
     });
-    const end = (e: PointerEvent) => { if (!last) return; last = null; if (cv.hasPointerCapture(e.pointerId)) cv.releasePointerCapture(e.pointerId); this.request(); };
+    const end = (e: PointerEvent) => {
+      if (cv.hasPointerCapture(e.pointerId)) cv.releasePointerCapture(e.pointerId);
+      if (!last || e.pointerId !== last.id) return;
+      last = null; this.request();
+    };
     cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
     cv.addEventListener('contextmenu', (e) => e.preventDefault());
     cv.addEventListener('wheel', (e) => {

@@ -18,6 +18,7 @@ import { splineGrid } from '../gpu/spline_lm';
 import { Recon } from './recon';
 import { readLocFile, isLocFile } from '../io/locfile';
 import { PointCloudView } from './pointcloud';
+import { trackPinch } from './gestures';
 import { locsToCsv, MovieSummary, NCOL } from '../smlm/movie';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -317,14 +318,20 @@ export function startApp(root: HTMLElement) {
   // pan / zoom (shared with the reconstruction when Linked)
   const pushView = () => { if (linked && cloud) { cloud.scale = mview.scale; cloud.cx = mview.cx; cloud.cy = mview.cy; cloud.request(); } renderMovie(); };
   {
-    let last: { x: number; y: number } | null = null;
-    mcv.addEventListener('pointerdown', (e) => { setPlaying(false); last = { x: e.clientX, y: e.clientY }; mcv.setPointerCapture(e.pointerId); });
+    let last: { x: number; y: number; id: number } | null = null;
+    // two fingers: pinch zooms about their midpoint, moving them pans
+    const pinch = trackPinch(mcv, (f, mx, my, dx, dy) => {
+      mview.cx += mx * mview.scale * (1 - f) - dx * mview.scale; mview.cy += my * mview.scale * (1 - f) - dy * mview.scale;
+      mview.scale *= f; pushView();
+    });
+    mcv.addEventListener('pointerdown', (e) => { setPlaying(false); if (!last) last = { x: e.clientX, y: e.clientY, id: e.pointerId }; mcv.setPointerCapture(e.pointerId); });
     mcv.addEventListener('pointermove', (e) => {
-      if (!last) return;
-      const dpr = window.devicePixelRatio || 1, dx = e.clientX - last.x, dy = e.clientY - last.y; last = { x: e.clientX, y: e.clientY };
+      if (!last || e.pointerId !== last.id) return;
+      if (pinch.pinching()) { last.x = e.clientX; last.y = e.clientY; return; }
+      const dpr = window.devicePixelRatio || 1, dx = e.clientX - last.x, dy = e.clientY - last.y; last.x = e.clientX; last.y = e.clientY;
       mview.cx -= dx * dpr * mview.scale; mview.cy -= dy * dpr * mview.scale; pushView();
     });
-    const end = (e: PointerEvent) => { last = null; if (mcv.hasPointerCapture(e.pointerId)) mcv.releasePointerCapture(e.pointerId); };
+    const end = (e: PointerEvent) => { if (mcv.hasPointerCapture(e.pointerId)) mcv.releasePointerCapture(e.pointerId); if (last && e.pointerId === last.id) last = null; };
     mcv.addEventListener('pointerup', end); mcv.addEventListener('pointercancel', end);
     mcv.addEventListener('wheel', (e) => {
       e.preventDefault();
