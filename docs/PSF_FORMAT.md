@@ -172,8 +172,11 @@ Maps channel-c crop coordinates to the reference channel 0 (`fwd`) and back (`in
   `zernike_noll[i]` at channel coordinates (x, y) are `feats(x, y) @ coef[i]`, with the PolyMap features above (in that
   channel's coordinates). The channel model's `zernike_waves` are the values at the reference point (default the
   `feats_norm` centre, where they equal `coef[:, 0]`); the writer warns when they differ. It applies to the channel's
-  vectorial model, or to its `source` for a spline channel. Python: `PSFZip.read(p).channels[c].model_at(x, y)` returns
-  the vectorial model at that field point.
+  vectorial model, or to its `source` for a spline channel. **No extrapolation:** readers clip the normalised
+  coordinates u = (x - cx) / sx and v = (y - cy) / sy to [-1, 1] before evaluating the features, so outside the
+  `feats_norm` box the polynomial keeps its value at the box edge; writers set the box to the region the field was
+  fitted on. A mode whose higher-order coefficients are all zero has a lower order (per-mode orders are implicit in
+  `coef`). Python: `PSFZip.read(p).channels[c].model_at(x, y)` returns the vectorial model at that field point.
 - **`grid`** (specified, not yet implemented): `{"type": "grid", "anchors": [{"x", "y", "type", "model", "arrays"}],
   "interpolation": "nearest" | "idw" | "zernike_linear"}`: complete models at anchor positions (channel coordinates),
   interpolated by nearest anchor, inverse-distance weighting of the rendered PSFs, or linear interpolation of the
