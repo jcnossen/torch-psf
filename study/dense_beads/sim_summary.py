@@ -30,22 +30,23 @@ for f in files:
         row[m] = e
         print(f'| {name} | {m} | {nb:.1f} | {e.mean():.2f} ({", ".join(f"{v:.2f}" for v in e)}) | {dv:+.4f} |')
     rows.append(row)
-fig, ax = plt.subplots(figsize=(8, 3.8))
+fig, ax = plt.subplots(figsize=(9, 4.2))
 x = np.arange(len(rows))
-w = 0.26
+w = 0.24
 for i, m in enumerate(('iso', 'single', 'dense')):
+    xs = x + (i - 1) * w
     mean = [r[m].mean() for r in rows]
-    ax.bar(x + (i - 1) * w, mean, w * 0.9, color=COL[m], label=LAB[m], zorder=2)
-    for xi, r in zip(x, rows):
-        ax.scatter(np.full(len(r[m]), xi + (i - 1) * w), r[m], s=9, color=INK, zorder=3, lw=0)
+    ax.hlines(mean, xs - 0.09, xs + 0.09, color=COL[m], lw=2.5, label=LAB[m], zorder=3)
+    for xi, r in zip(xs, rows):
+        ax.scatter(np.full(len(r[m]), xi), r[m], s=22, color=COL[m], edgecolors='#fcfcfb', linewidths=1.2, zorder=4)
 ax.set_yscale('log')
 ax.set_xticks(x)
-ax.set_xticklabels(names, fontsize=8)
+ax.set_xticklabels([n.replace(', ', '\n') for n in names], fontsize=8)
 ax.set_ylabel('Zernike rms error (mλ)')
-ax.grid(axis='y', color='#e4e3df', lw=0.6, zorder=0)
+ax.grid(axis='y', which='both', color='#e4e3df', lw=0.6, zorder=0)
 for s in ('top', 'right'):
     ax.spines[s].set_visible(False)
-ax.legend(frameon=False, fontsize=8)
-ax.set_title('Simulated dense bead fields: Zernike error (bars: mean, dots: seeds)', fontsize=10)
+ax.legend(frameon=False, fontsize=8, loc='upper left')
+ax.set_title('Simulated dense bead fields: Zernike rms error (dots: seeds, line: mean)', fontsize=10)
 plt.tight_layout()
 plt.savefig(os.path.join(out, 'sim_summary.png'), dpi=120)
