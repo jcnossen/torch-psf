@@ -251,18 +251,21 @@ class VectorialStack:
         for k in PSF_PARAMS:
             getattr(self.vec, k).requires_grad_(False)
 
-    def __call__(self, focus):
+    def __call__(self, focus, zcoef_offset=None):
+        """focus [n, K] -> [n, K, R, R]; zcoef_offset [n, nz]: per-patch Zernike offsets (field dependence)"""
         n, K = focus.shape
         R = self.R
+        zo = None if zcoef_offset is None else zcoef_offset[:, None].expand(-1, K, -1).reshape(n * K, -1)
         if self.bead_points is None:
             pos = torch.zeros(n * K, 3, device=focus.device)
             pos[:, 2] = self.emitter_z_um
-            return self.vec(pos, focus.reshape(-1)).reshape(n, K, R, R)
+            return self.vec(pos, focus.reshape(-1), zcoef_offset=zo).reshape(n, K, R, R)
         b = torch.as_tensor(self.bead_points, dtype=torch.float32, device=focus.device)
         m = len(b)
         pos = torch.stack([b[:, 0] / self.vec.pixel_um, b[:, 1] / self.vec.pixel_um, self.emitter_z_um + b[:, 2]], 1)
         pos = pos[None].expand(n * K, -1, -1).reshape(-1, 3)
-        img = self.vec(pos, focus.reshape(-1).repeat_interleave(m))
+        img = self.vec(pos, focus.reshape(-1).repeat_interleave(m),
+                       zcoef_offset=None if zo is None else zo.repeat_interleave(m, 0))
         return img.reshape(n, K, m, R, R).mean(2)
 
     def export(self, like):
@@ -327,7 +330,8 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
                         intensity='plane', bg='const', fit_dz_scale=False, emitter_z_um=0.0, bead_points=None,
                         render_size=41, oversample=1, window=0.25, eps=1e-4, object_solver='newton', obj_start=None,
                         obj_inner=None, cg_iters=6, warmup=20,
-                        lr_focus=1e-2, lr_drift=1e-2, pupil_l2=0.0, max_planes=600, log=None, stop=None):
+                        lr_focus=1e-2, lr_drift=1e-2, pupil_l2=0.0, max_planes=600, field=None, field_xy=None,
+                        lr_field=None, log=None, stop=None):
     """Phase-diversity fit of a PSF model to z-stack patches (see the module docstring).
 
     patches: PDPatches (photons); focus_um [K]: focus of every plane (um, focal plane relative to the coverslip, e.g.
@@ -347,7 +351,10 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
     or 'rl' (Richardson-Lucy, a non-negative pixel object: biased for beads between pixels, see the notes);
     obj_start / obj_inner: object steps at the start of stage 2 / per iteration (default newton 8 / 1, rl 50 / 3).
     max_planes:
-    patch-planes per backward pass (memory).
+    patch-planes per backward pass (memory). field: a torch_psf.field.FieldZernikes (copied; VectorialPSF only): every
+    patch gets the Zernikes zcoef + field(x, y) at its field position field_xy [n, 2] (camera px; default the patch
+    centres); with 'field' in fit the polynomial coefficients are fitted (Adam step lr_field, default lr; the ridge
+    prior is added to the loss), else held fixed. psf may also be a torch_psf.field.FieldPSF.
 
     Returns dict(psf (VectorialPSF copy with the fitted parameters, or the CallableStack), report, history,
     focus_offset [n] um, drift [S, K, 2] px, scale [n, K], bg [n, K], object [n, G, G] (stage 2; frame px
@@ -363,6 +370,9 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
     S = patches.n_stacks
     focus = torch.as_tensor(focus_um, dtype=torch.float32, device=dev).reshape(-1)
     assert len(focus) == K, (len(focus), K)
+    if hasattr(psf, 'field') and hasattr(psf, 'base'):                      # a FieldPSF
+        field = psf.field if field is None else field
+        psf = psf.base
     model_in = psf
     if hasattr(psf, 'zcoef'):
         model = VectorialStack(psf, render_size, oversample, emitter_z_um, bead_points)
@@ -375,11 +385,21 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
     d, valid = patches.d, patches.valid
 
     # ---- parameters
-    named = model.params(fit)
+    fz = None
+    if field is not None:
+        if not isinstance(model, VectorialStack):
+            raise ValueError('field dependence needs a VectorialPSF')
+        fz = field.copy().to(dev)
+        fz.coef.requires_grad_('field' in fit)
+        fxy = torch.as_tensor(patches.centers if field_xy is None else field_xy, dtype=torch.float32,
+                              device=dev).reshape(-1, 2)
+    named = model.params([k for k in fit if k != 'field'])
     groups = []
     for k, t in named:
         lr_k = lr_apod if k in ('apod', 'saf', 'pupil_amp') else lr_pupil if k == 'pupil_phase' else lr
         groups.append(dict(params=[t], lr=lr_k, name='psf'))
+    if fz is not None and 'field' in fit:
+        groups.append(dict(params=[fz.coef], lr=lr if lr_field is None else lr_field, name='psf'))
     nuis = []
     with torch.no_grad():
         dd = torch.where(valid[:, None] > 0, d, torch.full_like(d, float('nan'))).reshape(n, K, -1)
@@ -461,20 +481,25 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
         return b                                                                  # [n_, K, 1 | N, 1 | N]
 
     def otf(ids):
-        h = model(focus_of(ids))                                                  # [n_, K, R, R]
+        if fz is not None:
+            it_ = torch.as_tensor(ids, device=dev)
+            h = model(focus_of(ids), fz.offsets(fxy[it_], model.vec.zidx))      # [n_, K, R, R]
+        else:
+            h = model(focus_of(ids))                                              # [n_, K, R, R]
         H = psf_otf(h, G, model.sinc, drift_of(ids))
         return H * scale_of(ids)[..., None, None]
 
     def penalty():
+        pf = fz.penalty() if (fz is not None and 'field' in fit) else 0.0
         if pupil_l2 <= 0:
-            return 0.0
+            return pf
         p = 0.0
         for k, t in named:
             if k == 'pupil_phase':
                 p = p + (t ** 2).sum()
             elif k == 'pupil_amp':
                 p = p + ((t - 1) ** 2).sum()
-        return pupil_l2 * float(valid.sum()) * K / 1e4 * p
+        return pf + pupil_l2 * float(valid.sum()) * K / 1e4 * p
 
     per = max(1, int(max_planes) // K)
     chunks = [np.arange(s, min(s + per, n)) for s in range(0, n, per)]
@@ -702,6 +727,10 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
     elif method != 'ls':
         raise ValueError(method)
     model.freeze()
+    if fz is not None:
+        fz.coef.requires_grad_(False)
+        report['field'] = dict(modes=fz.noll, orders=fz.orders, n_params=fz.n_params, prior_sd=fz.prior_sd,
+                               penalty=float(fz.penalty()))
     for g in nuis:
         for t in g['params']:
             t.requires_grad_(False)
@@ -719,7 +748,7 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
         res = dict(psf=out_psf, report=report, history=hist, focus_offset=dfo.detach().clone(),
                    drift=drift_all.detach().clone(), scale=scale_of(ids_all).detach(), bg=bgc.detach().clone(),
                    object=obj, margin=m, grid=G, mu=mu_out, deviance=dev_p, nll=nll_p, metric=metric,
-                   dz_scale=None if log_s is None else float(torch.exp(log_s)))
+                   dz_scale=None if log_s is None else float(torch.exp(log_s)), field=fz)
     return res
 
 

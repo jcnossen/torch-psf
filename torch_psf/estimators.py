@@ -27,6 +27,7 @@ from torch_psf.movie import open_movie
 from torch_psf.spots import extract_spots
 from torch_psf.estimation import (fit_beads, stage_focus, fit_zernike_knots, fit_pupil_knots, fit_free_knots,
                               split_checkerboard, compare_heldout, spot_deviance, z_scale, FREE_KNOT_WARNING)
+from torch_psf.fit import localize
 
 
 def _camera(camera):
@@ -286,10 +287,17 @@ class DenseBeadEstimator(Estimator):
     drift / drift_order / focus_offset / bg / intensity / fit_dz_scale / fit_na / fit_n_med / fit_apod (the radial
     pupil amplitude apod) / emitter_z_um / warmup / max_renders: see estimation.fit_dense_beads.
 
-    estimate(stacks, dz_um) -> VectorialPSF (roisize patch, focus_um 0). report: n_detected, n_clusters, n_beads,
-    cluster_sizes ({size: count}), dropped ({reason: clusters}), patch, render_pad, nll_per_px, deviance_per_px,
-    chi2_median, heldout_*. data (BeadClusters), result (the fit_dense_beads dict; result['xy_frame']: bead positions
-    in the full frame) and detections (per stack: xy, amp in region px, field-stop mask) for figures."""
+    field: field-dependent Zernikes (a dict, torch_psf.field.field_from_spec: modes, order, prior_sd, iters): after
+    the global fit, a second fit from it with every bead at the Zernikes base + poly(x, y) of its position (camera px)
+    and the polynomial fitted jointly with the base Zernikes (and NA / apod / n_med when fitted); the held-out clusters
+    are scored with both (report heldout_* = global, report['field'] = the field fit's numbers) and the field model
+    (torch_psf.field.FieldPSF) is returned when it is better on them (or when nothing is held out).
+
+    estimate(stacks, dz_um) -> VectorialPSF (roisize patch, focus_um 0) or FieldPSF. report: n_detected, n_clusters,
+    n_beads, cluster_sizes ({size: count}), dropped ({reason: clusters}), patch, render_pad, nll_per_px,
+    deviance_per_px, chi2_median, heldout_*, field, chosen. data (BeadClusters), result (the fit_dense_beads dict;
+    result['xy_frame']: bead positions in the full frame), result_field (the field fit) and detections (per stack:
+    xy, amp in region px, field-stop mask) for figures."""
 
     def __init__(self, start=None, optics=None, camera=None, patch=None, render_pad=None, sign=1.0, iters=300,
                  warmup=50, holdout=None, holdout_fraction=0.0, holdout_seed=0, region=None, field_stop='auto',
@@ -297,10 +305,11 @@ class DenseBeadEstimator(Estimator):
                  focus_offset='tilt', bg='linear', intensity='free', fit_dz_scale=False, fit_na=False,
                  fit_n_med=False, fit_apod=False, emitter_z_um=0.0, plane_step=1, reject=None, extent_rel=0.02,
                  max_patch=31,
-                 zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, max_renders=3000, device=None,
-                 progress=None, stop=None):
+                 zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, max_renders=3000, field=None,
+                 device=None, progress=None, stop=None):
         super().__init__(device, progress, stop)
         self.start, self.optics, self.camera = start, optics, _camera(camera)
+        self.field = field
         self.patch, self.render_pad, self.sign, self.iters, self.warmup = patch, render_pad, sign, iters, warmup
         self.holdout, self.holdout_fraction, self.holdout_seed = holdout, holdout_fraction, holdout_seed
         self.region, self.field_stop, self.threshold, self.min_dist = region, field_stop, threshold, min_dist
@@ -394,6 +403,35 @@ class DenseBeadEstimator(Estimator):
         off = torch.tensor(self.region[:2] if self.region is not None else (0, 0), device=self.dev).float()
         r['xy_frame'] = r['xy'] + off
         self.data, self.result, self.focus_um = data, r, focus
+        self.result_field = None
+        if self.field and not self._stopped():
+            from torch_psf.field import field_from_spec, FieldPSF
+            fxy = data.xy_image + off                                        # bead positions, camera px
+            btr = torch.as_tensor(r['train'], device=self.dev)[data.bead_cluster]
+            fz, fkw = field_from_spec(self.field, psf.zidx, fxy[btr])
+            it_f = int(self.field.get('iters', self.iters)) if isinstance(self.field, dict) else self.iters
+            rf = fit_dense_beads(data, focus, r['psf'], iters=it_f, fit=fit + ('field',), train=r['train'],
+                                 warmup=self.warmup, reject=None, field=fz, field_xy=fxy,
+                                 exclude=r['report'].get('rejected_clusters') or None,
+                                 log=self._log('dense_beads field'), stop=self.stop, **self.fit_kw)
+            fpsf = FieldPSF(rf['psf'].resized(P), rf['field'])
+            fpsf.base.focus_um = 0.0
+            rr = rf['report']
+            self.report['field'] = {k: rr[k] for k in ('nll_per_px', 'deviance_per_px', 'chi2_median', 'heldout_nll_per_px',
+                                                       'heldout_deviance_per_px', 'field', 'seconds') if k in rr}
+            self.report['field'].update(block=fpsf.field_block(), feats_norm=list(fz.norm))
+            if self.fit_na or self.fit_n_med:
+                self.report['field'].update(NA=float(fpsf.base.NA), n_med=float(fpsf.base.n_med))
+            if self.fit_apod:
+                self.report['field']['apod'] = fpsf.base.apod.detach().cpu().tolist()
+            better = ('heldout_nll_per_px' not in rr or 'heldout_nll_per_px' not in self.report
+                      or rr['heldout_nll_per_px'] < self.report['heldout_nll_per_px'])
+            self.report['field']['kept'] = bool(better)
+            rf['xy_frame'] = rf['xy'] + off
+            self.result_field = rf
+            if better:
+                psf = fpsf
+        self.report['chosen'] = type(psf).__name__
         self.report['seconds'] = time.time() - self._t0
         psf.provenance = dict(estimator='DenseBeadEstimator', dz_um=float(dz_um), report=self.report)
         return psf
@@ -419,14 +457,23 @@ class InSituEstimator(Estimator):
     statistics, which scale all deviances. A warning is added when more than warn_rejected of the spots are rejected.
     Focus / wavelength (for 2D data the focus is weakly determined): scan_focus_um and / or scan_wavelength_um = lists of
     values; each combination is fitted (scan_iters iterations) and the one with the lowest held-out NLL is used.
-    Spline grid: oversample, dz_um, xy_limit (>= 3 px recommended). Detection: threshold, isolation, detect_kw.
+    Spline grid: oversample, dz_um, xy_limit (>= 3 px recommended). Detection: threshold, isolation, detect_kw;
+    detector: another detection function (e.g. torch_psf.matched_filter.MatchedFilterDetector for engineered PSFs,
+    whose band-pass peaks sit on a lobe). zstarts: z starts of every multi-start localization (default 5; ~9 for a
+    6 um tetrapod).
+    Field dependence (field: a dict, see torch_psf.field.field_from_spec: modes, order, prior_sd, tile, iters, lr,
+    score_tile): after the global fit (and the overlap rejection) the base Zernikes and a polynomial of the field
+    position per mode are fitted jointly (estimation.fit_field_knots, per field tile), started from the global fit;
+    the field model (its tiled spline, score_tile px tiles) is a held-out candidate ('field') and is returned (as a
+    torch_psf.field.FieldPSF) when it wins. Held-out spots are scored at their own field positions.
 
     estimate(movie, frames=None) -> PSF (VectorialPSF, or the refined CubicSplinePSF when refine=True and it
     wins on the held-out spots); its provenance holds the settings and the report. report: n_spots, n_train, n_test,
     frames_requested, frames_read, frame_span, deviance (median, scale, threshold, rejected_fraction), n_rejected,
     at_limit, z_scale / z_offset_um (fit vs start), scan, heldout (NLL per pixel of start / vectorial / refined),
     chosen, heldout_chi2_median (held-out spots fitted with the chosen PSF: ~1 if the camera gain and noise model are
-    right), warnings. data: spots, train, test, vectorial (the fitted VectorialPSF), vectorial_spline (its spline),
+    right), field (with field=: the fit report and coefficients), warnings. data: spots, train, test, vectorial (the
+    fitted VectorialPSF), vectorial_spline (its spline), field_psf / field_tiled (with field=),
     psf (the returned PSF), spline (the spline of the returned PSF, ready for localization); with reject_overlap also
     the first-fit overlap test of the training spots: deviance [n_train] (numpy; rejected where >= the threshold),
     deviance_theta [n_train, 5] (their fits) and deviance_psf (the first-fit spline)."""
@@ -436,10 +483,11 @@ class InSituEstimator(Estimator):
                  warn_rejected=0.25, refine=False, refine_lam_ref=3000.0,
                  refine_lam_s=1000.0, refine_outer=12, oversample=2, dz_um=0.04, xy_limit=3.0, threshold=6.0,
                  isolation=None, tile=16, chunk=50, zernike_indices=tuple(range(5, 22)), npupil=64,
-                 oversample_pupil=3, scan_focus_um=None, scan_wavelength_um=None, scan_iters=None, device=None,
-                 progress=None, stop=None, **detect_kw):
+                 oversample_pupil=3, scan_focus_um=None, scan_wavelength_um=None, scan_iters=None, detector=None,
+                 zstarts=5, field=None, device=None, progress=None, stop=None, **detect_kw):
         super().__init__(device, progress, stop)
         self.start, self.optics, self.camera, self.focus_um = start, optics, _camera(camera), focus_um
+        self.detector, self.zstarts, self.field = detector, int(zstarts), field
         self.roisize, self.z_range, self.nspots, self.nheldout = roisize, tuple(z_range), nspots, nheldout
         self.method, self.iters, self.reject_overlap, self.deviance_k = method, iters, reject_overlap, deviance_k
         self.warn_rejected = warn_rejected
@@ -455,7 +503,10 @@ class InSituEstimator(Estimator):
         fn = fit_zernike_knots if self.method == 'zernike' else fit_pupil_knots
         if self.method not in ('zernike', 'pupil'):
             raise ValueError(self.method)
-        return fn(spline, rois, vec, iters=iters, log=self._log(stage), stop=self.stop, var=var)
+        loc = None
+        if self.zstarts != 5:
+            loc = lambda spl, d, th: localize(spl, d, th, var=var, iters=30 if th is None else 3, zstarts=self.zstarts)
+        return fn(spline, rois, vec, iters=iters, log=self._log(stage), stop=self.stop, var=var, localizer=loc)
 
     def _variant(self, vec0, focus_um, wavelength_um):
         """the start model at another focus / wavelength (the Zernikes of the start are kept)"""
@@ -491,7 +542,7 @@ class InSituEstimator(Estimator):
         f0, f1 = (0, mv.n) if frames is None else (int(frames[0]), int(frames[1]))
         sp = extract_spots(mv, R, self.camera, (f0, f1), chunk=self.chunk, device=self.dev, sample='spread',
                            max_spots=2 * (self.nspots + self.nheldout), threshold=self.threshold,
-                           isolation=self.isolation, **self.detect_kw)
+                           isolation=self.isolation, detector=self.detector, **self.detect_kw)
         warnings = []
         if len(sp) == 0:
             raise ValueError(f'no spots detected in frames {f0}..{f1}')
@@ -514,8 +565,10 @@ class InSituEstimator(Estimator):
             warnings.append(f'only {len(tr)} training spots (nspots {self.nspots}): the whole range was read')
         spline = CubicSplinePSF(R, zr, device=self.dev, **self.grid)
 
+        zs = self.zstarts
+
         def heldout(v):
-            return compare_heldout({'m': v.to_spline(R, zr, **self.grid)}, rois_te, var_te)['m']['nll_per_px']
+            return compare_heldout({'m': v.to_spline(R, zr, **self.grid)}, rois_te, var_te, zstarts=zs)['m']['nll_per_px']
 
         # focus / wavelength scan (held-out NLL)
         fs = list(self.scan_focus_um) if self.scan_focus_um is not None else [None]
@@ -542,9 +595,10 @@ class InSituEstimator(Estimator):
         vec = r['psf']
         n_rej = 0
         first = None
+        tr_kept = tr
         if self.reject_overlap and not self._stopped():
             s1 = vec.to_spline(R, zr, **self.grid)
-            dv, th1 = spot_deviance(s1, rois, var)
+            dv, th1 = spot_deviance(s1, rois, var, zstarts=zs)
             first = dict(deviance=dv, deviance_theta=th1.detach(), deviance_psf=s1)
             thr, med, scale = self._deviance_threshold(dv)
             keep = dv < thr
@@ -563,6 +617,7 @@ class InSituEstimator(Estimator):
                                 f'and excess_noise (EMCCD: 2)')
             kt = torch.as_tensor(keep, device=self.dev)
             rois = rois[kt]
+            tr_kept = tr[keep]
             var = var if (var is None or var.dim() == 0) else var[kt]
             r = self._fit(spline, rois, vec, max(self.iters * 3 // 4, 1), 'vectorial (overlaps rejected)', var)
             vec = r['psf']
@@ -573,6 +628,24 @@ class InSituEstimator(Estimator):
                            focus_um=float(vec.focus_um), wavelength_um=float(vec.optics.wavelength_um))
         cands = {'start': s0, 'vectorial': s_vec}
         result, result_spline = vec, s_vec
+        xy_te = None
+        fres = {}
+        if self.field and not self._stopped():
+            from torch_psf.field import field_from_spec
+            from torch_psf.estimation import fit_field_knots
+            spec = dict(self.field)
+            xy_all = sp.corner.float() + h
+            xy_tr = xy_all[torch.as_tensor(tr_kept, device=xy_all.device)]
+            xy_te = xy_all[torch.as_tensor(te, device=xy_all.device)]
+            fz, fkw = field_from_spec(spec, vec.zidx, xy_tr)
+            rf = fit_field_knots(CubicSplinePSF(R, zr, device=self.dev, **self.grid), rois, xy_tr, vec, fz,
+                                 tile=fkw['tile'], iters=fkw['iters'], lr=fkw['lr'], zstarts=zs, var=var,
+                                 log=self._log('field'), stop=self.stop)
+            fres = dict(psf=rf['psf'], tiled=rf['psf'].to_tiled(tile=fkw['score_tile'], roisize=R, z_range=zr,
+                                                                **self.grid))
+            cands['field'] = fres['tiled']
+            self.report['field'] = dict(rf['report'], modes=fz.noll, orders=fz.orders, feats_norm=list(fz.norm),
+                                        block=rf['psf'].field_block(), score_tile=fkw['score_tile'])
         if self.refine and not self._stopped():
             s_ref = vec.to_spline(R, zr, **self.grid)          # a separate grid object: the fit overwrites its knots
             K_vec = s_ref.knots.clone()
@@ -585,31 +658,42 @@ class InSituEstimator(Estimator):
                                          at_limit=rr['report']['at_limit'])
             warnings.append(FREE_KNOT_WARNING)
         if len(te):
-            ho = compare_heldout(cands, rois_te, var_te)
+            ho = compare_heldout(cands, rois_te, var_te, zstarts=zs, xy=xy_te)
             self.report['heldout'] = ho
+            best = ho['vectorial']['nll_per_px']
             if 'refined' in cands:
                 better = ho['refined']['nll_per_px'] < ho['vectorial']['nll_per_px']
                 self.report['refine']['kept'] = bool(better)
                 if better:
                     result = result_spline = cands['refined']
-            ds = result_spline.fit(rois_te, var=var_te,
-                                   pixel_um=vec.pixel_um)
+                    best = ho['refined']['nll_per_px']
+            if 'field' in cands:
+                better = ho['field']['nll_per_px'] < best
+                self.report['field']['kept'] = bool(better)
+                if better:
+                    result, result_spline = fres['psf'], fres['tiled']
+            ds = result_spline.fit(rois_te, var=var_te, pixel_um=vec.pixel_um, zstarts=zs,
+                                   corners=sp.corner[torch.as_tensor(te, device=sp.corner.device)])
             c2 = float(ds['chi2'].median())
             self.report['heldout_chi2_median'] = c2
             if not 0.7 < c2 < 1.4:
                 warnings.append(f'held-out median chi2 per px {c2:.2f} (about 1 expected): check the camera gain / '
                                 f'offset / excess_noise')
+        elif fres:
+            result, result_spline = fres['psf'], fres['tiled']
         self.report['chosen'] = type(result).__name__
         self.report['seconds'] = time.time() - self._t0
         result.provenance = dict(estimator='InSituEstimator', settings=self._settings(), report=self.report)
         self.data = dict(spots=sp, train=tr, test=te, vectorial=vec, vectorial_spline=s_vec, psf=result,
                          spline=result_spline, **(first or {}))
+        if fres:
+            self.data.update(field_psf=fres['psf'], field_tiled=fres['tiled'])
         return result
 
     def _settings(self):
         keep = ('focus_um', 'roisize', 'z_range', 'nspots', 'nheldout', 'method', 'iters', 'reject_overlap',
                 'deviance_k', 'refine', 'threshold', 'isolation', 'tile', 'chunk',
-                'zernike_indices', 'npupil', 'scan_focus_um', 'scan_wavelength_um', 'scan_iters')
+                'zernike_indices', 'npupil', 'scan_focus_um', 'scan_wavelength_um', 'scan_iters', 'zstarts', 'field')
         d = {k: getattr(self, k) for k in keep}
         d['camera'] = None if self.camera is None else self.camera.to_dict()
         d['detect_kw'] = dict(self.detect_kw)
@@ -635,7 +719,14 @@ class PhaseDiversityEstimator(Estimator):
     emitter_z_um / render_size / oversample / window / eps / ls_iters / iters / cg_iters / max_planes: see
     estimation.fit_phase_diversity.
 
-    estimate(stacks, dz_um) -> VectorialPSF (roisize `roisize`, focus_um 0); report, patches (PDPatches), result."""
+    field: field-dependent Zernikes (a dict, torch_psf.field.field_from_spec: modes, order, prior_sd, iters): after
+    the shared pupil, a joint fit (from it, Poisson stage, the PSF held for field_warmup iterations) of the base and
+    a polynomial of the patch centre (camera px) per mode, over all training patches; the held-out patches are scored
+    with both (report heldout_deviance_per_px = shared pupil, report['field'] = the field fit's numbers) and the field
+    model (torch_psf.field.FieldPSF) is returned when it is better (or when nothing is held out).
+
+    estimate(stacks, dz_um) -> VectorialPSF (roisize `roisize`, focus_um 0) or FieldPSF; report, patches (PDPatches),
+    result, result_field."""
 
     def __init__(self, start=None, optics=None, camera=None, patch=64, step=None, region=None, field_stop='auto',
                  min_valid=0.5, min_signal=8.0, sign=1.0, method='poisson', fit_na=False, fit_apod=False,
@@ -643,9 +734,11 @@ class PhaseDiversityEstimator(Estimator):
                  patch_ls_iters=0, patch_iters=200, holdout=None, plane_step=1, focus_offset='patch', drift='poly',
                  drift_order=3, intensity='plane', bg='const', fit_dz_scale=False, emitter_z_um=0.0, render_size=41,
                  oversample=1, window=0.25, eps=1e-4, cg_iters=6, roisize=21, zernike_indices=tuple(range(5, 22)),
-                 npupil=64, oversample_pupil=3, max_planes=600, device=None, progress=None, stop=None):
+                 npupil=64, oversample_pupil=3, max_planes=600, field=None, field_warmup=40, device=None, progress=None,
+                 stop=None):
         super().__init__(device, progress, stop)
         self.start, self.optics, self.camera = start, optics, _camera(camera)
+        self.field, self.field_warmup = field, field_warmup
         self.patch, self.step, self.region, self.field_stop = patch, step, region, field_stop
         self.min_valid, self.min_signal, self.sign, self.method = min_valid, min_signal, sign, method
         self.fit = (('zcoef',) + (('NA',) if fit_na else ()) + (('apod',) if fit_apod else ())
@@ -698,8 +791,36 @@ class PhaseDiversityEstimator(Estimator):
             rh = fit_phase_diversity(pt.subset(np.nonzero(~train)[0]), focus, psf, fit=(), method='poisson',
                                      ls_iters=0, iters=max(self.iters // 2, 1), **self.fit_kw)
             self.report.update(heldout_deviance_per_px=rh['report']['deviance_per_px'],
-                               heldout_n_patches=int((~train).sum()))
+                               heldout_nll_per_px=rh['report']['nll_per_px'], heldout_n_patches=int((~train).sum()))
             self.heldout_result = rh
+        self.result_field = None
+        fpsf = None
+        if self.field and not self._stopped():
+            from torch_psf.field import field_from_spec, FieldPSF
+            off = np.asarray(self.region[:2] if self.region is not None else (0, 0), float)
+            cen = pt.centers + off                                           # patch centres, camera px
+            itr, iho = np.nonzero(train)[0], np.nonzero(~train)[0]
+            fz, fkw = field_from_spec(self.field, psf.zidx, cen[itr])
+            it_f = int(self.field.get('iters', self.iters)) if isinstance(self.field, dict) else self.iters
+            fk = dict(self.fit_kw)
+            rf = fit_phase_diversity(pt.subset(itr), focus, psf, fit=self.fit + ('field',), method='poisson',
+                                     ls_iters=0, iters=it_f, warmup=self.field_warmup, field=fz, field_xy=cen[itr],
+                                     log=self._log('phase_diversity field'), stop=self.stop, **fk)
+            fpsf = FieldPSF(rf['psf'], rf['field'])
+            fpsf.base.focus_um = 0.0
+            rr = rf['report']
+            self.report['field'] = dict(deviance_per_px=rr.get('deviance_per_px'), nll_per_px=rr.get('nll_per_px'),
+                                        field=rr.get('field'), NA=rr.get('NA'), apod=rr.get('apod'),
+                                        block=fpsf.field_block(), feats_norm=list(fz.norm), seconds=rr.get('seconds'))
+            better = True
+            if len(iho):
+                rhf = fit_phase_diversity(pt.subset(iho), focus, fpsf, fit=(), method='poisson', ls_iters=0,
+                                          iters=max(self.iters // 2, 1), field_xy=cen[iho], **fk)
+                self.report['field'].update(heldout_deviance_per_px=rhf['report']['deviance_per_px'],
+                                            heldout_nll_per_px=rhf['report']['nll_per_px'])
+                better = rhf['report']['nll_per_px'] < self.report['heldout_nll_per_px']
+            self.report['field']['kept'] = bool(better)
+            self.result_field = rf
         self.field, self.patch_psfs = [], []
         if self.per_patch:
             for i in np.nonzero(train)[0]:
@@ -720,6 +841,9 @@ class PhaseDiversityEstimator(Estimator):
                                        valid_fraction=float(pt.valid[i].mean())))
             self.report['n_field_patches'] = len(self.field)
         self.patches, self.result, self.focus_um, self.train = pt, r, focus, train
+        if fpsf is not None and self.report['field']['kept']:
+            psf = fpsf
+        self.report['chosen'] = type(psf).__name__
         self.report['seconds'] = time.time() - self._t0
         psf.provenance = dict(estimator='PhaseDiversityEstimator', dz_um=float(dz_um), report=self.report)
         return psf

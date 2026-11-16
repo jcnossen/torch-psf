@@ -63,7 +63,7 @@ def spread_order(n):
 
 @torch.no_grad()
 def extract_spots(movie, roisize, camera=None, frames=None, chunk=500, device=None, max_spots=None, stop=None,
-                  progress=None, sample='sequential', **detect_kw):
+                  progress=None, sample='sequential', detector=None, **detect_kw):
     """Detect spots on a movie (any reader of torch_psf.movie, a path or an array) and extract their ROIs.
 
     camera: Camera (ADU -> photons; None: the movie is already in photons). frames: (f0, f1) range (default all).
@@ -73,7 +73,9 @@ def extract_spots(movie, roisize, camera=None, frames=None, chunk=500, device=No
     Spots.frames_read = frames read, Spots.frame_ranges = the chunks read. stop(): optional callable that
     returns True to stop early (use what we have). progress(frames_done, frames_total, n_spots): optional callback.
     detect_kw: arguments of detect_spots (threshold, sigma, nms, noise, isolation, median); border defaults to
-    (P - 1) / 2 + 2 px. Returns Spots (on `device`)."""
+    (P - 1) / 2 + 2 px. detector: another detection function with the interface of detect_spots (frames [T, H, W]
+    photons, **detect_kw -> dict(frame, y, x, score)), e.g. torch_psf.matched_filter.MatchedFilterDetector for
+    engineered PSFs. Returns Spots (on `device`)."""
     mv = open_movie(movie)
     device = resolve_device(device)
     f0, f1 = (0, mv.n) if frames is None else frames
@@ -91,7 +93,7 @@ def extract_spots(movie, roisize, camera=None, frames=None, chunk=500, device=No
         x = torch.as_tensor(mv.read(t0, t1)).to(device).float()
         if camera is not None:
             x = camera.to_photons(x)
-        p = detect_spots(x, **detect_kw)
+        p = (detect_spots if detector is None else detector)(x, **detect_kw)
         t, y, xx = p['frame'], p['y'], p['x']
         rois.append(extract_rois(x, t, y, xx, roisize))
         fr.append(t + t0)

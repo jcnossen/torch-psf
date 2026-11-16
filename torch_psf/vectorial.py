@@ -154,6 +154,9 @@ class VectorialPSF(torch.nn.Module, PSF):
         s_med = (NA * self.rho / self.n_med).to(torch.complex64)
         c_med = torch.sqrt(1 - s_med ** 2)  # complex; imag > 0 for supercritical angles
         c_med = torch.where(c_med.imag < 0, -c_med, c_med)
+        # a pupil sample exactly at the critical angle (NA rho = n_med, e.g. while NA is fitted) has c_med = 0; the
+        # fields below are finite there (t_s, t_p ~ c_med cancel the 1 / c_med), so move it off the singularity
+        c_med = torch.where(c_med.abs() < 1e-6, torch.full_like(c_med, 1e-6j), c_med)
         n1, n2 = self.n_med.to(torch.complex64), self.n_imm
         ts = 2 * n1 * c_med / (n1 * c_med + n2 * c_imm)
         tp = 2 * n1 * c_med / (n2 * c_med + n1 * c_imm)
