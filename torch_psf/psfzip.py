@@ -423,16 +423,26 @@ class PSFZip:
     def channel(self, c):
         return self.channels[_channel_index(self.meta, c)]
 
-    def multichannel(self):
+    def multichannel(self, field=False, mapping=False):
         """The file's PSF as a MultiChannelPSF (torch_psf.multichannel): a coupled (4Pi) model itself, else a ChannelsPSF
-        of the channel models (also for a single channel) with the channels' intensity_ratio and names. Channel
-        offsets are zero: the mapping of the channels (Channel.to_ref / from_ref) gives the per-spot offsets of ROIs
-        cut per channel (fit(..., offsets=)). Additive convenience; the file layout is unchanged."""
+        of the channel models (also for a single channel) with the channels' intensity_ratio and names. Default:
+        the field-constant channel models and zero channel offsets (the mapping of the channels, Channel.to_ref /
+        from_ref, gives the per-spot offsets of ROIs cut per channel: fit(..., offsets=)). field=True: the
+        field-dependent models (Channel.psf: FieldPSF / TiledSplinePSF) where a channel has a field block;
+        mapping=True: the channels' mappings as torch_psf.mapping.ChannelMap (identity / affine / poly; then
+        fit(rois, corners=[N, C, 2]) with ROIs cut by torch_psf.mapping.channel_rois). Additive convenience; the
+        file layout is unchanged."""
         from torch_psf.multichannel import MultiChannelPSF, ChannelsPSF
         if isinstance(self.psf, MultiChannelPSF):
             return self.psf
-        return ChannelsPSF([c.model for c in self.channels], intensity_ratio=[c.intensity_ratio for c in self.channels],
-                           names=[c.name for c in self.channels])
+        maps = None
+        if mapping:
+            from torch_psf.mapping import ChannelMap
+            dev = self.channels[0].model.dev
+            maps = [ChannelMap.from_block(c.mapping, c.index, c.crop, device=dev) for c in self.channels]
+        return ChannelsPSF([c.psf if field else c.model for c in self.channels],
+                           intensity_ratio=[c.intensity_ratio for c in self.channels],
+                           names=[c.name for c in self.channels], mappings=maps)
 
     @property
     def acquisition(self):
