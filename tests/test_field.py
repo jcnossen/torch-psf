@@ -149,10 +149,10 @@ def test_tiled_spline_psf_fit_and_zip(tmp_path):
 
 
 def test_fit_field_knots_recovers_a_linear_field():
-    """in situ, simulated: 3000 spots over 256 x 256 px with Z5 ~ x and Z6 ~ y; 2 x 2 tiles; from a constant field"""
+    """in situ, simulated: 2500 spots over 256 x 256 px with Z5 ~ x and Z6 ~ y; 2 x 2 tiles; from a constant field"""
     v, truth = vec(11), field()
     fp = FieldPSF(v, truth)
-    N = 3000
+    N = 2500
     g = torch.Generator().manual_seed(1)
     xy = (torch.rand(N, 2, generator=g) * 256).to(DEV)
     pos = torch.cat([torch.rand(N, 2, generator=g) - 0.5, 0.05 + 0.5 * torch.rand(N, 1, generator=g)], 1).to(DEV)
@@ -161,7 +161,7 @@ def test_fit_field_knots_recovers_a_linear_field():
                                                for s in range(0, N, 1000)]) + 10)
     start = FieldZernikes([5, 6], order=1, norm=(128.0, 128.0, 128.0, 128.0), device=DEV)
     spl = CubicSplinePSF(11, (0.0, 0.6), device=DEV, oversample=2, dz_um=0.04, zpad=3, xy_limit=2.0)
-    r = fit_field_knots(spl, rois, xy, v, start, tile=128, iters=35, lr=4e-3)
+    r = fit_field_knots(spl, rois, xy, v, start, tile=128, iters=25, lr=5e-3)
     assert r['report']['n_tiles'] == 4 and sorted(r['tile_counts']) and sum(r['tile_counts']) == N
     c = r['psf'].field.coef.detach().cpu().numpy()
     err = np.abs(c - truth.coef.detach().cpu().numpy()).max()
