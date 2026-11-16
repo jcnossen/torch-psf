@@ -81,7 +81,7 @@ class Fitter:
         return r2['psf'], rep
 
 
-def heldout(fitter, cands, rois, var):
+def heldout(fitter, cands, rois, var, raw=False):
     """per-spot held-out NLL of each candidate (dict name -> VectorialPSF); differences to 'global' per spot"""
     out, nl = {}, {}
     P2 = rois[0].numel()
@@ -93,7 +93,7 @@ def heldout(fitter, cands, rois, var):
         d = nl[k] - nl['global']
         out[k].update(dnll_per_spot_vs_global=float(d.mean()), dnll_se=float(d.std(ddof=1) / np.sqrt(len(d))),
                       dnll_total_vs_global=float(d.sum()), frac_spots_better=float((d < 0).mean()))
-    return out
+    return (out, nl) if raw else out
 
 
 def main():

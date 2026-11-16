@@ -2,7 +2,7 @@
 
 For one bead stack (61 planes, 100 nm steps): the beads of their calibration (their pos list) are cut out as roisize
 ROIs; first one joint fit of all beads (shared Zernikes, started from zero aberrations, i.e. independent of their
-numbers), then every bead on its own, started from the joint fit, and again from the fits of its 3 nearest beads and
+numbers), then every bead on its own, started from the joint fit, and again from the fits of its 2 nearest beads and
 from the median of all, each with that start's bead height (pass 2 against local minima; the lowest NLL is kept): Zernikes, xy, per-plane photons / background, a
 cubic lateral drift over the planes and the bead height (= axial offset from the stack centre; n_med = n_imm, so
 height and focus offset are the same thing). The movie is converted to photons with the photon-transfer gain.
@@ -38,12 +38,12 @@ def main():
     ap.add_argument('--sign', type=float, default=1.0, help='focus = sign dz (k - 30): +1 = focus moves up with k')
     ap.add_argument('--roisize', type=int, default=61)
     ap.add_argument('--gain', type=float, default=0.818); ap.add_argument('--offset', type=float, default=100.0)
-    ap.add_argument('--joint_iters', type=int, default=600); ap.add_argument('--iters', type=int, default=400)
+    ap.add_argument('--joint_iters', type=int, default=600); ap.add_argument('--iters', type=int, default=600)
     ap.add_argument('--npupil', type=int, default=64); ap.add_argument('--oversample', type=int, default=3)
     ap.add_argument('--beads', type=int, nargs='*', default=None, help='subset of bead indices')
     ap.add_argument('--chunk', type=int, default=3)
     ap.add_argument('--pixel_um', type=float, default=0.108)
-    ap.add_argument('--restarts', type=int, default=3, help='pass 2: restarts from the nearest beads')
+    ap.add_argument('--restarts', type=int, default=2, help='pass 2: restarts from the nearest beads')
     a = ap.parse_args()
     dev = torch.device('cuda')
     t0 = time.time()

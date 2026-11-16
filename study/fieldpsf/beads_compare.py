@@ -53,10 +53,17 @@ def main():
     print('rms difference ours - theirs (waves) per convention:', {k: round(v, 4) for k, v in conv.items()})
     res['convention_rms'] = conv
     th = theirs_to_ours(th_raw, transpose=True)
+    rb = np.sqrt(((ours - th) ** 2).mean(1))
+    res['per_bead'] = [dict(stack=r['stack'], index=r['index'], x=r['x'], y=r['y'], rms=float(v), nll_per_px=r['nll_per_px'],
+                            chi2=r['chi2_median'], photons=r['photons_median'], start=r.get('start'))
+                       for r, v in zip(rows, rb)]
+    print('per-bead rms ours - theirs (waves): median %.4f, p90 %.4f, max %.4f; beads with rms > 0.01: %s' % (
+        np.median(rb), np.percentile(rb, 90), rb.max(),
+        [(r['stack'], r['index'], round(float(v), 3)) for r, v in zip(rows, rb) if v > 0.01]))
     per = compare_modes(ours, th)
     res['vs_their_beads'] = per
     print('\n### ours vs their per-bead fits (same beads), waves rms\n')
-    print(fmt_table(per, ['label', 'mean_ours', 'mean_theirs', 'mean_diff', 'rms_diff', 'std_ours', 'std_theirs', 'r']))
+    print(fmt_table(per, ['label', 'mean_ours', 'mean_theirs', 'mean_diff', 'rms_diff', 'med_abs_diff', 'std_ours', 'std_theirs', 'r']))
     # spatial variation explained: rms of the field variation in either, and the residual
     dv = (ours - ours.mean(0)) - (th - th.mean(0))
     res['field_variation'] = dict(rms_ours=float(np.sqrt(((ours - ours.mean(0)) ** 2).mean())),
@@ -71,8 +78,8 @@ def main():
         per_m = compare_modes(ours, mv)
         res[f'vs_map_{name}'] = per_m
         print(f'\n### ours vs aber_map "{name}" at the bead positions\n')
-        print(fmt_table(per_m, ['label', 'mean_ours', 'mean_theirs', 'mean_diff', 'rms_diff', 'std_ours', 'std_theirs',
-                                'r']))
+        print(fmt_table(per_m, ['label', 'mean_ours', 'mean_theirs', 'mean_diff', 'rms_diff', 'med_abs_diff', 'std_ours',
+                                'std_theirs', 'r']))
         print('overall rms diff', float(np.sqrt(((ours - mv) ** 2).mean())),
               'after removing the mean offset per mode', float(np.sqrt((((ours - ours.mean(0)) - (mv - mv.mean(0))) ** 2).mean())))
         res[f'vs_map_{name}_overall'] = dict(rms=float(np.sqrt(((ours - mv) ** 2).mean())),

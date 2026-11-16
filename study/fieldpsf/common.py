@@ -106,7 +106,7 @@ def map_at(A, x, y, half=0):
 
 
 def compare_modes(ours, theirs, noll=THEIR_NOLL):
-    """per-mode agreement of two sets [n, 21] (waves): mean diff, rms diff, std of each over the set, Pearson r
+    """per-mode agreement of two sets [n, 21] (waves): mean diff, rms diff, median |diff|, std of each over the set, Pearson r
     (over the set; nan if one is constant) and the slope of a least-squares fit theirs = a ours + b"""
     ours, theirs = np.asarray(ours, np.float64), np.asarray(theirs, np.float64)
     out = []
@@ -116,7 +116,8 @@ def compare_modes(ours, theirs, noll=THEIR_NOLL):
         slope = float(np.polyfit(a, b, 1)[0]) if a.std() > 0 else float('nan')
         out.append(dict(noll=j, nm=list(noll_to_nm(j)), label=mode_label(j), mean_ours=float(a.mean()),
                         mean_theirs=float(b.mean()), mean_diff=float((a - b).mean()),
-                        rms_diff=float(np.sqrt(((a - b) ** 2).mean())), std_ours=float(a.std()),
+                        rms_diff=float(np.sqrt(((a - b) ** 2).mean())), med_abs_diff=float(np.median(np.abs(a - b))),
+                        std_ours=float(a.std()),
                         std_theirs=float(b.std()), r=r, slope=slope))
     return out
 
