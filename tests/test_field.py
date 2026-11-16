@@ -221,3 +221,37 @@ def test_dense_beads_field_recovers_polynomial():
     zt = (truth.zcoef[None] + f.offsets(pts, truth.zidx)).detach().cpu().numpy()[:, :2]
     zf = psf.zernikes_at(pts)[:, :2]
     assert np.abs(zf - zt).max() < 0.006, np.abs(zf - zt).max()
+
+
+@needs_gpu
+def test_insitu_estimator_field_option():
+    """InSituEstimator(field=) on a simulated movie with a linear Z6 field: the field model wins on held-out spots"""
+    from torch_psf import InSituEstimator
+    v = VectorialPSF(13, pixel_um=0.1, NA=1.4, zernike_indices=(5, 6, 11), device=DEV, focus_um=0.3,
+                     z_range=(0.0, 0.6), **PUP).set_zernike({6: 0.08})
+    f = FieldZernikes([6], order=1, norm=(128.0, 128.0, 128.0, 128.0), device=DEV)
+    with torch.no_grad():
+        f.coef.copy_(torch.tensor([[0.0, 0.06]]))                         # Z6 0.02 .. 0.14 waves across x
+    fp = FieldPSF(v.resized(17), f)
+    g = torch.Generator(device=DEV).manual_seed(0)
+    T, H, n = 80, 256, 60
+    mov = torch.full((T, H, H), 10.0, device=DEV)
+    for t in range(T):
+        xy = 12 + torch.rand(n, 2, device=DEV, generator=g) * (H - 24)
+        z = 0.05 + 0.5 * torch.rand(n, 1, device=DEV, generator=g)
+        r = torch.round(xy)
+        with torch.no_grad():
+            img = 3000 * fp.render(torch.cat([xy - r, z], 1), xy=xy)
+        for i in range(n):
+            x0, y0 = int(r[i, 0]) - 8, int(r[i, 1]) - 8
+            mov[t, y0:y0 + 17, x0:x0 + 17] += img[i]
+    mov = torch.poisson(mov, generator=g)
+    est = InSituEstimator(start=v, roisize=13, z_range=(0.0, 0.6), nspots=2500, nheldout=1000, iters=15,
+                          xy_limit=2.0, isolation=8, device=DEV, reject_overlap=False,
+                          field=dict(modes=[6], order=1, tile=128, iters=25, lr=4e-3, score_tile=64))
+    psf = est.estimate(mov.cpu().numpy())
+    rep = est.report
+    assert isinstance(psf, FieldPSF) and rep['field']['kept'], rep['heldout']
+    assert rep['heldout']['field']['dnll_per_spot_vs_first'] < rep['heldout']['vectorial']['dnll_per_spot_vs_first']
+    c = psf.field.coef.detach().cpu().numpy()
+    assert abs(c[0, 1] - 0.06) < 0.015 and abs(c[0, 0]) < 0.015, c

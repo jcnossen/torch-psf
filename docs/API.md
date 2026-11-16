@@ -38,6 +38,7 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
 │                from_optics, optics, to_spline(..., pos_fn))
 ├── CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
 │                knots_from_model, knots_from_vectorial, vjp_vectorial, from_zstack
+├── FieldPSF(base, field), TiledSplinePSF(field_psf, tile, ...)   field-dependent (see Field-dependent PSFs)
 └── MultiChannelPSF: ChannelsPSF, FourPiPSF, FourPiSplinePSF   images [N, C, P, P] (see Multi-channel PSFs)
 
 Estimator (torch_psf.estimators)             report (dict), history (list), data (dict), progress / stop hooks
@@ -45,7 +46,8 @@ Estimator (torch_psf.estimators)             report (dict), history (list), data
 │                   nbeads=8, sign=1.0, iters=300, holdout=None, drift=True, regularize=3000.0, ...)
 │     .estimate(stacks, dz_um) -> VectorialPSF | CubicSplinePSF | AstigmaticGaussianPSF
 └── InSituEstimator(start=None, optics=None, camera=None, focus_um=None, roisize=15, z_range=(0, 0.8), nspots=8000,
-                    nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0, refine=False, ...)
+                    nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0, refine=False,
+                    detector=None, zstarts=5, field=None, ...)
       .estimate(movie, frames=None) -> VectorialPSF (or the refined CubicSplinePSF if it wins on held-out spots)
 ```
 ZStackEstimator conventions: plane k at focus `sign dz_um (k - (nk - 1) / 2)`; the vectorial result has `focus_um = 0`;
@@ -184,6 +186,50 @@ loss = NLL(rois) + w_stack NLL(stack) + lam_ref sum((K - ref)^2 / (|ref| + 1e-4)
 `z_scale(psf_new, psf_ref, z_range=None, n=33, photons=1e5, bg=1)`: noise-free emitters at x = y = 0 and n heights
 `linspace(z_range)` rendered with psf_new, localized with psf_ref; least-squares line through the inner 80 % (indices
 `int(0.1 n) .. n - int(0.1 n)`): returns (slope d z_ref / d z_new, offset at the centre of that range, um).
+
+## Field-dependent PSFs (`torch_psf.field`, single channel; `docs/notes/field_psf_lib.md`)
+
+```
+FieldZernikes(noll, order=1, norm=(cx, cy, sx, sy), ref=None, prior_sd=0.05, clamp=True)   torch.nn.Module
+    .from_positions(noll, order, xy, margin=0)        norm = the bounding box of xy (the fitted support)
+    forward(xy) / relative(xy) / offsets(xy, zidx)    [N, k] / [N, k] / [N, nz] waves (differentiable)
+    penalty(), to_block(waves_at_ref), from_block(d) -> (field, const)
+FieldPSF(base: VectorialPSF, field)                   PSF; render(pos, grad=False, xy=None), at(x, y),
+    zernikes_at(xy), fit(rois, corners=, xy=), bind(xy), to_tiled(tile, extent, roisize, z_range, **grid)
+TiledSplinePSF(field_psf, tile, extent, roisize, z_range, lazy=True, **grid)   one CubicSplinePSF per tile
+    render(pos, grad, xy), tile_index(xy), spline(t), fit(rois, corners=, xy=)
+```
+- W_j(x, y) = W_j(ref) + sum_{1 <= i + k <= o_j} c_{j,ik} (u^i v^k - u_ref^i v_ref^k), u = clip((x - cx) / sx, -1, 1),
+  v = clip((y - cy) / sy, -1, 1): the PolyMap features of psf.zip (i outer, k inner), x = column, y = row in camera
+  (channel crop) px. The base VectorialPSF is the model at the reference point (default (cx, cy)). Per-mode order
+  o_j in {0, 1, 2}; coef [k, nf - 1] masked by it. The clip (per coordinate, the feats_norm box) is the
+  no-extrapolation rule; `psfzip.FieldZernikePoly` applies the same clip.
+- Ridge prior `penalty() = 0.5 sum (c / prior_sd)^2` (NLL units, c in waves at the box edge).
+- psf.zip: `io.save_zip(path, field_psf)` writes the base model plus the channel `field` block
+  (`zernike_poly`, unchanged format; per-mode orders are the zero pattern of `coef`); a TiledSplinePSF is written as
+  its reference spline with the vectorial `source` and the block, its tile grid in `provenance['field_tiles']`.
+  `PSF.load` / `io.load(path, channel=)` / `PSFZip.read(path).psf` (single channel) / `Channel.psf` return
+  FieldPSF (vectorial channel) or TiledSplinePSF (spline channel with a vectorial source).
+- Localization: `FieldPSF.fit` evaluates each ROI at its own position (corners + (P - 1) / 2, or `xy`);
+  `TiledSplinePSF.fit` uses the spline of the tile that holds the ROI centre (input order kept). `PSF.localize` of
+  either works through `fit`.
+- Estimation: `estimation.fit_field_knots(spline, rois, xy, vectorial, field, tile=256, extent=None, iters=60,
+  lr=2e-3, lr_field=None, zstarts=5, var=None, fit_base=True, min_spots=30)`: per tile (tiles with fewer than
+  min_spots spots merged into the nearest one) a knot build at base + field(c_t), c_t = the tile's mean spot
+  position, localization, knot gradient and VJP g_t; d/d base = sum g_t, d/d coef = sum g_t d field(c_t) / d coef
+  + the prior; Adam. `fit_dense_beads(..., fit=(..., 'field'), field=, field_xy=)`, `fit_phase_diversity(...,
+  field=, field_xy=)`: every bead / patch at its own polynomial Zernikes. Estimators: `field=` (dict: modes, order,
+  prior_sd, margin, iters, lr, tile, score_tile; `field.field_from_spec`) in InSituEstimator, DenseBeadEstimator,
+  PhaseDiversityEstimator: a field fit started from the global fit, scored on the held-out data against it
+  (`report['field']`), returned when it wins.
+- Held-out helpers: `heldout_nll / compare_heldout / spot_deviance(..., zstarts=5, xy=None)`; xy = field positions
+  of the ROIs for field-dependent models. `compare_heldout` also gives `dnll_per_spot_vs_first`, `dnll_se`,
+  `frac_better`.
+
+Detection for engineered PSFs (`torch_psf.matched_filter`): `MatchedFilterDetector(psf, z_um=None, dz_um=0.2,
+size=None, nms=21)` (zero-mean unit-norm templates of the model at heights z, FFT correlation per frame, each template
+response / its 1.4826 MAD, maximum over templates, max-pool peaks above `threshold`; returns detect_spots' dict plus
+`z`); `extract_spots(..., detector=)`, `InSituEstimator(detector=, zstarts=)`.
 
 ## Simulation
 

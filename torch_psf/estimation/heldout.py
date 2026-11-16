@@ -51,26 +51,26 @@ def compare_heldout(psfs, rois, var=None, zstarts=5, xy=None):
 
 
 @torch.no_grad()
-def spot_deviance(psf, rois, var=None, theta=None, zstarts=5, xy=None):
+def spot_deviance(psf, rois, var=None, theta=None, zstarts=5, xy=None, batch=4000):
     """Poisson deviance per pixel of every ROI under psf after its MLE fit (theta: fitted parameters, else fitted
     here): 2 sum(d log(d / mu) - (d - mu)) / P^2, about 1 for a spot the model explains. Overlapping emitters and
     other spots the single-emitter model does not explain give larger values. Returns (deviance [N] numpy, theta).
     zstarts / xy: as heldout_nll (a field-dependent model needs xy)."""
     if theta is None:
         theta, _ = _localize(psf, rois, None, var, zstarts, xy)
-    if xy is not None and hasattr(psf, 'bind'):
+    field = xy is not None and hasattr(psf, 'bind')
+    if field:
         from torch_psf.estimation.field_knots import expected_field
-        mu = expected_field(psf, theta, xy)
-        d = rois
-        if var is not None:
-            d, mu = d + var, mu + var
+        xy = torch.as_tensor(xy, dtype=torch.float32, device=rois.device).reshape(-1, 2)
+    out = []
+    for s in range(0, len(rois), batch):                   # in batches: [N, P, P] images of a large set
+        th = theta[s:s + batch]
+        mu = expected_field(psf, th, xy[s:s + batch]) if field else psf.expected(th)
+        d = rois[s:s + batch]
+        v = var[s:s + batch] if (torch.is_tensor(var) and var.dim() > 0) else var
+        if v is not None:
+            d, mu = d + v, mu + v
         dv = 2 * (torch.where(d > 0, d * torch.log(d.clamp_min(1e-9) / mu.clamp_min(1e-6)), torch.zeros_like(d))
                   - (d - mu))
-        return (dv.flatten(1).sum(1) / d[0].numel()).cpu().numpy(), theta
-    mu = psf.expected(theta)
-    d = rois
-    if var is not None:
-        d, mu = d + var, mu + var
-    dv = 2 * (torch.where(d > 0, d * torch.log(d.clamp_min(1e-9) / mu.clamp_min(1e-6)), torch.zeros_like(d))
-              - (d - mu))
-    return (dv.flatten(1).sum(1) / d[0].numel()).cpu().numpy(), theta
+        out.append((dv.flatten(1).sum(1) / d[0].numel()).cpu().numpy())
+    return (np.concatenate(out) if out else np.zeros(0)), theta
