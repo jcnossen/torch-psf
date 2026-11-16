@@ -67,9 +67,11 @@ PSF
       intensity_ratio [C],                   mu_and_jacobian(theta, offsets) -> (mu, J [N, 4 + C + k, C, P, P])
       set_channel_offsets(v, trainable),     fisher / covariance / crlb(theta, var, offsets, fixed)
       channel_positions(pos, offsets)        fit_theta(rois [N, C, P, P], theta0, var, offsets, fixed, ...) -> (theta, nll)
-                                             fit(rois, ..., offsets=None, fixed=()) -> Dataset
+      set_mappings(maps), mapped,            fit(rois, ..., offsets=None, fixed=()) -> Dataset
+      mapped_positions(pos, offsets, corners)   (all of these take corners=[N, C, 2] with mappings)
                                              localize(movie): NotImplementedError (needs the channel mapping)
-    ├── ChannelsPSF(models, channel_offsets=None, intensity_ratio=None, names=None)   independent channels
+    ├── ChannelsPSF(models, channel_offsets=None, intensity_ratio=None, names=None, mappings=None)   independent
+    │       channels (models may be FieldPSF / TiledSplinePSF); to_tiled(tile, ...)
     ├── FourPiPSF (also a torch.nn.Module)                   extra_params ('phi',)
     └── FourPiSplinePSF                                      extra_params ('phi',); render(..., knots=)
 ```
@@ -101,7 +103,57 @@ PSF
   M)`, `forward(pos, M, phi_extra, intensity, bg)`; `expected(theta)` takes the multi-channel theta
   [N, 4 + C + 1].
 - **psf.zip**: `PSFZip.read(path).multichannel()` = the coupled model, or a `ChannelsPSF` of the channel models with
-  their `intensity_ratio` (offsets zero; the channel `mapping` gives per-spot offsets). The format is unchanged.
+  their `intensity_ratio` (offsets zero; the channel `mapping` gives per-spot offsets); `multichannel(field=True,
+  mapping=True)`: the field-dependent channel models and the mappings as `ChannelMap`s (below). The format is
+  unchanged.
+
+### Channel mappings and several field-dependent channels (`torch_psf.mapping`; `docs/notes/multichannel_field.md`)
+
+```
+ChannelMap(order=1, norm=(cx, cy, sx, sy), inv=None, fwd=None, index=1, identity=False, fit='all')   nn.Module
+    from_ref(xy) -> channel px (differentiable; inv [nf, 2] px), to_ref(xy) (exact for order 1, else fwd + Newton),
+    jacobian(xy) [N, 2, 2], linear(), describe() (shift, rotation, scale, flip), flip(), refit_fwd(extent),
+    to_block(index, extent, kind) / ChannelMap.from_block(block, index, crop)   psf.zip identity / affine / poly
+    .identity_map(index, norm), .translation(d), .from_affine(A [2, 3]), .fit_points(ref_xy, ch_xy, order, norm)
+register_points(ref_xy, ch_xy, frame_shape, flips=(...), order=1) -> (ChannelMap, (i_ref, i_ch), info)
+channel_rois(images [c] [F, H, W], frame [N], xy_ref [N, 2], maps, roisize) -> (rois [N, C, P, P], corners [N, C, 2])
+MultiChannelPSF.set_mappings(maps) / ChannelsPSF(models, ..., mappings=maps): render / expected / mu_and_jacobian /
+    fisher / crlb / fit_theta / fit(..., corners=[N, C, 2])
+PSFZip.read(path).multichannel(field=False, mapping=False)
+```
+- **Mapped geometry**: with mappings, channel c renders the emitter at `pos_c = from_ref_c(corner_0 + h + (x, y)) -
+  corner_c - h` (+ channel_offsets + offsets; h = (P - 1) / 2), with the per-spot ROI corners of every channel in its
+  crop coordinates (`corners [N, C, 2]`, required); d/dx, d/dy go through the mapping Jacobian (rotation, scale,
+  flip), so fits, Fisher information and CRLB are exact for any affine / polynomial map. `fit` returns positions in
+  reference-channel coordinates. Without mappings (default) the offset-only geometry is unchanged.
+  `ChannelMap.translation(d)` reproduces `channel_offsets = d`.
+- **Field-dependent channels**: a ChannelsPSF channel may be a `FieldPSF` / `TiledSplinePSF`; it is evaluated at its
+  ROI centre `corner_c + h` in its own channel coordinates (its field block's coordinates). `ChannelsPSF.to_tiled(tile,
+  roisize, z_range)` turns every FieldPSF channel into its tiled spline form.
+- **ChannelMap**: the SIMCODE PolyMap features (u^i v^j, i outer; u = (x - cx) / sx), one `norm` for both directions,
+  coefficients in px (`inv`: reference -> channel, the model direction; `fwd`: the inverse polynomial, refitted on a
+  grid by `refit_fwd` / `to_block`). An order-1 map is written as an `affine` block (channel -> reference matrix), a
+  higher one as a `poly` block with `roundtrip_px`; `from_block` reads identity / affine / poly (a grid mapping has no
+  polynomial form). `set_fit('all' | 'affine' | 'shift')` masks the trainable coefficients.
+- **Estimation** (`torch_psf.estimation.multichannel_beads`): `build_multichannel_beads(stacks[c][s], maps, patch,
+  masks, ...)` -> `MultiChannelBeads` (detections of every channel merged in reference coordinates, clusters by box
+  overlap in any channel, one `BeadClusters` per channel with the clusters usable there, global bead / cluster ids;
+  `subset(ids)`, `channel(c)`); `fit_multichannel_beads(data, focus_um, psfs, maps, iters=300, lr=3e-3,
+  fit=('zcoef',), share=(), fields=None, fit_mapping=True, map_mode='all', train=None, focus_offset='bead',
+  channel_focus=True, intensity='free', ...)`: shared bead positions (reference channel) and focus offsets, per channel
+  photons, backgrounds, PSF (Zernikes, NA / apod per channel or `share`d), field polynomial (channel coordinates) and
+  focus offset (channel 0 fixed), the mappings of channels 1.. fitted jointly, a shared drift; Poisson likelihood
+  summed over channels, Adam; held-out clusters refitted and scored per channel. `multichannel_nll(data, focus_um,
+  psfs, maps, channel_focus=, fit_channel_focus=False)` scores fixed models. Helpers: `channel_stop_mask` (field stop
+  robust to a background gradient), `detect_channels`, `register_channels` (flip / shift / affine from the bead
+  detections), `simulate_multichannel_beads`.
+- **Estimator**: `MultiChannelBeadEstimator(regions, names=None, start=None, optics=None, camera=None, ...,
+  mapping_order=1, fit_mapping=True, joint=True, share=(), channel_focus=True, field=None, holdout=None, ...)`;
+  `estimate(stacks, dz_um)` -> ChannelsPSF (VectorialPSF / FieldPSF per channel with `focus_um` = the channel focus
+  offset, the fitted mappings, intensity ratios); `model_of(est.result | est.result_field)`, `channel_entries()`,
+  `save_zip(path, camera=None, psf=None)`: one psf.zip with every channel's model, mapping, crop, flip, intensity
+  ratio and field block (format unchanged). `joint=False` fits every channel on its own and refits the mapping to the
+  fitted bead positions.
 
 ## Detection and spots (`torch_psf.detect`, `torch_psf.spots`)
 
