@@ -5,7 +5,8 @@ localize (movie -> localizations), save / PSF.load (also psf.zip: io.save_zip, d
 the models VectorialPSF, CubicSplinePSF,
 GaussianPSF and AstigmaticGaussianPSF, and the multi-channel models (MultiChannelPSF, torch_psf.multichannel; images
 [N, C, P, P], fit / crlb on all channels jointly): ChannelsPSF (independent channels) and the coherent 4Pi models
-FourPiPSF and FourPiSplinePSF (torch_psf.fourpi). PSFs are estimated with ZStackEstimator (bead z-stacks; DenseBeadEstimator for dense, overlapping beads) and InSituEstimator
+FourPiPSF and FourPiSplinePSF (torch_psf.fourpi). PSFs are estimated with ZStackEstimator (bead z-stacks; DenseBeadEstimator for dense, overlapping beads;
+PhaseDiversityEstimator: phase diversity, the object eliminated) and InSituEstimator
 (from the SMLM movie itself).
 
 Conventions: x = column, y = row, in px, pixel centres at integers; ROI positions are offsets from the ROI centre;
@@ -37,6 +38,6 @@ from torch_psf.multichannel import MultiChannelPSF, ChannelsPSF
 from torch_psf.fourpi import FourPiPSF, FourPiSplinePSF
 from torch_psf.detect import detect_spots
 from torch_psf.spots import extract_spots
-from torch_psf.estimators import ZStackEstimator, DenseBeadEstimator, InSituEstimator
+from torch_psf.estimators import ZStackEstimator, DenseBeadEstimator, InSituEstimator, PhaseDiversityEstimator
 from torch_psf.dataset import Dataset
 from torch_psf import fit, estimation, simulate, spots, detect, io, zernike, optics, camera   # noqa: F401
