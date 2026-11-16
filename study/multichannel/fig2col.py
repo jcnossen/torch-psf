@@ -14,13 +14,25 @@ dev = 'cpu'
 MODES = [5, 6, 7, 8, 11, 12, 13]
 runs = [k for k in ('indep', 'joint', 'joint_shared', 'joint_poly2') if os.path.exists(os.path.join(base, k, 'psf_field.zip'))]
 models = {k: zip_model(os.path.join(base, k, 'psf_field.zip'), dev) for k in runs}
-dd = np.load(os.path.join(base, 'joint', 'data.npz'))
+dd = np.load(os.path.join(base, 'joint', 'data.npz'), allow_pickle=False)
 masks = dd['masks'] if dd['masks'].size else None
 W, H = 475, 400
 gx, gy = np.meshgrid(np.arange(0, W, 5), np.arange(0, H, 5))
 g = torch.tensor(np.stack([gx.ravel(), gy.ravel()], 1), dtype=torch.float32)
 show = [k for k in ('indep', 'joint') if k in models]
 fig, ax = plt.subplots(2 * len(show), len(MODES), figsize=(2.6 * len(MODES), 2.3 * 2 * len(show)))
+# Use one colour range per channel and mode for independent/joint comparisons.
+limits = {}
+for c in range(2):
+    for n in MODES:
+        vals = []
+        for k in show:
+            m = models[k][0][c]
+            v = (m.base.zcoef.detach()[None] + m.field.offsets(g, m.base.zidx).detach()).numpy()[:, m.base.zidx.index(n)] * 1000
+            if masks is not None:
+                v = v[masks[c, 0][::5, ::5].ravel().astype(bool)]
+            vals.append(v)
+        limits[c, n] = (min(float(v.min()) for v in vals), max(float(v.max()) for v in vals))
 out = {}
 for r, (k, c) in enumerate([(k, c) for c in range(2) for k in show]):
     psfs, maps, cf = models[k]
@@ -33,7 +45,7 @@ for r, (k, c) in enumerate([(k, c) for c in range(2) for k in show]):
             v = np.where(masks[c, 0][::5, ::5], v, np.nan)
         out[f'{k}_ch{c}'][n] = dict(min=float(np.nanmin(v)), max=float(np.nanmax(v)), mean=float(np.nanmean(v)))
         a = ax[r, j]
-        im = a.imshow(v, extent=(0, W, H, 0), cmap='coolwarm')
+        im = a.imshow(v, extent=(0, W, H, 0), cmap='coolwarm', vmin=limits[c, n][0], vmax=limits[c, n][1])
         a.set_title(f'{NAMES[c]} {k}: Z{n}\n{np.nanmin(v):.0f} .. {np.nanmax(v):.0f} mλ', fontsize=8)
         a.set_xticks([]); a.set_yticks([])
         plt.colorbar(im, ax=a, fraction=0.04)
@@ -53,7 +65,7 @@ for n in MODES:
 json.dump(dict(maps=out, corr=corr), open(os.path.join(base, 'field_maps.json'), 'w'), indent=1)
 
 # mapping: residuals of the independent bead positions
-z = np.load(os.path.join(base, 'indep', 'fit_field.npz'))
+z = np.load(os.path.join(base, 'indep', 'fit_field.npz'), allow_pickle=False)
 xy = z['xy_channels']
 ok = np.isfinite(xy[0]).all(1) & np.isfinite(xy[1]).all(1) & ~dd['faint'].astype(bool)     # bright beads
 data_reg = json.load(open(os.path.join(base, 'joint', 'report.json')))['registration'][1]['describe']
@@ -62,14 +74,14 @@ reg = lambda p: p @ A.T + b
 fig, ax = plt.subplots(1, 3, figsize=(17, 5))
 for a, (name, f) in zip(ax[:2], [('registration (detections)', reg), ('joint fit', models['joint'][1][1].from_ref)]):
     r = f(xy[0][ok]) - xy[1][ok]
-    q = a.quiver(xy[0][ok, 0], xy[0][ok, 1], r[:, 0], -r[:, 1], angles='xy', scale_units='xy', scale=0.01, color='k')
+    q = a.quiver(xy[0][ok, 0], xy[0][ok, 1], r[:, 0], r[:, 1], angles='xy', scale_units='xy', scale=0.01, color='k')
     a.set_xlim(0, W); a.set_ylim(H, 0); a.set_aspect('equal')
-    a.set_title(f'{name}: map(left) - right, bright beads, rms {np.sqrt((r ** 2).sum(1).mean()):.3f} px, median {np.median(np.hypot(*r.T)):.3f} px (x 100)')
+    a.set_title(f'{name}: map(left) - right, bright beads\nrms {np.sqrt((r ** 2).sum(1).mean()):.3f} px, median {np.median(np.hypot(*r.T)):.3f} px (arrows x 100)', fontsize=9)
 d = models['joint'][1][1].from_ref(np.stack([gx.ravel(), gy.ravel()], 1).astype(float)) - reg(np.stack([gx.ravel(), gy.ravel()], 1).astype(float))
 s = (slice(None, None, 6), slice(None, None, 6))
-ax[2].quiver(gx[s], gy[s], d[:, 0].reshape(gx.shape)[s], -d[:, 1].reshape(gx.shape)[s], angles='xy', scale_units='xy', scale=0.005)
+ax[2].quiver(gx[s], gy[s], d[:, 0].reshape(gx.shape)[s], d[:, 1].reshape(gx.shape)[s], angles='xy', scale_units='xy', scale=0.005)
 ax[2].set_xlim(0, W); ax[2].set_ylim(H, 0); ax[2].set_aspect('equal')
-ax[2].set_title(f'joint map - registration map (x 200), max {np.abs(d).max():.2f} px')
+ax[2].set_title(f'joint map - registration map (arrows x 200)\nmax coordinate difference {np.abs(d).max():.2f} px', fontsize=9)
 plt.tight_layout(); plt.savefig(os.path.join(figs, 'mapping.png'), dpi=80); plt.close()
 
 # held-out gain per cluster (joint protocol, field joint vs global indep)

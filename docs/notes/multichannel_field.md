@@ -7,7 +7,14 @@ Status: Python. Code: `torch_psf/mapping.py` (ChannelMap, register_points, chann
 `study/multichannel/`; outputs `~/mcfield_out/` (not in the repo). Design: `field_psf_lib.md` section 7; stage 2a (one
 channel): `field_psf_lib.md`.
 
-RESULTS_SUMMARY
+Stage 2b implemented and tested. On 2-colour beads the per-channel field models reduce held-out deviance
+(independent refit) from **1.3055 / 1.4655 to 1.2664 / 1.4199** (left/right); jointly trained PSFs give essentially
+the same result. With shared held-out bead positions the joint affine field model scores **1.2859 / 1.4360**,
+and a quadratic mapping gives **1.2820 / 1.4333**. Fixed-map global: 1.3207 / 1.4909; fixed-map field is invalid
+(NaNs, rejected), so that ablation is incomplete. Bright-singleton mapping RMS improves 0.2308 -> 0.1903 px
+(affine) / 0.1647 px (quadratic). The 3-colour experiment uses two camera channels with dye-dependent ratios;
+broad-band beads do not provide three separate PSFs. CPU target tests: 7 passed, 2 skipped; full GPU suite:
+135 passed, 9 skipped. psf.zip format unchanged; open issues and validation caveats below.
 
 ## 1. Model
 
@@ -94,7 +101,117 @@ with `joint=False` the mapping refitted to the fitted bead positions is also wit
 (`test_mapping.py`, the data / registration test): the mapped fit of a mirrored and rotated channel reaches the CRLB,
 `ChannelMap.translation` equals `channel_offsets`, the affine / poly blocks round-trip through the numpy reader.
 
-TWOCOLOUR
+## 4. 2-colour beads: independent and joint fits, per-channel field models
+
+Scripts `study/multichannel/beads2col.py`, `score2col.py`, `fig2col.py`. Completed 2026-11-16;
+outputs `~/mcfield_out/2col/`. Both scoring jobs already running at handover were allowed to finish without a
+restart (main: 2319.45 s; fixed-map comparison: 1596.08 s, shared GPUs).
+
+**Data and protocol.** The two 400 x 475 px camera halves of `beads.tif` (training) and `beads2.tif` (held out),
+97 nm pixels, assumed 670 nm, NA 1.49 initially, n_imm 1.518, n_med 1.33, gain 0.597 e-/ADU, offset 100.6 ADU;
+150 planes at 10 nm, every second plane used (75 planes at 20 nm). There are 219 merged beads in 103 clusters
+across both stacks (216 / 210 beads visible per channel); the held-out stack has 109 beads in 54 clusters,
+54 / 53 usable clusters per channel. The field stops retain 78.6 / 75.3 % of the channel crops, averaged over the two
+stacks. Fits use patch 21, render pad 7, linear backgrounds, free per-channel photons, per-bead focus offsets and
+shared drift; base Z5-Z21, NA and apodization fitted for 300 iterations, then another 300 with the mixed field
+polynomial (35 coefficients per channel; Z5, Z6, Z11 quadratic, Z7-Z10 and Z12-Z17 linear, prior sd 0.05 waves).
+`joint_shared` ties NA and apodization between channels; `joint_poly2` fits an order-2 mapping;
+`joint_fixmap` fixes the detection-registration affine map during both training and scoring.
+
+Every held-out cluster's nuisance parameters are refitted for 200 iterations with the PSFs and mappings fixed.
+Two scoring protocols are reported: **independent refit** permits separate bead positions/focus per channel;
+**joint refit** shares them and fixes the trained channel focus (for independently trained models only, channel
+focus is estimated in this scoring refit). Aggregates are selected once from independent/global: chi2 > 3 times
+the channel median in either channel, cluster ids 0, 1, 11. The same exclusions apply to every row, leaving
+51 left / 50 right clusters. The independent baselines repeated in the fixed-map scoring job agree within
+3e-8 deviance/px and select the identical exclusions. All-cluster scores and paired NLL differences are retained
+in `score2col.json` and `score2col_fixmap.json`.
+
+Held-out Poisson deviance per pixel (lower is better):
+
+| training / mapping | PSF | independent refit left | independent refit right | joint refit left | joint refit right |
+|---|---|---:|---:|---:|---:|
+| independent / affine refit to positions | global | 1.3055 | 1.4655 | 1.3235 | 1.4820 |
+| independent / affine refit to positions | field | 1.2664 | 1.4199 | 1.2858 | 1.4369 |
+| joint / fitted affine | global | 1.3062 | 1.4649 | 1.3248 | 1.4826 |
+| joint / fitted affine | field | 1.2673 | 1.4190 | 1.2859 | 1.4360 |
+| joint, shared NA/apod / fitted affine | global | 1.3064 | 1.4678 | 1.3271 | 1.4868 |
+| joint, shared NA/apod / fitted affine | field | 1.2655 | 1.4219 | 1.2862 | 1.4402 |
+| joint / fitted quadratic | global | 1.3060 | 1.4648 | 1.3210 | 1.4795 |
+| joint / fitted quadratic | field | 1.2669 | 1.4191 | 1.2820 | 1.4333 |
+| joint / fixed registration affine | global | 1.3006 | 1.4707 | 1.3207 | 1.4909 |
+| joint / fixed registration affine | field | invalid (NaN) | invalid (NaN) | invalid (NaN) | invalid (NaN) |
+
+- The field improves both channels consistently: independent training/scoring gives 1.3055 -> 1.2664 left and
+  1.4655 -> 1.4199 right (-0.01957 / -0.02279 NLL/px, better in 43/51 and 44/50 clusters). Joint training with
+  the affine map gives 1.3248 -> 1.2859 and 1.4826 -> 1.4360 under the joint refit. Independently and jointly
+  trained PSFs score almost identically under a common refit protocol; sharing positions adds about 0.018-0.020
+  deviance/px, so it does not remove the residual mismatch between channels.
+- The quadratic mapping gives a small further improvement under joint scoring (field 1.2820 / 1.4333 versus
+  affine 1.2859 / 1.4360). Shared NA/apodization adds no gain (field 1.2862 / 1.4402); separate effective optics
+  per channel remain appropriate (joint field NA 1.3983 / 1.4326 at the assumed common wavelength).
+- Fixing the registration map gives mixed global changes: left 1.3207 versus fitted-map 1.3248, right 1.4909
+  versus 1.4826. The fixed-map **field fit is invalid**: NA, apodization, focus and likelihood became NaN;
+  `report.json` has `field.kept=false`, `chosen=global`. Its saved field zip was scored by the pre-existing job
+  and also gives NaNs. There is no valid fixed-map field ablation; this numerical failure is an open issue,
+  not evidence for or against fitting the map. The cause has not been established and no replacement run was made.
+- These absolute left-channel numbers differ from stage 2a's 1.3384 -> 1.2992 because the joint detection/cluster
+  construction and aggregate mask differ (51 clean left clusters here, 52 there). The field gain is the same
+  approximately 0.039 deviance/px; compare methods within this matched table.
+
+**Mapping.** Detection registration: no flip, 183 paired detections, RMS 0.5767 px; centre shift
+(+0.5774, -6.3031) px, rotation 1.03771 deg, scales 1.001643 / 1.001207. The jointly fitted field affine is
+`right = A @ left + b` in each half's crop coordinates:
+
+```text
+A = [[1.0013239834, -0.0171636683],
+     [0.0190130824,  1.0014968437]]
+b = [3.6987877894, -10.9706760708] px
+```
+
+Its shift at (237.5, 200) is (+0.5805, -6.1557) px, rotation 1.03482 deg, scales 1.001504 / 1.001644;
+right-channel focus -77.68 nm (global -76.80 nm), photon ratio right/left 0.8298. The mapping changes by up to
+0.28 px in either coordinate over the crop relative to registration. Residuals below are radial distances
+`map(left) - right` using the **independently fitted field-model bead positions**, in pixels:
+
+| mapping | bright beads (n=178): RMS / median | bright singletons (n=53): RMS / median | faint beads (n=29): RMS / median |
+|---|---:|---:|---:|
+| registration / fixed map | 0.3589 / 0.2005 | 0.2308 / 0.1951 | 1.2048 / 0.7449 |
+| independent field affine | 0.3195 / 0.1268 | 0.2061 / 0.1375 | 1.1514 / 0.6684 |
+| joint global affine | 0.3231 / 0.1174 | 0.1914 / 0.1015 | 1.1740 / 0.6837 |
+| joint field affine | 0.3226 / 0.1150 | 0.1903 / 0.1064 | 1.1739 / 0.6854 |
+| joint field quadratic | 0.3182 / 0.0827 | 0.1647 / 0.0752 | 1.1867 / 0.6798 |
+
+For bright singletons the fitted affine reduces RMS from 22.39 to 18.46 nm and median from 18.92 to 10.32 nm;
+quadratic gives 15.97 / 7.29 nm. The much larger faint-bead residuals and outliers in dense clusters dominate
+all-bead RMS, so these are consistency residuals, not a ground-truth localization error. JSON also contains the
+saved-fit training/non-training split; its non-training group includes rejected training clusters as well as the
+held-out stack. Registration uses detections pooled from both stacks, and `_combine` refits the independent
+models' map to fitted positions from both stacks. Thus the independent-map scores/residuals are **not a strict
+train-only validation of the mapping**. A mapping validation that holds out all registration and position pairs
+from the second stack remains open; no held-out PSF coefficients are fitted in these scoring refits.
+
+**Per-channel field maps.** `~/mcfield_out/2col/figs/field_maps.png` compares independent and joint fits with a
+shared colour scale for each channel/mode pair. Ranges are base plus field, mλ, within that channel's training-stack
+field stop on a 5 px grid; correlation is between the field offsets over the full crop grid (clipped to each
+field's fitted box):
+
+| mode | joint left range mλ | joint right range mλ | independent vs joint r: left / right |
+|---|---:|---:|---:|
+| Z5 | -50.8 .. 4.3 | -39.9 .. 10.9 | 0.9999 / 0.9999 |
+| Z6 | 57.1 .. 104.4 | 63.3 .. 109.7 | 0.9997 / 0.9990 |
+| Z7 | -35.0 .. -32.2 | -30.7 .. -26.6 | 0.9924 / 0.9999 |
+| Z8 | -10.0 .. -3.6 | -10.8 .. -2.5 | 1.0000 / 0.9993 |
+| Z11 | -15.7 .. 0.1 | -18.0 .. -10.4 | 0.9892 / 0.9486 |
+| Z12 | -2.4 .. 8.5 | -4.3 .. 5.5 | 0.9988 / 0.9980 |
+| Z13 | -12.0 .. 2.7 | -8.0 .. 0.6 | 0.9998 / 0.9997 |
+
+Independent and joint field patterns agree closely; the largest range is in Z5/Z6 (about 47-55 mλ), while coma
+Z7 changes by only 3-4 mλ. The weaker right Z11 pattern is less stable (r=0.9486). Maps are evaluated in each
+channel's own coordinates. `~/mcfield_out/2col/field_maps.json` stores ranges, means and correlations;
+`~/mcfield_out/2col/figs/mapping.png` shows the bright-bead residuals and the fitted-affine minus registration
+map (arrows amplified x100 / x200, y increasing downwards).
+
 
 ## 5. 3-colour beads: how 3 colours map onto 2 camera halves
 
@@ -170,4 +287,36 @@ Gaps found (not changed; to decide):
 4. Per-channel wavelength: each channel's model carries its own optics (the spec allows it); here both use the
    assumed 670 nm and the NA fit absorbs the difference (left 1.398, right 1.433), so the stored NA is effective.
 
-PROBLEMS
+## 7. Validation and remaining numerical issue
+
+Validation on qnano1, 2026-11-16, Python `~/miniconda3/envs/simcode-py311/bin/python`, this worktree on
+`multichannel-field`. CPU command used `CUDA_VISIBLE_DEVICES=` and `PYTHONPATH=$PWD`:
+`python -m pytest -q tests/test_mapping.py tests/test_multichannel_beads.py --durations=0`.
+**7 passed, 2 skipped, 1 warning in 3.85 s**; `/usr/bin/time -p`: real 6.59 s, user 14.59 s, sys 1.34 s.
+
+| CPU test | call time (s) |
+|---|---:|
+| test_channel_map_affine_poly_and_blocks | 0.06 |
+| test_register_points_flip_rotation_outliers | 0.23 |
+| test_translation_mapping_equals_channel_offsets | 0.01 |
+| test_mapped_jacobian_and_fit_reach_crlb | 0.67 |
+| test_channel_rois_and_field_channels | 0.01 |
+| test_psfzip_round_trip_mapped_field_channels | 2.07 |
+| test_data_registration_and_masks | 0.39 |
+
+No additional `@needs_gpu` markers were needed: every executed CPU test is below 30 s. The two existing markers
+in `test_multichannel_beads.py` remain on `test_joint_fit_recovers_mapping_aberrations_fields` and
+`test_estimator_two_channels_zip` (they explicitly use CUDA); both were exercised in the GPU suite, taking
+5.87 s and 9.97 s respectively.
+
+Full suite, least-memory-loaded GPU 0 selected after `nvidia-smi`:
+`CUDA_VISIBLE_DEVICES=0 PYTHONPATH=$PWD python -m pytest -q tests/ --durations=20`.
+**135 passed, 9 skipped, 19 warnings in 403.18 s**; real 407.02 s, user 682.68 s, sys 29.09 s.
+Warnings: one tensor-to-scalar warning and 18 TorchScript deprecation warnings. Logs:
+`~/mcfield_out/logs/tests_cpu.log`, `tests_gpu.log`. Figures were generated successfully by
+`python -I study/multichannel/fig2col.py` and visually inspected; log `~/mcfield_out/logs/fig2col.log`.
+
+The fixed-map field NaN failure in section 4 remains unresolved (the estimator selected the valid global model).
+A stable fixed-map field fit is needed before drawing a full fitted-versus-fixed-mapping field comparison.
+The mapping validation caveat in section 4 and psf.zip questions in section 6 also remain open. No merge, push,
+format change, or changes to other worktrees were made.
