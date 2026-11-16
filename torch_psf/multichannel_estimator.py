@@ -34,7 +34,7 @@ class MultiChannelBeadEstimator(Estimator):
     summed over the channels is lower. field_stop: 'auto' (estimation.multichannel_beads.channel_stop_mask per
     channel and stack), False, or masks[c] (bool [H, W] per channel). holdout: index of a stack kept out of the fit
     (scored per channel), or holdout_fraction. Other settings as DenseBeadEstimator (patch, render_pad, plane_step,
-    threshold, faint, max_members, max_box, reject, iters, warmup, drift, focus_offset, bg, intensity,
+    threshold, rel_threshold, faint, max_members, max_box, reject, iters, warmup, drift, focus_offset, bg, intensity,
     emitter_z_um).
 
     estimate(stacks, dz_um) -> ChannelsPSF. report: registration (per channel: flip, pairs, rms), data summary,
@@ -44,7 +44,7 @@ class MultiChannelBeadEstimator(Estimator):
 
     def __init__(self, regions, names=None, start=None, optics=None, camera=None, patch=None, render_pad=None,
                  sign=1.0, iters=300, warmup=50, holdout=None, holdout_fraction=0.0, holdout_seed=0,
-                 field_stop='auto', threshold=6.0, min_dist=3, faint=0.1, max_members=8, max_box=None, merge_px=2.0,
+                 field_stop='auto', threshold=6.0, rel_threshold=0.0, min_dist=3, faint=0.1, max_members=8, max_box=None, merge_px=2.0,
                  drift=True, drift_order=3, focus_offset='bead', bg='linear', intensity='free', fit_na=False,
                  fit_n_med=False, fit_apod=False, share=(), mapping_order=1, fit_mapping=True, map_mode='all',
                  joint=True, channel_focus=True, emitter_z_um=0.0, plane_step=1, reject=None, extent_rel=0.02,
@@ -58,6 +58,7 @@ class MultiChannelBeadEstimator(Estimator):
         self.patch, self.render_pad, self.sign, self.iters, self.warmup = patch, render_pad, sign, iters, warmup
         self.holdout, self.holdout_fraction, self.holdout_seed = holdout, holdout_fraction, holdout_seed
         self.field_stop, self.threshold, self.min_dist, self.faint = field_stop, threshold, min_dist, faint
+        self.rel_threshold = rel_threshold
         self.max_members, self.max_box, self.merge_px = max_members, max_box, merge_px
         self.fit_kw = dict(drift=drift, drift_order=drift_order, focus_offset=focus_offset, bg=bg,
                            intensity=intensity, emitter_z_um=float(emitter_z_um), max_renders=max_renders)
@@ -124,7 +125,7 @@ class MultiChannelBeadEstimator(Estimator):
             masks = [[channel_stop_mask(cs[c][s]) for s in range(S)] for c in range(C)]
         else:
             masks = None
-        dets = detect_channels(cs, self.threshold, self.min_dist, self.faint)
+        dets = detect_channels(cs, self.threshold, self.min_dist, self.faint, rel_threshold=self.rel_threshold)
         shapes = [tuple(cs[c][0].shape[-2:]) for c in range(C)]
         maps, reg = register_channels(dets, shapes, order=self.mapping_order)
         self.maps_registered = [m.copy() for m in maps]

@@ -63,15 +63,18 @@ def channel_stop_mask(stack, frac=0.35, open_px=15, sigma=2.0, margin=2, min_dar
 
 
 # ---------------------------------------------------------------------------------------------------- detection
-def detect_channels(stacks, threshold=6.0, min_dist=3, faint=0.1, sigma=1.0):
+def detect_channels(stacks, threshold=6.0, min_dist=3, faint=0.1, sigma=1.0, rel_threshold=0.0):
     """Bead detections of every channel and stack: [c][s] dict(xy [n, 2] channel px, amp [n], bright [n] bool (amp
-    >= faint x the median of the brightest 20 % of that channel and stack))"""
+    >= faint x the median of the brightest 20 % of that channel and stack)); rel_threshold: only maxima above that
+    fraction of the brightest (find_all_beads; for a few bright beads on a structured background, where the robust
+    threshold alone gives hundreds of noise maxima that chain the beads into clusters)"""
     out = []
     for cs in stacks:
         row = []
         for st in cs:
             a = st.detach().cpu().numpy() if torch.is_tensor(st) else np.asarray(st, np.float32)
-            xy, amp = find_all_beads(a, sigma=sigma, threshold=threshold, min_dist=min_dist)
+            xy, amp = find_all_beads(a, sigma=sigma, threshold=threshold, min_dist=min_dist,
+                                     rel_threshold=rel_threshold)
             top = np.sort(amp)[::-1][:max(1, int(np.ceil(0.2 * len(amp))))] if len(amp) else np.ones(1)
             row.append(dict(xy=xy, amp=amp, bright=amp >= faint * np.median(top)))
         out.append(row)
