@@ -27,6 +27,17 @@ z column, held fixed (as PSF does). Expected image
 intensity_ratio [C] (default ones) is the relative brightness of the channels (psf.zip `intensity_ratio`); render()
 includes it.
 
+Mapped channels (torch_psf.mapping.ChannelMap per channel, set_mappings / ChannelsPSF(mappings=)): instead of the
+constant offsets, channel c sees the emitter at
+
+    pos_c = from_ref_c(corner_0 + h + (x, y)) - corner_c - h (+ channel_offsets[c] + offsets[:, c]),  h = (P - 1) / 2
+
+with the per-spot ROI corners [N, C, 2] of every channel in that channel's crop coordinates (`corners=`, required in
+this mode; torch_psf.mapping.channel_rois cuts such ROIs); x, y of theta are relative to the reference ROI's centre and
+the derivatives with respect to them go through the mapping's Jacobian (rotation, scale, flip). A field-dependent
+channel model (torch_psf.field.FieldPSF / TiledSplinePSF) is evaluated at its ROI centre corner_c + h (channel
+coordinates). Without mappings (default) nothing changes: the formulas above are not used.
+
 Units as in PSF: px laterally, um in z, photons.
 """
 import math
@@ -45,6 +56,7 @@ class MultiChannelPSF(PSF):
     intensity_ratio) in their constructor, set extra_params, and implement render_channels; they inherit render,
     expected, mu_and_jacobian, fisher, crlb, fit_theta and fit."""
     extra_params = ()            # names of the extra emitter parameters (theta columns after the backgrounds)
+    accepts_field_xy = False     # render_channels takes field_xy [N, C, 2] (field-dependent channel models)
 
     # ------------------------------------------------------------------ channel geometry
     def _init_channels(self, C, channel_offsets=None, intensity_ratio=None):
@@ -58,6 +70,51 @@ class MultiChannelPSF(PSF):
             self.register_buffer('intensity_ratio', rat, persistent=False)
         else:
             self.channel_offsets, self.intensity_ratio = off, rat
+        self.__dict__['mappings'] = None             # plain attribute (not an nn.Module child); set_mappings
+
+    # ------------------------------------------------------------------ mapped channels
+    def set_mappings(self, mappings):
+        """Per-channel torch_psf.mapping.ChannelMap (reference -> channel c; None entries = identity), or None to go back
+        to the offset-only geometry. With mappings every position-dependent call needs corners [N, C, 2] (module
+        docstring)."""
+        if mappings is None:
+            self.__dict__['mappings'] = None
+            return self
+        from torch_psf.mapping import ChannelMap
+        ms = list(mappings)
+        if len(ms) != self.n_channels:
+            raise ValueError(f'{len(ms)} mappings for {self.n_channels} channels')
+        ms = [ChannelMap.identity_map(c, device=self.dev) if m is None else m.to(self.dev) for c, m in enumerate(ms)]
+        self.__dict__['mappings'] = ms
+        return self
+
+    @property
+    def mapped(self):
+        return getattr(self, 'mappings', None) is not None
+
+    def _corners(self, N, corners):
+        if corners is None:
+            raise ValueError(f'{type(self).__name__} with channel mappings needs corners [N, C, 2] (the ROI corner of '
+                             f'every channel, channel crop px; torch_psf.mapping.channel_rois)')
+        return _as_t(corners, self.dev).reshape(N, self.n_channels, 2)
+
+    def mapped_positions(self, pos, offsets=None, corners=None):
+        """(pos_c [N, C, 3], J [N, C, 2, 2] = d (x_c, y_c) / d (x, y), field_xy [N, C, 2] = the ROI centres in channel
+        coordinates) of reference positions pos [N, 3] (relative to the reference ROI centre) with the mappings"""
+        N, C = pos.shape[0], self.n_channels
+        cor = self._corners(N, corners)
+        h = (self.roisize - 1) / 2
+        ref = (pos[:, :2].double() + cor[:, 0].double() + h)                       # [N, 2] reference channel px
+        xs, Js = [], []
+        for c, m in enumerate(self.mappings):
+            xs.append(m.from_ref(ref))
+            Js.append(m.jacobian(ref.detach()))
+        xc = torch.stack(xs, 1) - cor.double() - h                                  # [N, C, 2]
+        xc = xc + self.channel_offsets[None].double()
+        if offsets is not None:
+            xc = xc + _as_t(offsets, self.dev).reshape(N, C, 2).double()
+        pos_c = torch.cat([xc.to(pos.dtype), pos[:, None, 2:3].expand(N, C, 1)], 2)
+        return pos_c, torch.stack(Js, 1).to(pos.dtype), (cor + h)
 
     @property
     def n_channels(self):
@@ -110,10 +167,13 @@ class MultiChannelPSF(PSF):
             d = d + _as_t(offsets, self.dev).reshape(N, self.n_channels, 2)
         return d
 
-    def channel_positions(self, pos, offsets=None):
+    def channel_positions(self, pos, offsets=None, corners=None):
         """Per-channel positions [N, C, 3] = pos [N, 3] + (channel_offsets + offsets [N, C, 2]) in x, y. Without
-        offsets (all zero and not trainable, none passed) the positions are pos itself (an expanded view)."""
+        offsets (all zero and not trainable, none passed) the positions are pos itself (an expanded view). With
+        mappings: mapped_positions (needs corners)."""
         N, C = pos.shape[0], self.n_channels
+        if self.mapped:
+            return self.mapped_positions(pos, offsets, corners)[0]
         if self._shared_position(offsets):
             return pos[:, None, :].expand(N, C, 3)
         d = self._offsets(N, offsets).to(pos.dtype)
@@ -145,22 +205,39 @@ class MultiChannelPSF(PSF):
         r = self.intensity_ratio[None, :, None, None]
         return out * r if torch.is_tensor(out) else tuple(o * r for o in out)
 
-    def render(self, pos, grad=False, offsets=None, **extra):
+    def render(self, pos, grad=False, offsets=None, corners=None, **extra):
         """Normalized channel images [N, C, P, P] at the reference position pos [N, 3] (x, y px, z um), per-spot
         offsets [N, C, 2] (px) or None, and the extra parameters by name (e.g. phi=[N]; default 0), intensity ratio
-        included. grad=True: (value, d/dx, d/dy, d/dz, d/d extra...)."""
+        included. grad=True: (value, d/dx, d/dy, d/dz, d/d extra...). corners [N, C, 2]: per-channel ROI corners
+        (needed with mappings)."""
         pos = _as_t(pos, self.dev)
         ex = self._extra(len(pos), None, pos.device, **extra)
+        if self.mapped:
+            return self._ratio(self._render_mapped(pos, ex, offsets, corners, grad))
         return self._ratio(self.render_channels(self.channel_positions(pos, offsets), ex, grad))
 
-    def _render_theta(self, theta, offsets=None, grad=False):
+    def _render_mapped(self, pos, ex, offsets, corners, grad):
+        """render_channels at the mapped positions; x / y derivatives chained through the mapping Jacobians"""
+        pos_c, J, fxy = self.mapped_positions(pos, offsets, corners)
+        out = self.render_channels(pos_c, ex, grad, **({'field_xy': fxy} if self.accepts_field_xy else {}))
+        if not grad:
+            return out
+        g, gx, gy, gz, *ge = out
+        J = J[..., None, None]                                                    # [N, C, 2, 2, 1, 1]
+        dx = gx * J[:, :, 0, 0] + gy * J[:, :, 1, 0]
+        dy = gx * J[:, :, 0, 1] + gy * J[:, :, 1, 1]
+        return (g, dx, dy, gz, *ge)
+
+    def _render_theta(self, theta, offsets=None, grad=False, corners=None):
         C = self.n_channels
         ex = theta[:, 4 + C:] if self.extra_params else None
+        if self.mapped:
+            return self._ratio(self._render_mapped(theta[:, :3], ex, offsets, corners, grad))
         return self._ratio(self.render_channels(self.channel_positions(theta[:, :3], offsets), ex, grad))
 
-    def __call__(self, pos, intensity=None, bg=None, offsets=None, **extra):
+    def __call__(self, pos, intensity=None, bg=None, offsets=None, corners=None, **extra):
         """intensity [N] * render(pos) + bg ([N] or [N, C])."""
-        out = self.render(pos, offsets=offsets, **extra)
+        out = self.render(pos, offsets=offsets, corners=corners, **extra)
         if intensity is not None:
             out = out * intensity[:, None, None, None]
         if bg is not None:
@@ -186,18 +263,19 @@ class MultiChannelPSF(PSF):
             raise ValueError(f'theta must be [N, {self.n_params}] = {self.param_names}, not {tuple(theta.shape)}')
         return theta
 
-    def expected(self, theta, offsets=None):
+    def expected(self, theta, offsets=None, corners=None):
         """Expected image mu [N, C, P, P] = I render(x, y, z; extra) + bg_c, theta [N, 4 + C + k]."""
         theta = self._check_theta(theta)
         C = self.n_channels
-        return theta[:, 3, None, None, None] * self._render_theta(theta, offsets) + theta[:, 4:4 + C, None, None]
+        return (theta[:, 3, None, None, None] * self._render_theta(theta, offsets, corners=corners)
+                + theta[:, 4:4 + C, None, None])
 
-    def mu_and_jacobian(self, theta, offsets=None):
+    def mu_and_jacobian(self, theta, offsets=None, corners=None):
         """(mu [N, C, P, P], J [N, 4 + C + k, C, P, P]): the expected image and its derivatives with respect to theta
         (x, y, z, I, bg_0 .. bg_{C-1}, extra)."""
         theta = self._check_theta(theta)
         N, C = len(theta), self.n_channels
-        g, gx, gy, gz, *gex = self._render_theta(theta, offsets, grad=True)
+        g, gx, gy, gz, *gex = self._render_theta(theta, offsets, grad=True, corners=corners)
         I = theta[:, 3, None, None, None]
         mu = I * g + theta[:, 4:4 + C, None, None]
         eye = torch.eye(C, device=g.device, dtype=g.dtype)[None, :, :, None, None].expand(N, C, C, *g.shape[-2:])
@@ -230,11 +308,11 @@ class MultiChannelPSF(PSF):
         return sorted(set(out))
 
     @torch.no_grad()
-    def fisher(self, theta, var=None, offsets=None, fixed=(), weight=None):
+    def fisher(self, theta, var=None, offsets=None, fixed=(), weight=None, corners=None):
         """Poisson Fisher information [N, p, p] of the estimated parameters (all theta columns but `fixed` and, for
         2D models, z; in theta order) at theta [N, 4 + C + k], all channels jointly. var: sCMOS read-noise variance
         (e^2; scalar or [N, C, P, P]), weight: pixel weights [N, C, P, P]."""
-        mu, J = self.mu_and_jacobian(theta, offsets)
+        mu, J = self.mu_and_jacobian(theta, offsets, corners)
         J = J[:, self._free(fixed)].flatten(2)
         w = 1.0 / (mu.clamp_min(1e-6) + (0.0 if var is None else var)).flatten(1)
         if weight is not None:
@@ -242,10 +320,10 @@ class MultiChannelPSF(PSF):
         return torch.einsum('nap,nbp->nab', J * w[:, None], J)
 
     @torch.no_grad()
-    def covariance(self, theta, var=None, offsets=None, fixed=(), weight=None, ridge=0.0):
+    def covariance(self, theta, var=None, offsets=None, fixed=(), weight=None, ridge=0.0, corners=None):
         """Inverse Fisher matrix [N, 4 + C + k, 4 + C + k] (float64); rows / columns of parameters not estimated
         (fixed, z of a 2D model) are NaN."""
-        F = self.fisher(theta, var, offsets, fixed, weight).double()
+        F = self.fisher(theta, var, offsets, fixed, weight, corners).double()
         free = self._free(fixed)
         if ridge:
             F = F + ridge * torch.eye(len(free), device=F.device, dtype=F.dtype)
@@ -255,10 +333,10 @@ class MultiChannelPSF(PSF):
         cov[:, idx[:, None], idx[None, :]] = torch.linalg.inv(F)
         return cov
 
-    def crlb(self, theta, var=None, offsets=None, fixed=(), weight=None, ridge=0.0):
+    def crlb(self, theta, var=None, offsets=None, fixed=(), weight=None, ridge=0.0, corners=None):
         """Cramer-Rao lower bound (standard deviation) [N, 4 + C + k] at theta [N, 4 + C + k], all channels jointly;
         NaN for parameters that are not estimated (fixed; z of a 2D model)."""
-        cov = self.covariance(theta, var, offsets, fixed, weight, ridge)
+        cov = self.covariance(theta, var, offsets, fixed, weight, ridge, corners)
         return torch.sqrt(torch.diagonal(cov, dim1=1, dim2=2).clamp_min(0)).float()
 
     # ------------------------------------------------------------------ fitting
@@ -271,15 +349,23 @@ class MultiChannelPSF(PSF):
         (-pi, pi]); default no change."""
         return theta
 
-    def clamp_theta(self, th, offsets=None, margin=0.05):
+    def clamp_theta(self, th, offsets=None, margin=0.05, corners=None):
         """Clamp theta [N, 4 + C + k] in place: every channel position |x + d_c|, |y + d_c| <= xy_limit - margin, z
-        within z_limits, I >= 1, bg >= 1e-3."""
+        within z_limits, I >= 1, bg >= 1e-3. With mappings: x, y moved (through the inverse mapping Jacobian) until
+        every channel's mapped position is inside, one channel after the other."""
         N, C = th.shape[0], self.n_channels
         xm = self.xy_limit - margin
-        d = self._offsets(N, offsets).to(th.dtype).expand(N, C, 2)
-        lo, hi = -xm - d.min(1).values, xm - d.max(1).values           # [N, 2]
-        hi = torch.maximum(hi, lo)
-        th[:, :2] = torch.minimum(torch.maximum(th[:, :2], lo), hi)
+        if self.mapped:
+            for c in range(C):
+                pc, J, _ = self.mapped_positions(th[:, :3], offsets, corners)
+                e = pc[:, c, :2].clamp(-xm, xm) - pc[:, c, :2]
+                if bool((e != 0).any()):
+                    th[:, :2] += torch.linalg.solve(J[:, c].double(), e.double()[..., None])[..., 0].to(th.dtype)
+        else:
+            d = self._offsets(N, offsets).to(th.dtype).expand(N, C, 2)
+            lo, hi = -xm - d.min(1).values, xm - d.max(1).values           # [N, 2]
+            hi = torch.maximum(hi, lo)
+            th[:, :2] = torch.minimum(torch.maximum(th[:, :2], lo), hi)
         zl = self.z_limits
         if zl is not None and self.n_dims == 3:
             th[:, 2].clamp_(zl[0], zl[1])
@@ -288,34 +374,43 @@ class MultiChannelPSF(PSF):
         return th
 
     @torch.no_grad()
-    def initial_theta(self, rois, z=0.0, extra=None, offsets=None, bg_quantile=0.2, min_photons=50.0):
+    def initial_theta(self, rois, z=0.0, extra=None, offsets=None, bg_quantile=0.2, min_photons=50.0, corners=None):
         """Starting values: x, y = minus the mean channel offset (the reference position that puts the channels on
-        average at their ROI centres), z, bg_c = a low quantile of ROI c, I = the summed signal above the background
-        divided by the summed model image at that start, extra (default zeros)."""
+        average at their ROI centres; with mappings the least-squares position of that kind through the mapping
+        Jacobians), z, bg_c = a low quantile of ROI c, I = the summed signal above the background divided by the
+        summed model image at that start, extra (default zeros)."""
         N, C, P = rois.shape[0], rois.shape[1], rois.shape[-1]
         bg = rois.flatten(2).quantile(bg_quantile, 2)                                  # [N, C]
-        xy = -self._offsets(N, offsets).to(rois.dtype).expand(N, C, 2).mean(1)        # [N, 2]
+        if self.mapped:
+            pc, J, _ = self.mapped_positions(torch.zeros(N, 3, device=rois.device), offsets, corners)
+            Jd = J.double()
+            A = torch.einsum('ncki,nckj->nij', Jd, Jd)
+            b = torch.einsum('ncki,nck->ni', Jd, pc[..., :2].double())
+            xy = -torch.linalg.solve(A, b[..., None])[..., 0].to(rois.dtype)
+        else:
+            xy = -self._offsets(N, offsets).to(rois.dtype).expand(N, C, 2).mean(1)        # [N, 2]
         cols = [xy, torch.full((N, 1), float(z), device=rois.device), torch.ones(N, 1, device=rois.device), bg]
         if self.extra_params:
             ex = torch.zeros(N, self.n_extra, device=rois.device) if extra is None else \
                 _as_t(extra, rois.device).reshape(-1, self.n_extra).expand(N, self.n_extra)
             cols.append(ex)
-        th = self.clamp_theta(torch.cat(cols, 1), offsets)
-        s = self._render_theta(th, offsets).sum((1, 2, 3)).clamp_min(1e-3)
+        th = self.clamp_theta(torch.cat(cols, 1), offsets, corners=corners)
+        s = self._render_theta(th, offsets, corners=corners).sum((1, 2, 3)).clamp_min(1e-3)
         sig = (rois.sum((2, 3)) - bg * P * P).sum(1)
         th[:, 3] = (sig / s).clamp_min(min_photons)
         return th
 
     @torch.no_grad()
     def fit_theta(self, rois, theta0=None, var=None, offsets=None, fixed=(), weight=None, iters=30, zstarts=5,
-                  extra_starts=None, batch=2000):
+                  extra_starts=None, batch=2000, corners=None):
         """Maximum-likelihood theta [N, 4 + C + k] of the channel ROIs rois [N, C, P, P] (photons) by Levenberg-
         Marquardt on all channels jointly (torch_psf.fit.lm_poisson). theta0: starting values (then one start);
         without it a 3D model is started at zstarts heights evenly inside z_range (as torch_psf.fit.localize) times
         the extra starts (extra_starts: list of [k] vectors, default default_extra_starts(); for 4Pi four phases), and
         the lowest NLL wins. fixed: parameters held at their start (names or indices: e.g. ('phi',), see _indices);
         z of a 2D model is always fixed. var: read-noise variance (scalar or [N, C, P, P]), offsets [N, C, 2]: per-spot
-        channel offsets, weight [N, C, P, P]: pixel weights. Returns (theta, nll [N])."""
+        channel offsets, weight [N, C, P, P]: pixel weights, corners [N, C, 2]: per-channel ROI corners (mapped
+        models). Returns (theta, nll [N])."""
         rois = _as_t(rois, self.dev)
         N = len(rois)
         fx = sorted(set(self._indices(fixed)) | ({2} if self.n_dims == 2 else set()))
@@ -334,14 +429,16 @@ class MultiChannelPSF(PSF):
         out, onll = [], []
         for s in range(0, N, batch):
             d, v, o, w = rois[s:s + batch], sl(var, s), sl(offsets, s), sl(weight, s)
+            cr = None if corners is None else _as_t(corners, self.dev)[s:s + batch]
             best = bnll = None
             for st in starts:
                 if st is None:
                     t0 = _as_t(theta0[s:s + batch], self.dev)
                 else:
-                    t0 = self.initial_theta(d, st[0], st[1] if self.extra_params else None, o)
-                th, nll = lm_poisson(lambda t, o=o: self.mu_and_jacobian(t, o), d, t0, var=v, weight=w,
-                                     clamp=lambda t, o=o: self.clamp_theta(t, o), fixed=fx, iters=iters)
+                    t0 = self.initial_theta(d, st[0], st[1] if self.extra_params else None, o, corners=cr)
+                th, nll = lm_poisson(lambda t, o=o, cr=cr: self.mu_and_jacobian(t, o, cr), d, t0, var=v, weight=w,
+                                     clamp=lambda t, o=o, cr=cr: self.clamp_theta(t, o, corners=cr), fixed=fx,
+                                     iters=iters)
                 if best is None:
                     best, bnll = th, nll
                 else:
@@ -357,8 +454,9 @@ class MultiChannelPSF(PSF):
         All channels are fitted jointly with the theta layout of the module docstring (fit_theta). camera: only a
         scalar read noise is used (per-pixel maps need per-channel corners: pass var [N, C, P, P]). corners [N, 2]:
         (x0, y0) of the reference ROI in the image (positions are then image coordinates of the reference frame, else
-        relative to the reference ROI centre). offsets [N, C, 2]: per-spot channel offsets (px). fixed: parameters held
-        at their start (e.g. ('phi',)). frames [N].
+        relative to the reference ROI centre); with mappings corners [N, C, 2] (every channel's ROI corner, channel
+        crop px; positions are then reference-channel coordinates). offsets [N, C, 2]: per-spot channel offsets (px).
+        fixed: parameters held at their start (e.g. ('phi',)). frames [N].
         Dataset fields: frame, pos [N, D] px (z in px of pixel_um), crlb [N, D], photons, bg (mean over the channels),
         crlb_photons, crlb_bg (of that mean), bg_channels [N, C], crlb_bg_channels [N, C], one field per extra
         parameter and its crlb_<name> (NaN when fixed), theta [N, 4 + C + k], loglik (= -NLL), chi2 (mean of
@@ -373,18 +471,23 @@ class MultiChannelPSF(PSF):
                 raise ValueError('a camera with per-pixel read noise needs var [N, C, P, P] (cut per channel)')
         if torch.is_tensor(var) and var.dim() == 0:
             var = None if float(var) == 0 else var
-        th, nll = self.fit_theta(rois, theta0, var, offsets, fixed, None, iters, zstarts, extra_starts, batch)
+        mc = None
+        if self.mapped:
+            mc = self._corners(N, corners)
+        th, nll = self.fit_theta(rois, theta0, var, offsets, fixed, None, iters, zstarts, extra_starts, batch, mc)
         if N:
-            mu = self.expected(th, offsets=offsets)
+            mu = self.expected(th, offsets=offsets, corners=mc)
             chi2 = ((rois - mu) ** 2 / (mu + (0.0 if var is None else var)).clamp_min(1e-6)).flatten(1).mean(1)
-            cov = self.covariance(th, var, offsets, fixed)
+            cov = self.covariance(th, var, offsets, fixed, corners=mc)
         else:
             chi2 = torch.zeros(0, device=self.dev)
             cov = torch.zeros(0, self.n_params, self.n_params, dtype=torch.float64, device=self.dev)
         sd = torch.sqrt(torch.diagonal(cov, dim1=1, dim2=2).clamp_min(0)).float()
         vb = cov[:, 4:4 + C, 4:4 + C].sum((1, 2)) / C ** 2
         xy = th[:, :2].double()
-        if corners is not None:
+        if mc is not None:
+            xy = xy + mc[:, 0].double() + (P - 1) / 2
+        elif corners is not None:
             xy = xy + _as_t(corners, self.dev, torch.float64) + (P - 1) / 2
         px = pixel_um if pixel_um is not None else getattr(self, 'pixel_um', None)
         if self.n_dims == 3 and not px:
@@ -395,8 +498,11 @@ class MultiChannelPSF(PSF):
             pos.append(th[:, 2:3].double() / px)
             crp.append(sd[:, 2:3] / px)
         xm = self.xy_limit - 0.06
-        d = self._offsets(N, offsets).expand(N, C, 2) if N else torch.zeros(0, C, 2, device=self.dev)
-        lim = ((th[:, None, :2] + d).abs().amax((1, 2)) > xm) if N else torch.zeros(0, dtype=torch.bool)
+        if N and mc is not None:
+            lim = self.mapped_positions(th[:, :3], offsets, mc)[0][..., :2].abs().amax((1, 2)) > xm
+        else:
+            d = self._offsets(N, offsets).expand(N, C, 2) if N else torch.zeros(0, C, 2, device=self.dev)
+            lim = ((th[:, None, :2] + d).abs().amax((1, 2)) > xm) if N else torch.zeros(0, dtype=torch.bool)
         cpu = lambda t: t.detach().cpu()
         f = dict(frame=cpu(torch.as_tensor(frames)) if frames is not None else torch.zeros(N, dtype=torch.int32),
                  pos=cpu(torch.cat(pos, 1)), crlb=cpu(torch.cat(crp, 1)), photons=cpu(th[:, 3]),
@@ -425,10 +531,15 @@ class ChannelsPSF(MultiChannelPSF):
     rendered at pos_c[:, c]. All models have one ROI size and the same dimensionality; z_range / z_limits are their
     intersection, xy_limit the smallest, pixel_um that of model 0.
 
-    ChannelsPSF(models, channel_offsets=None [C, 2] px, intensity_ratio=None [C], names=None)."""
+    ChannelsPSF(models, channel_offsets=None [C, 2] px, intensity_ratio=None [C], names=None, mappings=None).
+    mappings: per channel a torch_psf.mapping.ChannelMap (reference -> channel; None = identity): the mapped geometry
+    of the module docstring (corners [N, C, 2] needed). A channel model may be field dependent
+    (torch_psf.field.FieldPSF / TiledSplinePSF): it is evaluated at its ROI centre in channel coordinates (needs the
+    corners; without them, at its reference point)."""
     type_name = None             # not a psf.json type (independent channels are a psf.zip: torch_psf.psfzip)
+    accepts_field_xy = True
 
-    def __init__(self, models, channel_offsets=None, intensity_ratio=None, names=None):
+    def __init__(self, models, channel_offsets=None, intensity_ratio=None, names=None, mappings=None):
         self.models = list(models)
         if not self.models:
             raise ValueError('ChannelsPSF needs at least one model')
@@ -443,6 +554,8 @@ class ChannelsPSF(MultiChannelPSF):
         self.pixel_um = getattr(self.models[0], 'pixel_um', None)
         self.names = [f'ch{c}' for c in range(len(self.models))] if names is None else list(names)
         self._init_channels(len(self.models), channel_offsets, intensity_ratio)
+        if mappings is not None:
+            self.set_mappings(mappings)
 
     @property
     def n_channels(self):
@@ -466,8 +579,15 @@ class ChannelsPSF(MultiChannelPSF):
     def xy_limit(self):
         return min(m.xy_limit for m in self.models)
 
-    def render_channels(self, pos_c, extra=None, grad=False):
-        outs = [m.render(pos_c[:, c], grad) for c, m in enumerate(self.models)]
+    @property
+    def field_dependent(self):
+        """per channel: True for a field-dependent model (FieldPSF / TiledSplinePSF)"""
+        return [hasattr(m, 'field_block') for m in self.models]
+
+    def render_channels(self, pos_c, extra=None, grad=False, field_xy=None):
+        fd = self.field_dependent
+        outs = [m.render(pos_c[:, c], grad, xy=field_xy[:, c]) if (fd[c] and field_xy is not None)
+                else m.render(pos_c[:, c], grad) for c, m in enumerate(self.models)]
         if not grad:
             return torch.stack(outs, 1)
         return tuple(torch.stack([o[k] for o in outs], 1) for k in range(4))
@@ -478,18 +598,32 @@ class ChannelsPSF(MultiChannelPSF):
         self.dev = self.models[0].dev
         self.channel_offsets = self.channel_offsets.to(self.dev)
         self.intensity_ratio = self.intensity_ratio.to(self.dev)
+        if self.mapped:
+            self.set_mappings(self.mappings)
         return self
+
+    def _maps_copy(self):
+        return None if not self.mapped else [m.copy() for m in self.mappings]
 
     def resized(self, roisize):
         return ChannelsPSF([m.resized(roisize) for m in self.models], self.channel_offsets, self.intensity_ratio,
-                           self.names)
+                           self.names, self._maps_copy())
 
     def to_spline(self, roisize=None, z_range=None, **kw):
-        """ChannelsPSF of the channel models' to_spline (the same offsets and ratios; the offsets stay a channel
-        property, they are not baked into the tables)."""
+        """ChannelsPSF of the channel models' to_spline (the same offsets, ratios and mappings; the offsets stay a
+        channel property, they are not baked into the tables). A FieldPSF channel becomes the spline of its reference
+        point (use to_tiled per channel for the field dependence)."""
         return ChannelsPSF([m.to_spline(roisize, z_range, **kw) for m in self.models], self.channel_offsets,
-                           self.intensity_ratio, self.names)
+                           self.intensity_ratio, self.names, self._maps_copy())
+
+    def to_tiled(self, tile=128, roisize=None, z_range=None, **grid):
+        """ChannelsPSF with every FieldPSF channel replaced by its TiledSplinePSF (FieldPSF.to_tiled; other channels
+        unchanged), the same offsets, ratios and mappings: localization at spline speed with a tile per channel."""
+        ms = [m.to_tiled(tile=tile, roisize=roisize, z_range=z_range, **grid) if hasattr(m, 'to_tiled') else m
+              for m in self.models]
+        return ChannelsPSF(ms, self.channel_offsets, self.intensity_ratio, self.names, self._maps_copy())
 
     def __repr__(self):
         return (f'ChannelsPSF({self.n_channels} channels: {[type(m).__name__ for m in self.models]}, '
-                f'roisize={self.roisize}, offsets={self.channel_offsets.tolist()})')
+                f'roisize={self.roisize}, offsets={self.channel_offsets.tolist()}'
+                + (f', mappings={[m.extra_repr() for m in self.mappings]}' if self.mapped else '') + ')')
