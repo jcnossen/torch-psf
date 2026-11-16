@@ -19,7 +19,7 @@ imaging"; Zenodo 6547064). It has its own per-pixel aberration map, built from b
   Ours vs the movie's example map at the bead positions: 0.027 waves rms, r 0.66 - 0.90 for the modes that vary.
 - **In situ per tile** (section 5): the global in-situ PSF beats the bead PSF by 9.9 NLL per held-out spot; every
   tile PSF beats the global one (4 x 4: mean -14.5 per spot, 16 / 16 tiles; 6 x 6: mean -16.0, 36 / 36), and beats
-  FD-DeepLoc's map averaged over the tile (map: -5.5 / -7.6). CONTROLSUMMARY **Field dependence
+  FD-DeepLoc's map averaged over the tile (map: -5.5 / -7.6). A control fit with the same spots / iterations from the whole field equals the global PSF (+-0.5), so the tile gain is spatial (> 15 standard errors in every tile). **Field dependence
   matters for this data set**, most at the field edges. Tile Zernikes follow their map's spatial pattern for
   astigmatism, coma, spherical and 2nd / 3rd coma (r 0.44 - 0.75 over 36 tiles); in situ has global offsets of 0.02 -
   0.04 waves from beads and map (coma, trefoil x, sphericals).
@@ -48,7 +48,7 @@ bioRxiv preprint 10.1101/2022.10.14.512179 (same Methods as the paper). File nam
   (7,1) (7,-1) (8,0). Note (7,1) before (7,-1). As Noll indices (m > 0 cosine, m < 0 sine, as in torch-psf):
   **5, 6, 7, 8, 11, 9, 10, 13, 12, 17, 16, 22, 15, 14, 19, 18, 23, 24, 30, 29, 37**. No piston, tip / tilt or defocus;
   no pentafoil (Noll 20, 21), but 2nd / 3rd spherical (22, 37), 3rd astigmatism (23, 24) and 3rd coma (29, 30).
-  **Noll 5-21 (the torch-psf default) is not enough**: it lacks 22, 23, 24, 29, 30 and 37 (see section 2 for what
+  **Noll 5-21 (the torch-psf default) is not enough**: it lacks 22, 23, 24, 29, 30 and 37 (see section 4 for what
   they are worth).
 - Normalisation (`MLE_FitAbberation_Final_FixPara_Regu_sigma2.m` l. 80, kernel l. 49):
   `normfac = sqrt(2 (n + 1) / (1 + (m == 0)))` times Stallinga's un-normalised `get_zernikefunctions` = the Noll
@@ -76,7 +76,7 @@ bioRxiv preprint 10.1101/2022.10.14.512179 (same Methods as the paper). File nam
   (2,-2) -> +Z5, (2,2) -> -Z6, (3,-1) -> +Z8, (3,1) -> +Z7, (4,0) -> +Z11, (3,-3) -> -Z10, (3,3) -> -Z9,
   (4,-2) -> +Z13, (4,2) -> -Z12, (5,-1) -> +Z16, (5,1) -> +Z17, (6,0) -> +Z22, (4,-4) -> -Z15, (4,4) -> +Z14,
   (5,-3) -> -Z18, (5,3) -> -Z19, (6,-2) -> +Z23, (6,2) -> -Z24, (7,1) -> +Z29, (7,-1) -> +Z30, (8,0) -> +Z37.
-  Section 2 confirms this mapping on the beads; the alternatives (no transpose, or a flipped focus axis) are clearly
+  Section 4 confirms this mapping on the beads; the alternatives (no transpose, or a flipped focus axis) are clearly
   worse.
 - With n_med = n_imm and a real pupil amplitude, flipping the focus axis is equivalent to c_j -> -(-1)^m c_j
   (conjugating the pupil and mirroring k): bead data alone cannot tell the scan direction, the metadata must. Here
@@ -132,7 +132,7 @@ pixel 0.108 um (their calibration values), npupil 64, oversample 3, their 21 mod
 bead height free (= the axial offset of the bead from the stack centre; with n_med = n_imm height and focus offset are
 the same parameter). No bead size, no image blur, no NA / apodisation fit.
 
-Protocol (found by trial, section 2 results): a joint fit of all beads of the stack from zero aberrations (shared
+Protocol (found by trial; results in section 4): a joint fit of all beads of the stack from zero aberrations (shared
 Zernikes; independent of their numbers), then every bead alone from the joint fit (600 + 300 Adam steps), then again
 from the median of all beads and from its 2 nearest beads, keeping the lowest NLL. The first version (400 + 200
 steps, joint start only) left 4-5 of 19 beads of stack 20 0.025-0.12 waves rms from their values; refits of those
@@ -162,8 +162,9 @@ script; with 5 starts over 6 um, 1.8 % of simulated spots end > 200 nm off in z,
 gain 0.818 e- / ADU, offset 100, read noise 1.6 e- (their value). Optics as for the beads but pixel 0.110 um (their
 localisation pixel; see the bead pixel test). Split: a checkerboard of 32 px squares in absolute coordinates, the same
 for the global fit and every tile (no held-out spot of a tile is used by the global fit). Global fit: 12000 training
-spots from the whole field, 80 + 60 iterations, started from the median of our stack-20 bead fits; tiles: up to 4000
-training / 3000 held-out spots per tile, 40 + 30 iterations, started from the global fit. Candidates on each tile's
+spots from the whole field, 80 + 60 iterations, started from the median of our stack-20 bead fits; tiles: started from the global fit;
+4 x 4: up to 4000 training / 3000 held-out spots per tile, 40 + 30 iterations; 6 x 6 (run in parallel on another GPU):
+up to 3000 / 2000 spots, 30 + 22 iterations. Candidates on each tile's
 held-out spots: global (in situ, whole field), tile, aber_map (their map averaged over the tile, converted to our
 convention, no blur), beads (the median bead PSF).
 
@@ -206,7 +207,13 @@ convention problem.
 the 57 beads 0.66 - 0.90 for Z5, Z6, Z7, Z8, Z9, Z10, Z13, Z19 (the modes with real field variation), 0.2 - 0.6 for the
 weak higher modes. Field means agree to 0.009 waves rms (table in section 5).
 
-**Mode sets.** <!-- MODESETS -->
+**Mode sets** (stack 20, 19 beads, same protocol; `beads_s20_noll5_21.json`): the torch-psf default Noll 5-21
+(17 modes) vs their 21 modes: joint fit NLL -37.1624 vs -37.1981 per px (2 dNLL ~ 3e5 over the stack for 4 fewer
+parameters), per bead median 2 dNLL +4958 (range -7.5k .. +59k; the negative end is optimiser noise). **Noll 5-21
+is not sufficient**; the 6 extra modes (22, 23, 24, 29, 30, 37) are needed. Noll 5-37 (33 modes): joint fit
+-37.2825 per px, a further 2 dNLL ~ 7e5 for 12 more parameters (per-bead run stopped for time). At bead SNR (20-55k
+photons per plane) the extra modes also absorb unmodelled effects (bead size, blur, apodisation), so this says the
+model can use them, not that the pupil has them; in situ (2-8k photons) 21 modes were used throughout.
 
 **Pixel size.** 110 nm vs 108 nm on stack 20: the joint fit prefers 110 (NLL / px -37.1991 vs -37.1981), the per-bead
 fits prefer 108 (median 2 dNLL +246 per bead for 110). Not decided by the beads; the bead fits use 108 (their
@@ -268,11 +275,22 @@ the tile's held-out spots):
 | tile fit better than aber_map | 16 / 16 | 36 / 36 |
 | held-out spots | 46k | 52k |
 
-<!-- CONTROL -->
+**Control** (`insitu_rescore.py`, `insitu_rescore_r41.json`): the global PSF refitted exactly like a tile (4000
+training spots, 40 + 30 iterations, started from the global fit) but with spots from the whole field, scored with
+global, tile and aber_map on a fresh subsample of every tile's held-out spots (2000 per tile; 32k / 52k spots). The
+control is as good as the global PSF (mean +0.05 / +0.04 per spot, range -0.48 .. +0.50): extra iterations or spots
+buy nothing. Tile minus control: 4 x 4 mean **-14.6** (range -2.3 .. -26.8, 16 / 16 tiles, every tile > 17
+standard errors), 6 x 6 mean **-16.1** (-1.9 .. -30.9, 36 / 36 tiles, > 15 standard errors); a median 81 / 86 % of
+the held-out spots of a tile are better fitted by its own PSF. aber_map minus control: -5.5 / -7.6. The gain of the
+tile fits is field dependence.
 
 The gain is smallest in the centre (tiles (1,1), (2,1): -2.5, -3.4) and largest at the edges and corners
-(-18 .. -27), where the aber_map also helps most (-12 .. -19). A tile fit uses 0.8 - 4k training spots; 6 x 6 tiles
-with < 1000 training spots (corner / sparse tiles) still gain -17 .. -27 per spot.
+(-18 .. -27), where the aber_map also helps most (-12 .. -19). **Spots per tile** (800 frames only): 4 x 4 tiles had 1.9 - 5.5k isolated training spots (all tiles used, 5 - 17 %
+rejected as overlaps) and 2.2 - 3k held-out spots; 6 x 6 tiles 0.56 - 2.3k training and 0.55 - 2k held-out spots, no
+tile skipped. Enough for 21 Zernikes per tile (the sparsest 6 x 6 tiles, < 1000 training spots, in corners, still
+gain -17 .. -27 per spot), but the per-tile coefficients of the weak modes are noisy at that count (~0.01 waves), which
+limits the 6 x 6 comparison more than the 4 x 4 one. The isolated fraction is the limit: 108k isolated of 162k
+detections (41 px isolation); FD-DeepLoc itself reports 304 localisations per frame.
 
 **Tile Zernikes vs aber_map tile means** (correlation over tiles of the spatial pattern; mean offsets as above):
 
@@ -348,7 +366,7 @@ Did not work / limits:
 - ROI 41 px holds only 60 - 86 % of the tetrapod PSF energy (51 px: 73 - 92 %). Bigger ROIs mean fewer isolated
   spots (25 % of FD-DeepLoc's localisations are isolated at 41 px). The spline (knots c = 25 px half width, 161 z
   planes at 0.04 um) is small; memory was not a problem (< 4 GB per in-situ process).
-- Runtime: ~3 - 5 min per tile (4000 + 3000 spots, 40 + 30 iterations, 9 z starts) on GPUs shared with other jobs;
+- Runtime: ~3 - 5 min per 4 x 4 tile (4000 + 3000 spots, 40 + 30 iterations, 9 z starts), ~1.5 - 2 min per 6 x 6 tile, on GPUs shared with other jobs;
   the whole in-situ study ~3 h.
 
 Open questions:
@@ -365,7 +383,7 @@ Open questions:
 
 ## 8. What the library stage needs (from this data)
 
-- **Modes**: their 21 (Noll 5-13, 15-17, 19, 22-24, 29, 30, 37 plus 14, 18); Noll 5-21 lacks 22, 23, 24, 29, 30, 37,
+- **Modes**: their 21 (Noll 5-19, 22, 23, 24, 29, 30, 37); Noll 5-21 lacks 22, 23, 24, 29, 30, 37,
   and the tetrapod's 3rd-order modes are not small (Z23 field mean 0.014, Z22 0.007, Z29 / Z30 0.006 - 0.010 waves,
   std over the field 0.006 - 0.016). Make the mode list a parameter everywhere (it is in VectorialPSF); default for
   engineered PSFs: Noll 5-37.
