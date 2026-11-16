@@ -5,7 +5,9 @@ localize (movie -> localizations), save / PSF.load (also psf.zip: io.save_zip, d
 the models VectorialPSF, CubicSplinePSF,
 GaussianPSF and AstigmaticGaussianPSF, and the multi-channel models (MultiChannelPSF, torch_psf.multichannel; images
 [N, C, P, P], fit / crlb on all channels jointly): ChannelsPSF (independent channels) and the coherent 4Pi models
-FourPiPSF and FourPiSplinePSF (torch_psf.fourpi). PSFs are estimated with ZStackEstimator (bead z-stacks; DenseBeadEstimator for dense, overlapping beads;
+FourPiPSF and FourPiSplinePSF (torch_psf.fourpi), and the field-dependent models (torch_psf.field: FieldZernikes, a
+polynomial of the field position per Zernike; FieldPSF, a VectorialPSF with it; TiledSplinePSF, its tiled spline
+form). PSFs are estimated with ZStackEstimator (bead z-stacks; DenseBeadEstimator for dense, overlapping beads;
 PhaseDiversityEstimator: phase diversity, the object eliminated) and InSituEstimator
 (from the SMLM movie itself).
 
@@ -17,7 +19,8 @@ default: cuda if available, else cpu. Lower-level pieces: torch_psf.fit (incl. s
 (torch_psf.dataset).
 
 Module layers (each imports only from the layers before it): optics, zernike, fit -> detect, movie, spots, dataset,
-camera -> psf (the base class) -> multichannel, vectorial, spline, gaussian -> fourpi -> psfzip, psfreport, io, estimation, simulate ->
+camera -> psf (the base class) -> multichannel, vectorial, spline, gaussian -> fourpi -> psfzip, field, matched_filter,
+psfreport, io, estimation, simulate ->
 estimators -> viewer,
 __main__. The model classes register themselves by their psf.json type name when they are defined
 (PSF.__init_subclass__), and this __init__ imports all of them, so PSF.load knows every type whenever torch_psf is
@@ -36,6 +39,8 @@ from torch_psf.spline import CubicSplinePSF
 from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
 from torch_psf.multichannel import MultiChannelPSF, ChannelsPSF
 from torch_psf.fourpi import FourPiPSF, FourPiSplinePSF
+from torch_psf.field import FieldZernikes, FieldPSF, TiledSplinePSF
+from torch_psf.matched_filter import MatchedFilterDetector
 from torch_psf.detect import detect_spots
 from torch_psf.spots import extract_spots
 from torch_psf.estimators import ZStackEstimator, DenseBeadEstimator, InSituEstimator, PhaseDiversityEstimator

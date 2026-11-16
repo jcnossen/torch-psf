@@ -40,9 +40,9 @@ def save(path, psf, source=None, camera=None, provenance=None):
 def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None, channel=None):
     """PSF.load(path, ...): read a PSF json, a psf.zip or a plain calibration json and return the model. channel
     (index or name): one channel of a psf.zip with independent channels (PSFZip.read gives all of them, with their
-    mappings and field dependence)."""
+    mappings and field dependence); a channel with a zernike_poly field block gives its field-dependent model."""
     if channel is not None:
-        return PSFZip.read(path, roisize=roisize, device=device).channel(channel).model
+        return PSFZip.read(path, roisize=roisize, device=device).channel(channel).psf
     return PSF.load(path, roisize=roisize, device=device, angle=angle, npupil=npupil, oversample=oversample)
 
 

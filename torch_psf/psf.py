@@ -264,7 +264,9 @@ class PSF:
         current directory). roisize: for vectorial / Gaussian models (default: the stored one, or 15 for a
         calibration json). angle: for calibrations with per-pattern-angle PSF terms: 0 / 1 = that angle, None = the
         average. npupil / oversample override the stored pupil sampling of a vectorial model. A calibration with
-        psf_gauss_sigma_um gives a GaussianPSF (sigma = psf_gauss_sigma_um / pixel size)."""
+        psf_gauss_sigma_um gives a GaussianPSF (sigma = psf_gauss_sigma_um / pixel size). A psf.zip channel with a
+        zernike_poly field block gives the field-dependent model (torch_psf.field: FieldPSF of a vectorial channel,
+        TiledSplinePSF of a spline channel with its vectorial source)."""
         d, arrays, typ = PSF.read_file(path)
         if typ not in PSF._registry:
             raise ValueError(f'unknown PSF type {typ!r} (known: {sorted(PSF._registry)})')
@@ -272,6 +274,12 @@ class PSF:
                                             oversample=oversample)
         if d.get('provenance'):
             psf.provenance = d['provenance']
+        fd = d.get('_field')
+        if fd:                      # a psf.zip channel with a zernike_poly field block: the field-dependent model
+            from torch_psf.psfzip import field_model
+            src = None if typ == 'vectorial' else PSF._registry['vectorial']._from_file(
+                d, arrays, roisize=d.get('roisize', 15), device=device, npupil=npupil, oversample=oversample)
+            psf = field_model(psf, src, fd['block'], None, fd.get('crop'), fd.get('tiles'))
         return psf
 
     # ------------------------------------------------------------------ cubic spline

@@ -152,9 +152,13 @@ class Mapping:
 class FieldZernikePoly:
     """Field dependence 'zernike_poly': waves of the Noll indices zernike_noll as polynomials in the channel
     coordinates, coef [n_zernike, n_feat] (PolyMap features, feats_norm). The channel model's zernike_waves are the
-    value at reference_point (default the feats_norm centre, where the polynomial is coef[:, 0])."""
+    value at reference_point (default the feats_norm centre, where the polynomial is coef[:, 0]).
+    clamp (default): positions are clipped to the feats_norm box (|u|, |v| <= 1) before the polynomial is evaluated,
+    i.e. no extrapolation beyond it (the same rule as torch_psf.field.FieldZernikes; with feats_norm = the crop centre
+    and half size it changes nothing inside the crop). The numpy reader; torch_psf.field.FieldZernikes is the
+    differentiable model of the same block."""
 
-    def __init__(self, d, arrays=None, crop=None):
+    def __init__(self, d, arrays=None, crop=None, clamp=True):
         self.d = d
         self.noll = [int(j) for j in d['zernike_noll']]
         self.order = int(d['order'])
@@ -162,9 +166,18 @@ class FieldZernikePoly:
         self.coef = _array(d['coef'], arrays or {}).reshape(len(self.noll), n_features(self.order))
         rp = d.get('reference_point')
         self.ref = (self.norm[0], self.norm[1]) if not rp else (float(rp['x']), float(rp['y']))
+        self.clamp = bool(clamp)
+
+    def _clip(self, x, y):
+        if not self.clamp:
+            return x, y
+        cx, cy, sx, sy = self.norm
+        return (np.clip(np.asarray(x, float), cx - abs(sx), cx + abs(sx)),
+                np.clip(np.asarray(y, float), cy - abs(sy), cy + abs(sy)))
 
     def zernike_at(self, x, y):
-        """[..., n_zernike] waves at channel coordinates (x, y)."""
+        """[..., n_zernike] waves at channel coordinates (x, y) (clipped to the feats_norm box)."""
+        x, y = self._clip(x, y)
         return poly_features(x, y, self.order, self.norm) @ self.coef.T
 
     def model_at(self, model, x, y):
@@ -177,6 +190,24 @@ class FieldZernikePoly:
             for j, v in zip(self.noll, w):
                 m.zcoef[m.zidx.index(j)] = float(v)
         return m
+
+
+def _field_tiles(prov, index):
+    t = (prov or {}).get('field_tiles')
+    if isinstance(t, list):
+        return t[index] if index < len(t) else None
+    return t
+
+
+def field_model(model, source, block, arrays=None, crop=None, tiles=None):
+    """The field-dependent model of a channel (torch_psf.field.field_psf_from_file) when `block` is a zernike_poly
+    field block, else None."""
+    if not block or block.get('type') != 'zernike_poly':
+        return None
+    from torch_psf.field import field_psf_from_file       # lazy: torch_psf.field imports this module
+    m = field_psf_from_file(model, source, block, arrays, crop, tiles)
+    m.provenance = getattr(model, 'provenance', None)
+    return m
 
 
 def _field(d, arrays, crop):
@@ -247,6 +278,13 @@ def legacy(meta, arrays, channel=None):
             s = ch['source']
             d = {**s['model'], **d}
             arr = {**_arrays_of(s, arrays), **arr}
+        fb = ch.get('field')
+        if fb and fb.get('type') == 'zernike_poly':        # PSF.load returns the field-dependent model
+            fb = dict(fb)
+            if isinstance(fb.get('coef'), str):
+                fb['coef'] = np.asarray(arrays[fb['coef']]).tolist()
+            d['_field'] = dict(block=fb, crop=ch.get('crop'), vectorial=typ == 'vectorial' or 'zernike_waves' in d,
+                               tiles=_field_tiles(meta.get('provenance'), _channel_index(meta, channel or 0)))
     if meta.get('optics'):
         d.setdefault('optics', meta['optics'])
     for k in ('camera', 'provenance'):
@@ -294,7 +332,9 @@ def _model_from_block(block, arrays, roisize=None, device=None):
 class Channel:
     """One channel of a psf.zip. model: its PSF (None for the outputs of a coupled model: then PSFZip.psf renders all
     channels), source: the model it was derived from (e.g. the vectorial model of a spline) or None, mapping:
-    Mapping to the reference channel 0, field: FieldZernikePoly / raw field block / None, entry: the psf.json entry."""
+    Mapping to the reference channel 0, field: FieldZernikePoly / raw field block / None, field_model: the
+    field-dependent model (FieldPSF for a vectorial channel, TiledSplinePSF for a spline channel with a vectorial
+    source) or None, entry: the psf.json entry; psf: field_model or model."""
     name: str
     index: int
     type: str
@@ -303,6 +343,13 @@ class Channel:
     source: object = None
     mapping: Mapping = None
     field: object = None
+    field_model: object = None
+
+    @property
+    def psf(self):
+        """the channel's PSF with its field dependence (torch_psf.field.FieldPSF / TiledSplinePSF) when the channel
+        has a zernike_poly field block, else the channel model"""
+        return self.model if self.field_model is None else self.field_model
 
     @property
     def crop(self):
@@ -355,7 +402,7 @@ class PSFZip:
             psf.provenance = prov
         out = []
         for i, c in enumerate(chans):
-            model = source = None
+            model = source = fm = None
             if not coupled:
                 if psf is not None:
                     model = psf
@@ -365,9 +412,12 @@ class PSFZip:
                     model.provenance = prov
                 if c.get('source'):
                     source = _model_from_block(c['source'], arrays, device=device)
+                fm = field_model(model, source, c.get('field'), arrays, c.get('crop'), _field_tiles(prov, i))
             out.append(Channel(name=c['name'], index=i, type=c['type'], entry=c, model=model, source=source,
                                mapping=Mapping(c.get('mapping'), i, arrays, c.get('crop')),
-                               field=_field(c.get('field'), arrays, c.get('crop'))))
+                               field=_field(c.get('field'), arrays, c.get('crop')), field_model=fm))
+        if psf is not None and not coupled and out[0].field_model is not None:
+            psf = out[0].field_model                 # a single-channel file: the field-dependent model
         return cls(meta=meta, psf=psf, channels=out, camera=camera_from_meta(meta, arrays), arrays=arrays)
 
     def channel(self, c):
@@ -690,6 +740,7 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     Optics scalars that are exactly float32 values are written as their shortest float32 decimal (1.33, not
     1.3300000429). The zip is byte-reproducible (fixed member times, no PDF creation date)."""
     from torch_psf import psfreport
+    psf, source, channels, tiles = _unwrap_field(psf, source, channels)
     models = _channel_models(psf)
     extras = list(channels or [])
     chans, sb, arrays = _channel_blocks(
@@ -725,6 +776,8 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     if camera is not None:
         meta['camera'] = _camera_block(camera, arrays)
     prov = provenance if provenance is not None else (models[0].provenance or {})
+    if tiles is not None:
+        prov = dict(prov or {}, field_tiles=tiles)
     meta['provenance'] = _plain(prov)
     meta['channels'] = chans
     if sb is not None:
@@ -777,6 +830,29 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
         put(z, PREVIEW_NAME, png, stored=True)
         put(z, REPORT_NAME, pdf)
     return meta
+
+
+def _unwrap_field(psf, source, channels):
+    """field-dependent models (torch_psf.field.FieldPSF / TiledSplinePSF) -> their file models (the vectorial
+    model at the reference point, or the reference spline with the vectorial source) plus the zernike_poly field
+    block of the channel; tiles: per channel the tile grid of a TiledSplinePSF (provenance field_tiles) or None"""
+    from torch_psf.field import unwrap
+    models = _channel_models(psf)
+    un = [unwrap(m) for m in models]
+    if all(u[2] is None for u in un):
+        return psf, source, channels, None
+    srcs = list(source) if isinstance(source, (list, tuple)) else [source] + [None] * (len(models) - 1)
+    extras = [dict(e) for e in (channels or [])]
+    extras += [{} for _ in range(len(models) - len(extras))]
+    for c, (m, s, blk, t) in enumerate(un):
+        if s is not None and srcs[c] is None:
+            srcs[c] = s
+        if blk is not None and extras[c].get('field') is None:
+            extras[c]['field'] = blk
+    tiles = [u[3] for u in un]
+    tiles = None if all(t is None for t in tiles) else (tiles[0] if len(tiles) == 1 else tiles)
+    single = not isinstance(psf, (list, tuple))
+    return (un[0][0] if single else [u[0] for u in un]), (srcs[0] if single else srcs), extras, tiles
 
 
 def _report_json(b, max_len=10000):

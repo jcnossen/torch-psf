@@ -313,7 +313,8 @@ def _chunks(data, active, max_renders):
 def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), emitter_z_um=0.0, train=None,
                     drift=True, drift_order=3, focus_offset='tilt', bg='linear', intensity='free',
                     fit_dz_scale=False, warmup=50, heldout_iters=200, max_renders=3000, reject=None, reject_at=None,
-                    lr_focus=1e-2, lr_drift=1e-2, lr_apod=1e-2, log=None, stop=None):
+                    lr_focus=1e-2, lr_drift=1e-2, lr_apod=1e-2, field=None, field_xy=None, lr_field=None, exclude=None,
+                    log=None, stop=None):
     """Joint fit of a shared VectorialPSF (copied, roisize = data.R) to the bead clusters `data` (BeadClusters),
     imaged at the focus positions focus_um [nk] (um, focal plane relative to the coverslip, see stage_focus). Poisson
     likelihood, Adam (lr for the PSF parameters; cosine decay to 0.1 lr over the last 30 % of the iterations).
@@ -331,17 +332,33 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     iteration reject_at (default iters // 3). max_renders: bead-planes per backward pass (memory). lr_focus (um) /
     lr_drift (px): Adam steps of the focus offsets and drift coefficients (Adam moves a parameter by at most about lr
     per iteration: beads 0.4 um off the stack centre need lr_focus x iters well above that).
+    field: a torch_psf.field.FieldZernikes (copied): every bead gets the Zernikes zcoef + field(x, y) at its field
+    position field_xy [B, 2] (camera px; default data.xy_image, the positions in the stacks); with 'field' in fit the
+    polynomial coefficients are fitted too (Adam step lr_field, default lr; its ridge prior added to the loss), else
+    held fixed (scoring). `vectorial` may also be a torch_psf.field.FieldPSF (its base and field are used).
+    exclude: cluster indices that are neither fitted nor scored as held-out (e.g. the clusters rejected by an earlier
+    fit).
 
-    Returns dict(psf, report, history, xy [B, 2] (image px), photons [B, nk], bg [C, nk], focus_offset [B] (um),
+    Returns dict(psf, report, history, field (the fitted FieldZernikes or None), xy [B, 2] (image px), photons [B, nk],
+    bg [C, nk], focus_offset [B] (um),
     drift, mu [nk, Npix] (the fitted expected images; data.unflatten(mu, c) for one cluster), chi2 [C], deviance [C]
     (Poisson deviance per pixel, ~1 for a model that explains the data), train [C] (after rejection), dz_scale)."""
     dev = data.dev
     P, R, nk, B, C, S = data.patch, data.R, data.nk, data.n_beads, data.n_clusters, data.n_stacks
     focus = torch.as_tensor(focus_um, dtype=torch.float32, device=dev)
     assert len(focus) == nk, (len(focus), nk)
+    if hasattr(vectorial, 'field') and hasattr(vectorial, 'base'):          # a FieldPSF
+        field = vectorial.field if field is None else field
+        vectorial = vectorial.base
     psf = vectorial.resized(R)
     for k in ('zcoef', 'NA', 'n_med', 'apod'):
         getattr(psf, k).requires_grad_(k in fit)
+    fz = None
+    if field is not None:
+        fz = field.copy().to(dev)
+        fz.coef.requires_grad_('field' in fit)
+        fxy = (data.xy_image if field_xy is None else torch.as_tensor(field_xy, dtype=torch.float32, device=dev))
+        fxy = fxy.reshape(-1, 2).to(dev)
     train = np.ones(C, bool) if train is None else np.asarray(train, bool).copy()
     d = data.d
 
@@ -373,10 +390,13 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
         bg_params.append(bgg)
     elif bg != 'const':
         raise ValueError(bg)
-    groups = [dict(params=[getattr(psf, k) for k in fit if k != 'apod'], lr=lr, name='psf'), dict(params=[xy], lr=1e-2),
+    groups = [dict(params=[getattr(psf, k) for k in fit if k not in ('apod', 'field')], lr=lr, name='psf'),
+              dict(params=[xy], lr=1e-2),
               dict(params=int_params, lr=1e-2), dict(params=bg_params, lr=0.3)]
     if 'apod' in fit:
         groups.append(dict(params=[psf.apod], lr=lr_apod, name='psf'))
+    if fz is not None and 'field' in fit:
+        groups.append(dict(params=[fz.coef], lr=lr if lr_field is None else lr_field, name='psf'))
     kk = torch.arange(nk, device=dev, dtype=torch.float32) - (nk - 1) / 2
     tpow = torch.stack([(kk / max((nk - 1) / 2, 1.0)) ** (k + 1) for k in range(int(drift_order))], 0)   # [order, nk]
     dr = None
@@ -424,7 +444,10 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
         fk = focus if log_s is None else focus * torch.exp(log_s)
         foc = fk[None] + df_bead(b0, b1)[:, None]                                             # [nb, nk]
         pos = torch.cat([pxy, torch.full((nb, nk, 1), float(emitter_z_um), device=dev)], -1).reshape(-1, 3)
-        img = psf(pos, foc.reshape(-1)).reshape(nb, nk, R * R) * photons(b0, b1)[:, :, None]
+        zoff = None
+        if fz is not None:
+            zoff = fz.offsets(fxy[b0:b1], psf.zidx)[:, None].expand(-1, nk, -1).reshape(nb * nk, -1)
+        img = psf(pos, foc.reshape(-1), zcoef_offset=zoff).reshape(nb, nk, R * R) * photons(b0, b1)[:, :, None]
         ix = data.idx[b0:b1]
         ix = torch.where(ix < 0, p1 - p0, ix - p0).reshape(-1)                               # sink: p1 - p0
         mu = torch.zeros(nk, p1 - p0 + 1, device=dev).index_add(
@@ -454,6 +477,10 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
             l = loss_of(c0, c1)
             l.backward()
             tot += float(l.detach())
+        if fz is not None and 'field' in fit:
+            pen = fz.penalty()
+            pen.backward()
+            tot += float(pen.detach())
         opt.step()
         hist.append(dict(it=it, nll=tot))
         if log is not None:
@@ -471,7 +498,8 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     rep = dict(method='dense_beads', n_beads=int(sum(data.cl_bead[c + 1] - data.cl_bead[c] for c in range(C) if train[c])),
                n_clusters=int(train.sum()), n_planes=nk, patch=P, iterations=len(hist), nll_per_px=tot / max(ntrain_px, 1),
                rejected_clusters=rejected, seconds=time.time() - t0)
-    for p in [psf.zcoef, psf.NA, psf.n_med, psf.apod] + ([log_s] if log_s is not None else []):
+    for p in [psf.zcoef, psf.NA, psf.n_med, psf.apod] + ([log_s] if log_s is not None else []) + (
+            [fz.coef] if fz is not None else []):
         p.requires_grad_(False)
     # statistics of the training clusters (before the held-out refit touches the shared drift / focus terms)
     rej = np.zeros(C, bool)
@@ -480,6 +508,8 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     # ---- held-out clusters: refit their own terms with the PSF (and the dz scale) fixed, then score them
     ho = ~train
     ho[rejected] = False
+    if exclude is not None:
+        ho[np.asarray(exclude, int)] = False
     if ho.any():
         opt2 = torch.optim.Adam([dict(params=[xy], lr=1e-2), dict(params=int_params[:1], lr=1e-2),
                                  dict(params=bg_params, lr=0.3)] + ([dict(params=[dr], lr=lr_drift)] if dr is not None else [])
@@ -517,7 +547,10 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
                    focus_offset=df_bead(0, B).detach(), drift=None if dr is None else dr.detach(),
                    focus_offset_params=None if fo is None else fo.detach(), mu=mu, chi2=c2, deviance=dv,
                    nll=nll_c, train=train, heldout=ho, dz_scale=dz)
-    return dict(psf=psf, report=rep, history=hist, **out)
+    if fz is not None:
+        rep['field'] = dict(modes=fz.noll, orders=fz.orders, n_params=fz.n_params, prior_sd=fz.prior_sd,
+                            penalty=float(fz.penalty()))
+    return dict(psf=psf, report=rep, history=hist, field=fz, **out)
 
 
 @torch.no_grad()
@@ -584,12 +617,13 @@ def dense_bead_layout(H, W, cluster_sizes, sep_px=(10.0, 20.0), margin=12, gap_p
 
 @torch.no_grad()
 def simulate_dense_bead_stack(vec, focus_um, xy, H, W, photons=40000.0, bg=30.0, emitter_z_um=0.0, focus_offset=None,
-                              drift=None, render_size=None, generator=None, seed=0):
+                              drift=None, render_size=None, generator=None, seed=0, field=None):
     """Bead z-stack [nk, H, W] (Poisson photon counts) of beads at image positions xy [n, 2] (px), each rendered with
     the VectorialPSF vec in a render_size box (default vec.roisize; take it larger than the fit patch so the PSF tails
     are in the data) at the focus positions focus_um [nk] (+ focus_offset [n] um per bead) and summed. photons: scalar
-    or [n] (or [n, nk]); bg: scalar or [H, W]; drift: [nk, 2] px (shared lateral drift). Returns dict(d, mu, xy,
-    photons, focus_offset)."""
+    or [n] (or [n, nk]); bg: scalar or [H, W]; drift: [nk, 2] px (shared lateral drift); field: a
+    torch_psf.field.FieldZernikes (each bead with the Zernikes at its position xy). Returns dict(d, mu, xy, photons,
+    focus_offset)."""
     dev = vec.dev
     R = render_size or vec.roisize
     v = vec if vec.roisize == R else vec.resized(R)
@@ -608,7 +642,8 @@ def simulate_dense_bead_stack(vec, focus_um, xy, H, W, photons=40000.0, bg=30.0,
         p = xy[i][None] + dr                                                           # [nk, 2]
         r = torch.round(xy[i]).long()
         pos = torch.cat([p - r[None].float(), torch.full((nk, 1), float(emitter_z_um), device=dev)], 1)
-        img = v(pos, focus + fo[i]) * ph[i][:, None, None]
+        zo = None if field is None else field.offsets(xy[i][None], v.zidx).expand(nk, -1).detach()
+        img = v(pos, focus + fo[i], zcoef_offset=zo) * ph[i][:, None, None]
         y0, x0 = int(r[1]) - h + R, int(r[0]) - h + R
         mu[:, y0:y0 + R, x0:x0 + R] += img
     mu = mu[:, R:R + H, R:R + W] + torch.as_tensor(bg, dtype=torch.float32, device=dev)
