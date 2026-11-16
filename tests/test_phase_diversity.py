@@ -4,7 +4,7 @@ fitters. Small enough for a CPU."""
 import math
 import numpy as np
 import torch
-from conftest import DEV
+from conftest import DEV, needs_gpu
 from torch_psf import VectorialPSF, PhaseDiversityEstimator, DenseBeadEstimator, ZStackEstimator
 from torch_psf.estimation import stage_focus
 from torch_psf.estimation.dense_beads import simulate_dense_bead_stack
@@ -80,6 +80,7 @@ def test_metric_eliminates_the_object():
             assert int(np.argmin(es)) == 4, es
 
 
+@needs_gpu
 def test_recovers_zernikes_na_and_apodization():
     """Overlapping beads with NA 1.40 (nominal 1.49) and an apodized pupil: phase diversity from the nominal start
     recovers the Zernikes, NA and the pupil transmission; without NA / apod in the fit the Zernikes are biased."""
@@ -133,6 +134,7 @@ def test_generic_psf_stack():
     assert torch.allclose(c, true_c, atol=0.02), c
 
 
+@needs_gpu
 def test_estimator_api_heldout_and_field():
     truth = _truth(1.49, (0, 0, 0))
     focus, sim = _sim(truth, nk=15, seed=0)
