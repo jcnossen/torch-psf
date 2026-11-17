@@ -1,6 +1,7 @@
 import { runAll } from './harness';
 import { getDevice, describeGpu } from '../src/gpu/device';
 import './test_forward';
+import './test_cloud';
 import './test_tiff';
 import './test_fit';
 import './test_export';

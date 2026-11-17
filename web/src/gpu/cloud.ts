@@ -20,6 +20,8 @@ export interface CloudUniforms {
 
 export class GpuCloud {
   private ctx: GPUCanvasContext;
+  private surface: OffscreenCanvas;
+  private output: ImageBitmapRenderingContext;
   private fmt: GPUTextureFormat;
   private accFmt: GPUTextureFormat;
   private pts: GPUBuffer; private flags: GPUBuffer; private uni: GPUBuffer;
@@ -35,7 +37,11 @@ export class GpuCloud {
   reallocations = 0;
 
   constructor(private dev: GPUDevice, canvas: HTMLCanvasElement) {
-    this.ctx = canvas.getContext('webgpu') as GPUCanvasContext;
+    // Present through bitmaprenderer: direct WebGPU canvas presentation can stay blank in Chrome even
+    // when the render passes succeed. Transferring the offscreen bitmap keeps presentation on the GPU.
+    this.surface = new OffscreenCanvas(canvas.width, canvas.height);
+    this.ctx = this.surface.getContext('webgpu') as GPUCanvasContext;
+    this.output = canvas.getContext('bitmaprenderer')!;
     this.fmt = navigator.gpu.getPreferredCanvasFormat();
     this.ctx.configure({ device: dev, format: this.fmt, alphaMode: 'opaque' });
     this.accFmt = dev.features.has('float32-blendable') ? 'rgba32float' : 'rgba16float';
@@ -174,6 +180,8 @@ export class GpuCloud {
 
   draw(u: CloudUniforms) {
     const dev = this.dev, W = Math.round(u.W), H = Math.round(u.H);
+    if (this.surface.width !== W) this.surface.width = W;
+    if (this.surface.height !== H) this.surface.height = H;
     if (!this.acc || this.acc.width !== W || this.acc.height !== H) {
       this.acc?.destroy();
       this.acc = dev.createTexture({ size: [W, H], format: this.accFmt, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
@@ -202,5 +210,6 @@ export class GpuCloud {
     p2.draw(3);
     p2.end();
     dev.queue.submit([enc.finish()]);
+    this.output.transferFromImageBitmap(this.surface.transferToImageBitmap());
   }
 }
