@@ -126,7 +126,7 @@ export function startApp(root: HTMLElement) {
     renderSteps();
     cloud?.request(); renderMovie();
   }
-  function setStep(s: Step) { step = s; applyLayout(); try { localStorage.setItem('tpsf.step', s); } catch { /* no storage */ } }
+  function setStep(s: Step) { step = s; applyLayout(); }
   /** During a run: open the tab of the stage that is running (once per stage, so a tab the user picks stays open). */
   let autoStage = '';
   const STAGE_TAB: Record<string, Step> = { spots: 'detect', fit: 'fit', report: 'fit', refine: 'fit', spline: 'localize', localize: 'localize', read: 'fit' };
@@ -912,9 +912,9 @@ export function startApp(root: HTMLElement) {
   $('x-tif').onclick = () => exportZstack();
 
   // ================================================================ start
-  let m0: Mode = 'movie', s0: Step = 'input';
-  try { const t = localStorage.getItem('tpsf.tab'); m0 = t === 'stack' ? 'stack' : 'movie'; const s = localStorage.getItem('tpsf.step') as Step | null; if (s) s0 = s; } catch { /* no storage */ }
-  setMode(m0); if (STEPS[m0].some(([k]) => k === s0)) setStep(s0);
+  let m0: Mode = 'movie';
+  try { const t = localStorage.getItem('tpsf.tab'); m0 = t === 'stack' ? 'stack' : 'movie'; } catch { /* no storage */ }
+  setMode(m0); // Each new session starts with Input, where data and acquisition settings are selected.
   showInsituEmpty();
 }
 
