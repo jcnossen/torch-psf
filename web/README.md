@@ -75,6 +75,12 @@ Noll 5 / 6 / 11 = 0.02 / 0.10 / 0.03 waves, blinking sites on curved filaments, 
 torch_psf.simulate.simulate_reference_movie with filament_sites) and plays it in the Movie panel (autoplay, frame slider). Drop
 your own movie (TIFF, streamed) to replace it.
 
+Open or drop all parts of a multipart movie together. Large Micro-Manager TIFFs use their embedded frame index
+to open without scanning every frame header; pixels are read on demand in windows of at most 8 MiB. Other TIFFs
+show a frame counter while their directories are indexed. The Input stage shows opening progress, errors and
+Cancel opening; the preview and frame slider remain usable without loading the full movie. Localization details
+include separate reading, detection and GPU fitting times.
+
 The PSF fit (Fit PSF stage of "Run all") runs torch_psf's InSituEstimator, ported step by step: spot detection and ROIs, a 16 px checkerboard
 split into spots for the fit and held-out spots, the in-situ fit of the vectorial PSF by the knot route
 (fit_zernike_knots: knots of the spline from the vectorial model, Levenberg-Marquardt localization on the spline, the

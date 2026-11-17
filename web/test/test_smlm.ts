@@ -58,6 +58,7 @@ test('smlm: spline localization = torch_psf fit.localize / crlb (same knots)', a
   const meta = await fetchJson('smlm/movie.json');
   const z = await parseNpz(await fetchBuf('smlm/localize.npz'));
   const { device } = await getDevice();
+  device.pushErrorScope('validation');
   const grid = splineGrid(meta.roisize, meta.z_range[0], meta.z_range[1], meta.grid.oversample, meta.grid.dz_um, meta.grid.zpad, meta.grid.xy_limit);
   check(grid.nz === L.nz && grid.nv === L.nv && Math.abs(grid.z0 - L.z0) < 1e-9, `grid ${grid.nz} ${grid.nv} ${grid.z0} vs ${L.nz} ${L.nv} ${L.z0}`);
   const loc = new SplineLocalizer(device, grid, new Float32Array(z.knots.data as Float32Array));
@@ -66,6 +67,8 @@ test('smlm: spline localization = torch_psf fit.localize / crlb (same knots)', a
   const r = await loc.localize(rois, N);
   const ms = performance.now() - t0;
   loc.destroy();
+  const validationError = await device.popErrorScope();
+  check(!validationError, validationError?.message ?? '');
   const th = z.theta.data as Float32Array, nll = z.nll.data as Float32Array, cr = z.crlb.data as Float32Array, chi = z.tab_chi2.data as Float32Array;
   // per-spot agreement; the optimum is the same, the path differs only by float32 vs float64 solves
   const dx: number[] = [], dz: number[] = [], dn: number[] = [], dc: number[] = [], dchi: number[] = [];

@@ -201,6 +201,7 @@ export function startApp(root: HTMLElement) {
 
   // ================================================================ movie
   let source: MovieSourceSpec = 'demo';
+  let movieLoading = false;
   let player: { n: number; H: number; W: number; frame: (t: number) => Promise<Float32Array> } | null = null;
   let recon: Recon | null = null;
   let psfJson: { noll: number[]; zcoef: number[]; name: string } | null = null;
@@ -265,8 +266,10 @@ export function startApp(root: HTMLElement) {
     if (drawing) { queuedFrame = t; return; }
     drawing = true;
     try {
+      const movie = player, seq = loadSeq;
       frameNow = t; slider.max = String(player.n - 1); slider.value = String(t);
-      const a = await player.frame(t);
+      const a = await movie.frame(t);
+      if (player !== movie || seq !== loadSeq) return;
       if (!lims) { const s = Float32Array.from(a).sort(); lims = [s[Math.floor(0.01 * s.length)], s[Math.floor(0.999 * s.length)]]; }
       const g = new Float32Array(a.length);
       for (let i = 0; i < a.length; i++) g[i] = Math.max(0, a[i] - lims[0]);
@@ -275,6 +278,8 @@ export function startApp(root: HTMLElement) {
       haveFrame = true;
       renderMovie();
       $('m-frame-v').textContent = `frame ${t + 1} / ${player.n}`;
+    } catch (e) {
+      note('movie-note', 'Could not read movie frame: ' + (e as Error).message);
     } finally {
       drawing = false;
       if (queuedFrame >= 0) { const q = queuedFrame; queuedFrame = -1; showFrame(q); }
@@ -363,31 +368,68 @@ export function startApp(root: HTMLElement) {
   }
 
   // --- movie files (replace the demo)
+  const movieLoadStatus = (message: string, active: boolean) => {
+    movieLoading = active;
+    $('movie-load').hidden = false;
+    $('movie-load-status').textContent = message;
+    $('movie-load-progress').hidden = !active;
+    $('movie-load-cancel').hidden = !active;
+    for (const id of ['m-run', 'm-loc']) $<HTMLButtonElement>(id).disabled = active || root.classList.contains('busy');
+  };
+  $('movie-load-cancel').onclick = () => { ++loadSeq; movieLoadStatus('Opening cancelled.', false); };
   const setMFiles = async (fl: FileList | File[]) => {
     const fs = [...fl].filter((f) => /\.tiff?$/i.test(f.name));
     if (!fs.length) return;
-    ++loadSeq;
-    source = fs; truthZ = null;
-    const mv = await TiffMovie.open(fs);
-    player = { n: mv.n, H: mv.H, W: mv.W, frame: (t) => mv.read(t, t + 1) };
-    $('mname').textContent = fs.length > 1 ? `${fs[0].name} + ${fs.length - 1}` : fs[0].name;
-    $('mfiles').textContent = `${mv.n} frames · ${mv.W} × ${mv.H} px · ${mv.dtype} · ${(fs.reduce((s, f) => s + f.size, 0) / 2 ** 20).toFixed(1)} MB`;
-    note('movie-note', `${fs.map((f) => f.name).join(' + ')}: ${mv.n} frames of ${mv.W} x ${mv.H} px (${mv.dtype}).`);
-    camBadge('', ''); $('cam-note').textContent = ''; $('cam-est').hidden = false; $('cam-offknown').closest('label')!.hidden = false;
-    if (mode !== 'movie') setMode('movie');
-    newMovie();
-    estimateCamera();
+    if (mode !== 'movie') setMode('movie'); else setStep('input');
+    const seq = ++loadSeq;
+    setPlaying(false);
+    movieLoadStatus(`Opening ${fs.length} TIFF file${fs.length > 1 ? 's' : ''}…`, true);
+    const started = performance.now();
+    try {
+      const mv = await TiffMovie.open(fs, (msg) => {
+        if (seq !== loadSeq) throw new Error('Opening superseded');
+        movieLoadStatus(msg, true);
+      });
+      if (seq !== loadSeq) return;
+      source = fs; truthZ = null;
+      player = { n: mv.n, H: mv.H, W: mv.W, frame: (t) => mv.read(t, t + 1) };
+      $('mname').textContent = fs.length > 1 ? `${fs[0].name} + ${fs.length - 1}` : fs[0].name;
+      $('mfiles').textContent = `${mv.n} frames · ${mv.W} × ${mv.H} px · ${mv.dtype} · ${(fs.reduce((s, f) => s + f.size, 0) / 2 ** 20).toFixed(1)} MB`;
+      note('movie-note', `${fs.map((f) => f.name).join(' + ')}: ${mv.n} frames of ${mv.W} x ${mv.H} px (${mv.dtype}).`);
+      camBadge('', ''); $('cam-note').textContent = ''; $('cam-est').hidden = false; $('cam-offknown').closest('label')!.hidden = false;
+      if (mode !== 'movie') setMode('movie');
+      newMovie();
+      movieLoadStatus(`Ready: ${mv.n.toLocaleString()} frames indexed in ${((performance.now() - started) / 1000).toFixed(2)} s. Frames stream from disk as needed.`, false);
+      estimateCamera();
+    } catch (e) {
+      if (seq !== loadSeq) return;
+      movieLoadStatus('Could not open movie: ' + (e as Error).message, false);
+    }
   };
   (window as any).__setMovieFiles = setMFiles;
-  const routeFiles = (fl: File[]) => { if (fl.some(isLocFile)) loadLocFiles(fl); else if (mode === 'stack') setFiles(fl); else setMFiles(fl); };
+  const routeFiles = (fl: File[]) => {
+    if (fl.some(isLocFile)) loadLocFiles(fl);
+    else if (!fl.some((f) => /\.tiff?$/i.test(f.name))) movieLoadStatus('Choose TIFF movies (.tif, .tiff) or localization files (.h5, .hdf5, .csv).', false);
+    else if (mode === 'stack') setFiles(fl);
+    else setMFiles(fl);
+  };
   for (const id of ['mdrop', 'drop', 'ldrop']) {
     const d = $(id);
     d.ondragover = (e) => { e.preventDefault(); d.classList.add('over'); };
     d.ondragleave = () => d.classList.remove('over');
   }
-  $<HTMLInputElement>('mfile').onchange = (e) => routeFiles([...(e.target as HTMLInputElement).files!]);
+  $<HTMLInputElement>('mfile').onchange = (e) => {
+    const input = e.target as HTMLInputElement;
+    routeFiles([...(input.files ?? [])]); input.value = '';
+  };
   $<HTMLInputElement>('lfile').onchange = (e) => loadLocFiles([...(e.target as HTMLInputElement).files!]);
-  $('m-demo').onclick = (e) => { e.preventDefault(); loadDemo(); };
+  $('m-demo').onclick = async (e) => {
+    e.preventDefault();
+    movieLoadStatus('Preparing the demo movie…', true);
+    const promise = loadDemo(), seq = loadSeq;
+    try { await promise; if (seq === loadSeq) movieLoadStatus('Demo ready.', false); }
+    catch (error) { if (seq === loadSeq) movieLoadStatus('Could not load demo: ' + (error as Error).message, false); }
+  };
 
   // --- camera: type (excess noise) and gain / offset measured from the movie (torch_psf photon_transfer)
   let camK: number | null = null;     // photon-transfer slope (ADU per ADU): gain = F^2 / k
@@ -400,10 +442,12 @@ export function startApp(root: HTMLElement) {
   function camBadge(txt: string, kind: string) { const b = $('cam-badge'); b.textContent = txt; b.dataset.kind = kind; b.hidden = !txt; }
   async function estimateCamera() {
     if (!player) return;
+    const seq = loadSeq;
     camBadge('estimating…', 'busy');
     try {
       const known = $<HTMLInputElement>('cam-offknown').checked;
       const r = await call({ type: 'camera', source, opts: { excessNoise: n('o-excess'), offsetAdu: known ? n('o-offset') : null } });
+      if (seq !== loadSeq) return;
       const c = r.camera;
       camK = c.slope_adu;
       setNum('o-gain', +c.gain_e_per_adu.toPrecision(4));
@@ -413,6 +457,7 @@ export function startApp(root: HTMLElement) {
         (known ? 'Read noise from the intercept, given the offset.' : 'Offset and read noise cannot be separated from the movie alone: the offset absorbs the read noise. Enter the read noise, or tick "offset known" to estimate it.');
       (window as any).__camera = c;
     } catch (e) {
+      if (seq !== loadSeq) return;
       camBadge('not estimated', 'warn');
       $('cam-note').textContent = 'Camera estimate failed: ' + (e as Error).message;
     }
@@ -453,7 +498,7 @@ export function startApp(root: HTMLElement) {
   const busy = (b: boolean) => {
     root.classList.toggle('busy', b);
     for (const id of ['m-enough', 'm-abort', 'enough', 'abort']) $<HTMLButtonElement>(id).disabled = !b;
-    for (const id of ['m-run', 'run', 'm-loc']) $<HTMLButtonElement>(id).disabled = b;
+    for (const id of ['m-run', 'run', 'm-loc']) $<HTMLButtonElement>(id).disabled = b || (movieLoading && id !== 'run');
     if (b) autoStage = '';
   };
   busy(false);
@@ -461,6 +506,10 @@ export function startApp(root: HTMLElement) {
   for (const id of ['m-abort', 'abort']) $(id).onclick = () => worker.postMessage({ type: 'stop', signal: 'abort' });
   const STAGES: Record<string, string> = { spots: 'collecting spots', fit: 'fitting the PSF', report: 'held-out check', localize: 'localizing with the fitted PSF', spline: 'building the spline', header: 'reading the TIFF header' };
   onProgress = (p) => {
+    if (p.stage === 'camera') {
+      camBadge(`estimating ${p.done} / ${p.total} blocks`, 'busy');
+      return;
+    }
     const frac = p.total ? Math.min(1, p.done / p.total) : 0;
     const [bar, txt] = running === 'movie' ? ['mbar', 'mtext'] : ['pbar', 'ptext'];
     $(bar).style.width = (100 * frac).toFixed(1) + '%';
@@ -539,13 +588,19 @@ export function startApp(root: HTMLElement) {
     ($('recon') as HTMLCanvasElement).focus({ preventScroll: true });
   }
   // page-wide drop: TIFF -> the movie (or the bead stack in bead mode); .h5 / .hdf5 / .csv (+ Picasso .yaml) -> the viewer
-  document.addEventListener('dragover', (e) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); });
-  document.addEventListener('drop', (e) => {
+  window.addEventListener('dragover', (e) => {
+    if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }
+  }, true);
+  window.addEventListener('drop', (e) => {
     for (const id of ['mdrop', 'drop', 'ldrop']) $(id).classList.remove('over');
-    if (!e.dataTransfer?.files.length) return;
+    if (!e.dataTransfer?.types.includes('Files')) return;
     e.preventDefault();
-    routeFiles([...e.dataTransfer.files]);
-  });
+    e.stopPropagation();
+    const files = [...e.dataTransfer.files];
+    if (!files.length) for (const item of e.dataTransfer.items) { const f = item.getAsFile(); if (f) files.push(f); }
+    if (files.length) routeFiles(files);
+    else movieLoadStatus('No readable files were dropped. Use Open to select the TIFF files.', false);
+  }, true);
   $('r-crlb').addEventListener('change', () => cloud?.setFilter(n('r-crlb')));
   $<HTMLInputElement>('r-tilt').oninput = () => { if (cloud) { cloud.tilt = n('r-tilt'); cloud.request(); } };
   $<HTMLInputElement>('r-rot').oninput = () => { if (cloud) { cloud.rot = n('r-rot'); cloud.request(); } };
@@ -732,6 +787,7 @@ export function startApp(root: HTMLElement) {
       ['median CRLB x / y / z', `${med(6, px).toFixed(1)} / ${med(7, px).toFixed(1)} / ${med(8, 1000).toFixed(1)} nm`],
       ['at the offset limit', (100 * s.at_limit_fraction).toFixed(2) + ' %'],
       ['time', `${s.seconds.toFixed(1)} s (${s.spots_per_s.toFixed(0)} spots / s)`],
+      ['read / detect / fit', `${(s.timing_ms.read / 1000).toFixed(2)} / ${(s.timing_ms.detect / 1000).toFixed(2)} / ${(s.timing_ms.localize / 1000).toFixed(2)} s`],
     ]);
   }
 
@@ -1009,6 +1065,7 @@ const TEMPLATE = `
       <div id="mdrop" class="filecard drop"><div class="ficon"></div><div class="fbody"><div id="mname" class="fname">Simulated demo movie</div><div id="mfiles" class="fmeta"></div>
         <div class="flinks"><label class="link">Open…<input id="mfile" type="file" multiple accept=".tif,.tiff,.h5,.hdf5,.csv,.yaml" hidden></label><a href="#" id="m-demo">Demo movie</a></div></div></div>
       <p class="hint">Or drop a TIFF movie, or a localization file (HDF5${cite('picasso')}, CSV${cite('thunderstorm')}), anywhere on the page.</p>
+      <div id="movie-load" hidden><progress id="movie-load-progress" aria-label="Indexing movie" style="width:100%"></progress><p id="movie-load-status" class="hint" role="status" aria-live="polite"></p><button id="movie-load-cancel" type="button">Cancel opening</button></div>
     </div>
     <div id="tab-stack" hidden>
       <div id="drop" class="filecard drop"><div class="ficon"></div><div class="fbody"><div class="fname">Bead z-stack</div><div id="files" class="fmeta">no TIFF selected</div>

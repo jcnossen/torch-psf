@@ -28,14 +28,28 @@ class Part {
   async bytes(off: number, len: number): Promise<DataView> {
     const c = this.cache;
     if (c && off >= c.off && off + len <= c.off + c.buf.byteLength) return new DataView(c.buf.buffer, c.buf.byteOffset + off - c.off, len);
-    const n = Math.max(len, 65536);
+    const n = Math.max(len, 4096);
     const ab = await this.blob.slice(off, Math.min(this.size, off + n)).arrayBuffer();
     this.cache = { off, buf: new DataView(ab) };
     if (ab.byteLength < len) throw new TiffError(`${this.name}: unexpected end of file`);
     return new DataView(ab, 0, len);
   }
 
-  async raw(off: number, len: number): Promise<ArrayBuffer> { return this.blob.slice(off, off + len).arrayBuffer(); }
+  hasRange(off: number, len: number) {
+    const c = this.cache;
+    return !!c && off >= c.off && off + len <= c.off + c.buf.byteLength;
+  }
+
+  async prefetch(off: number, len: number) {
+    const ab = await this.blob.slice(off, Math.min(this.size, off + len)).arrayBuffer();
+    this.cache = { off, buf: new DataView(ab) };
+  }
+
+  async raw(off: number, len: number): Promise<ArrayBuffer> {
+    const c = this.cache;
+    if (c && this.hasRange(off, len)) return c.buf.buffer.slice(c.buf.byteOffset + off - c.off, c.buf.byteOffset + off - c.off + len) as ArrayBuffer;
+    return this.blob.slice(off, off + len).arrayBuffer();
+  }
 
   async header(): Promise<number> {
     const d = await this.bytes(0, 16);
@@ -56,7 +70,7 @@ class Part {
     d = await this.bytes(off, cntSize + n * entSize + ptrSize);
     const tags: Record<number, number[] | string> = {};
     const tsz: Record<number, number> = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 16: 8, 17: 8, 18: 8 };
-    const pending: [number, number, number, number][] = [];
+    const pending = new Map<number, [number, number, number]>();
     for (let i = 0; i < n; i++) {
       const e = cntSize + i * entSize;
       const tag = d.getUint16(e, le), type = d.getUint16(e + 2, le);
@@ -64,10 +78,13 @@ class Part {
       const vo = e + (big ? 12 : 8);
       const bytes = (tsz[type] ?? 1) * count;
       if (![256, 257, 258, 259, 270, 273, 277, 278, 279, 284, 317, 322, 323, 324, 325, 339].includes(tag)) continue;
+      // Micro-Manager writes ImageDescription twice. Keep the final entry, without reading the
+      // superseded OME XML (which can be many megabytes, with wrapped offsets in old >4 GB files).
+      pending.delete(tag);
       if (bytes <= ptrSize) tags[tag] = this.values(d, vo, type, count);
-      else pending.push([tag, type, count, big ? Number(d.getBigUint64(vo, le)) : d.getUint32(vo, le)]);
+      else pending.set(tag, [type, count, big ? Number(d.getBigUint64(vo, le)) : d.getUint32(vo, le)]);
     }
-    for (const [tag, type, count, p] of pending) {
+    for (const [tag, [type, count, p]] of pending) {
       const nb = (tsz[type] ?? 1) * count;
       const dv = new DataView(await this.raw(p, nb));
       tags[tag] = this.values(dv, 0, type, count);
@@ -108,7 +125,7 @@ class Part {
   }
 }
 
-interface PartFrames { part: Part; frames: FrameInfo[] | null; first: number; stride: number; n: number; ifd0: Ifd; }
+interface PartFrames { part: Part; frames: FrameInfo[] | null; ifdOffsets?: number[]; first: number; stride: number; n: number; ifd0: Ifd; }
 
 /** Sort key of a multi-part file name: movie.tif -> 0, movie_X1.tif / movie_1.tif -> 1, ... */
 export function partIndex(name: string): [string, number] {
@@ -128,6 +145,7 @@ export class TiffMovie {
 
   static async open(files: Blob[] | File[], onProgress?: (msg: string) => void): Promise<TiffMovie> {
     const m = new TiffMovie();
+    if (!files.length) throw new TiffError('No TIFF files selected');
     const named = (files as (Blob & { name?: string })[]).map((f, i) => ({ f, name: f.name ?? `part${i}.tif` }));
     named.sort((a, b) => {
       const [ba, ia] = partIndex(a.name), [bb, ib] = partIndex(b.name);
@@ -136,14 +154,14 @@ export class TiffMovie {
     for (const { f, name } of named) {
       onProgress?.(`reading TIFF header of ${name}`);
       const p = new Part(f, name);
-      m.parts.push(await m.scan(p));
+      m.parts.push(await m.scan(p, onProgress));
     }
     const p0 = m.parts[0].ifd0;
     m.ifd0 = p0; m.H = p0.H; m.W = p0.W; m.compression = p0.comp; m.description = p0.desc;
     for (const pf of m.parts) {
       if (pf.ifd0.W !== m.W || pf.ifd0.H !== m.H || pf.ifd0.bps !== p0.bps) throw new TiffError(`${pf.part.name}: frame shape differs from the first part`);
       pf.first = m.n; m.n += pf.n;
-      if (pf.frames) m.fastPath = false;
+      if (pf.frames || pf.ifdOffsets) m.fastPath = false;
     }
     return m;
   }
@@ -167,10 +185,38 @@ export class TiffMovie {
     return i.counts.reduce((s, c) => s + c, 0) >= this.frameBytes(i);
   }
 
-  private async scan(p: Part): Promise<PartFrames> {
+  private async scan(p: Part, onProgress?: (msg: string) => void): Promise<PartFrames> {
     let off = await p.header();
     const i0 = await p.ifd(off);
     this.check(i0, p.name);
+    // Micro-Manager's index map gives every IFD offset in one small read. Resolve each frame's
+    // strips only when it is requested, rather than walking thousands of IFDs before the preview.
+    // https://micro-manager.org/Micro-Manager_File_Formats
+    if (!p.big) {
+      const header = await p.bytes(0, 16);
+      if (header.getUint32(8, p.le) === 54773648) {
+        onProgress?.(`reading frame index of ${p.name}`);
+        const indexOffset = header.getUint32(12, p.le);
+        const indexHeader = await p.bytes(indexOffset, 8);
+        const n = indexHeader.getUint32(4, p.le);
+        if (indexHeader.getUint32(0, p.le) === 3453623 && n > 0 && indexOffset + 8 + n * 20 <= p.size) {
+          const index = new DataView(await p.raw(indexOffset + 8, n * 20));
+          const offsets: number[] = [];
+          const channel = index.getUint32(0, p.le), position = index.getUint32(12, p.le);
+          for (let k = 0; k < n; k++) {
+            if (index.getUint32(k * 20, p.le) !== channel || index.getUint32(k * 20 + 12, p.le) !== position)
+              throw new TiffError(`${p.name}: multiple Micro-Manager channels or positions are not supported`);
+            const at = index.getUint32(k * 20 + 16, p.le);
+            if (at < 8 || at + 2 > p.size) throw new TiffError(`${p.name}: invalid frame index offset`);
+            offsets.push(at);
+          }
+          offsets.sort((a, b) => a - b);
+          if (offsets[0] !== off || new Set(offsets).size !== n) throw new TiffError(`${p.name}: invalid frame index`);
+          onProgress?.(`${p.name}: indexed ${n.toLocaleString()} frames; pixels will be streamed on demand`);
+          return { part: p, frames: null, ifdOffsets: offsets, first: 0, stride: 0, n, ifd0: i0 };
+        }
+      }
+    }
     const ome = /<OME[\s>]/.test(i0.desc);
     if (ome) {
       const sc = /SizeC="(\d+)"/.exec(i0.desc);
@@ -215,10 +261,14 @@ export class TiffMovie {
     // full walk of the IFD chain
     const frames: FrameInfo[] = [];
     let i = i0;
+    const visited = new Set<number>([off]);
     for (;;) {
       if (i.W !== i0.W || i.H !== i0.H) break;   // e.g. a thumbnail / reduced image
       frames.push({ offsets: i.offsets, counts: i.counts });
+      if (frames.length % 128 === 0) onProgress?.(`${p.name}: indexed ${frames.length.toLocaleString()} frames…`);
       if (!i.next) break;
+      if (visited.has(i.next)) throw new TiffError(`${p.name}: cyclic TIFF frame directory`);
+      visited.add(i.next);
       i = await p.ifd(i.next);
     }
     if (frames.length === 1 && ij && this.contiguous(i0)) {
@@ -238,7 +288,7 @@ export class TiffMovie {
       const pf = this.parts.find((q) => f >= q.first && f < q.first + q.n);
       if (!pf) throw new TiffError(`frame ${f} out of range (${this.n} frames)`);
       const loc = f - pf.first;
-      if (!pf.frames) {
+      if (!pf.frames && !pf.ifdOffsets) {
         // contiguous frames: one slice for the run within this part (uncompressed, rows of the crop only)
         const nrun = Math.min(f1 - f, pf.n - loc);
         const bpp = pf.ifd0.bps / 8;
@@ -252,7 +302,17 @@ export class TiffMovie {
         }
         f += nrun;
       } else {
-        const fr = await this.decodeFrame(pf, pf.frames[loc]);
+        if (pf.ifdOffsets) {
+          // Read adjacent indexed frames in bounded windows, rather than two disk round trips per
+          // frame. Headers and pixels share this cache; a single-frame preview only reads one frame.
+          const at = pf.ifdOffsets[loc], fb = this.frameBytes(pf.ifd0);
+          const end = pf.ifdOffsets[Math.min(pf.n, loc + f1 - f)] ?? pf.ifdOffsets[pf.n - 1] + fb + 4096;
+          if (!pf.part.hasRange(at, fb + 256)) await pf.part.prefetch(at, Math.min(8 * 2 ** 20, end - at));
+        }
+        const info = pf.ifdOffsets ? await pf.part.ifd(pf.ifdOffsets[loc]) : null;
+        if (info && (info.W !== W || info.H !== H || info.bps !== pf.ifd0.bps || info.comp !== pf.ifd0.comp))
+          throw new TiffError(`${pf.part.name}: frame ${loc} format differs from the first frame`);
+        const fr = await this.decodeFrame(pf, info ?? pf.frames![loc]);
         for (let y = 0; y < c.h; y++) out.set(fr.subarray((c.y0 + y) * W + c.x0, (c.y0 + y) * W + c.x0 + c.w), ((f - f0) * c.h + y) * c.w);
         f += 1;
       }

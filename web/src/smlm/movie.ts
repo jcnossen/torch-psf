@@ -18,6 +18,7 @@ export const NCOL = LOC_COLUMNS.length;
 export interface MovieSummary {
   n_locs: number; frames_read: number; frames_total: number; partial: boolean; seconds: number;
   H: number; W: number; spots_per_s: number; at_limit_fraction: number;
+  timing_ms: { read: number; detect: number; extract: number; localize: number };
 }
 
 /** A movie reader: TiffMovie (streamed from files) or an in-memory movie (the demo). read() returns ADU frames. */
@@ -35,6 +36,7 @@ const EMIT_FRAMES = 50;
 export async function localizeMovie(device: GPUDevice, source: File[] | MovieSource, form: MovieForm, tok: StopToken,
   progress: (p: Progress) => void, emit: (rows: Float32Array) => void): Promise<MovieSummary> {
   const mv = await openSource(source, progress);
+  const timing_ms = { read: 0, detect: 0, extract: 0, localize: 0 };
   const P = form.roisize, h = (P - 1) >> 1;
   const nFrames = form.maxFrames > 0 ? Math.min(mv.n, form.maxFrames) : mv.n;
   // the spline PSF (torch_psf CubicSplinePSF.from_vectorial: oversample 2, dz 0.04 um, zpad 2, xy_limit 3)
@@ -55,11 +57,16 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
       tok.check();
       if (tok.stopEarly) { partial = true; break; }
       const f1 = Math.min(nFrames, f0 + chunk), T = f1 - f0;
+      progress({ stage: 'localize', done: f0, total: nFrames, info: { reading_frames: T, localizations: n } });
+      let started = performance.now();
       const fr = await mv.read(f0, f1);
       const gain = Math.fround(form.gain), off = Math.fround(form.offset);
       for (let i = 0; i < fr.length; i++) fr[i] = Math.fround(Math.fround(fr[i] - off) * gain);
       if ((form.excessNoise ?? 1) !== 1) { const F2 = form.excessNoise!; for (let i = 0; i < fr.length; i++) fr[i] = Math.fround(fr[i] / F2); }
+      timing_ms.read += performance.now() - started;
+      started = performance.now();
       const d = await det.detect(fr, T, f0);
+      timing_ms.detect += performance.now() - started;
       const N = d.frame.length;
       // localized and emitted in batches of emitFrames frames (detections are in frame order): a short first batch,
       // then whole chunks; every spot is fitted on its own, so the results do not depend on the batching
@@ -69,8 +76,12 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
         const fEnd = d.frame[a] + emitFrames;
         let b = a; while (b < N && d.frame[b] < fEnd) b++;
         const M = b - a;
+        started = performance.now();
         const rois = extractRois(fr, mv.H, mv.W, f0, d, P, a, M);
+        timing_ms.extract += performance.now() - started;
+        started = performance.now();
         const r = await loc.localize(rois, M, { var: varE });
+        timing_ms.localize += performance.now() - started;
         const rows = new Float32Array(M * NCOL);
         for (let k = 0; k < M; k++) {
           const i = a + k, o = k * NCOL, t = r.theta, c = r.crlb;
@@ -94,7 +105,7 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
     }
   } finally { det.destroy(); loc.destroy(); }
   const seconds = (performance.now() - t0) / 1000;
-  return { n_locs: n, frames_read: done, frames_total: mv.n, partial, seconds, H: mv.H, W: mv.W, spots_per_s: n / Math.max(seconds, 1e-9), at_limit_fraction: n ? nLimit / n : 0 };
+  return { n_locs: n, frames_read: done, frames_total: mv.n, partial, seconds, H: mv.H, W: mv.W, spots_per_s: n / Math.max(seconds, 1e-9), at_limit_fraction: n ? nLimit / n : 0, timing_ms };
 }
 
 /** ThunderSTORM csv as torch_psf Dataset.save_csv (extra=True): "id","frame","x [nm]","y [nm]","z [nm]",

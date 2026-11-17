@@ -85,7 +85,7 @@ fn clampth(t: ptr<function, array<f32, 5>>) {
 fn isfixed(k: u32) -> bool { return ((u.fixed >> k) & 1u) != 0u; }
 
 // accumulate gr, H, nll, chi2 of this thread's pixels at theta t (shared array tn or th) into red[*, lid]
-fn evaluate(spot: u32, t: array<f32, 5>, lid: u32) {
+fn evaluate(spot: u32, t: array<f32, 5>, lid: u32, diagnostics: bool) {
   var acc: array<f32, 23>;
   for (var q = 0u; q < NR; q++) { acc[q] = 0.0; }
   let a = axes(t[0], t[1], t[2]);
@@ -110,10 +110,13 @@ fn evaluate(spot: u32, t: array<f32, 5>, lid: u32) {
     if (u.rvar == 0.0) { nl = mu - d * log(mu); }
     else { let m2 = max(mu0 + u.rvar, 1e-6); nl = m2 - max(d + u.rvar, 0.0) * log(m2); }
     acc[20] += nl;
-    let r2 = d - mu0;
-    acc[21] += r2 * r2 / max(mu0 + u.rvar, 1e-6);
-    let dd = d + u.rvar; let mm = mu0 + u.rvar;
-    acc[22] += 2.0 * (select(0.0, dd * log(max(dd, 1e-9) / max(mm, 1e-6)), dd > 0.0) - (dd - mm));
+    // These diagnostics are only needed at the final theta, not at every trial step.
+    if (diagnostics) {
+      let r2 = d - mu0;
+      acc[21] += r2 * r2 / max(mu0 + u.rvar, 1e-6);
+      let dd = d + u.rvar; let mm = mu0 + u.rvar;
+      acc[22] += 2.0 * (select(0.0, dd * log(max(dd, 1e-9) / max(mm, 1e-6)), dd > 0.0) - (dd - mm));
+    }
   }
   for (var q2 = 0u; q2 < NR; q2++) { red[q2 * WG + lid] = acc[q2]; }
   workgroupBarrier();
@@ -168,7 +171,7 @@ fn lm(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li: vec3u,
   let ts = select(5u, u.ts0, u.ts0 != 0u);
   for (var k = 0u; k < 5u; k++) { t[k] = theta0[spot * ts + k]; }
   clampth(&t);
-  evaluate(spot, t, lid);
+  evaluate(spot, t, lid, false);
   var gr: array<f32, 5>; var H: array<f32, 15>; var nll = red[20u * WG]; var chi2 = red[21u * WG]; var dev = red[22u * WG];
   for (var k = 0u; k < 5u; k++) { gr[k] = red[k * WG]; }
   for (var q = 0u; q < 15u; q++) { H[q] = red[(5u + q) * WG]; }
@@ -186,12 +189,18 @@ fn lm(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li: vec3u,
       let step = solve5(A, gr);
       for (var k = 0u; k < 5u; k++) { tnew[k] = t[k] + step[k]; }
       clampth(&tnew);
+      flag = 1u;
+      for (var k = 0u; k < 5u; k++) { if (tnew[k] != t[k]) { flag = 0u; } }
       for (var k = 0u; k < 5u; k++) { tn[k] = tnew[k]; }
     }
     workgroupBarrier();
+    // An identical float32 trial has identical likelihood and is rejected by the strict comparison.
+    // Keep the damping schedule, but avoid rendering all pixels again for this unchanged trial.
+    let unchanged = workgroupUniformLoad(&flag);
+    if (unchanged == 1u) { lam = clamp(lam * 5.0, 1e-4, 1e6); continue; }
     for (var k = 0u; k < 5u; k++) { tnew[k] = tn[k]; }
     workgroupBarrier();
-    evaluate(spot, tnew, lid);
+    evaluate(spot, tnew, lid, false);
     let nn = red[20u * WG];
     if (nn < nll) {
       t = tnew; nll = nn; chi2 = red[21u * WG]; dev = red[22u * WG];
@@ -204,6 +213,8 @@ fn lm(@builtin(workgroup_id) wg: vec3u, @builtin(local_invocation_id) li: vec3u,
     lam = clamp(lam, 1e-4, 1e6);
     workgroupBarrier();
   }
+  evaluate(spot, t, lid, true);
+  chi2 = red[21u * WG]; dev = red[22u * WG];
   if (lid == 0u) {
     // Cramer-Rao bound: Fisher = H (J J / (mu + var), mu clamped at 1e-6) at the final theta, all 5 parameters
     var Fm: array<f32, 25>;
