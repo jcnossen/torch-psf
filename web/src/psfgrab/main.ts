@@ -42,10 +42,12 @@ const store = {
   get(k: string) { try { return localStorage.getItem('psfgrab.' + k); } catch { return null; } },
   set(k: string, v: string) { try { localStorage.setItem('psfgrab.' + k, v); } catch { /* private mode */ } },
 };
+// storage keys: 'crop' and 'nframes' moved to v2 when the defaults became full frame / 20 frames (old choices ignored)
+const KEY: Record<string, string> = { crop: 'crop.v2', nframes: 'nframes.v2' };
 for (const id of ['label', 'notes', 'crop', 'down', 'nframes', 'cam-res', 'cam-fps', 'ana-size', 'sw-steps', 'sw-m', 'sw-settle', 'still']) {
-  const e = $<HTMLInputElement>(id), v = store.get(id);
+  const e = $<HTMLInputElement>(id), k = KEY[id] ?? id, v = store.get(k);
   if (v !== null) { if (e.type === 'checkbox') e.checked = v === '1'; else e.value = v; }
-  e.addEventListener('change', () => store.set(id, e.type === 'checkbox' ? (e.checked ? '1' : '0') : e.value));
+  e.addEventListener('change', () => store.set(k, e.type === 'checkbox' ? (e.checked ? '1' : '0') : e.value));
 }
 
 // ---------------------------------------------------------------- geometry: source size, regions, overlay
@@ -117,8 +119,10 @@ function updateEstimate() {
   const mb = (n: number) => n * ow * oh * C * B / 2 ** 20;
   let txt = `${ow} x ${oh} px x ${C === 3 ? 'RGB' : '1 channel'} ${B === 1 ? '8-bit' : 'float32'}: ${mb(outCount()).toFixed(0)} MB for ${outCount()} frames`;
   if (mode === 'camera' && sweepRange) txt += `; focus sweep ${Math.round(num('sw-steps')) * Math.round(num('sw-m'))} frames, ${mb(Math.round(num('sw-steps')) * Math.round(num('sw-m'))).toFixed(0)} MB`;
-  el.est.textContent = txt + '. Kept in memory until downloaded (the zip is at most this size).';
-  el.est.dataset.kind = mb(outCount()) > 600 ? 'warn' : '';
+  const big = mb(outCount()) > 600;
+  el.est.textContent = txt + '. Kept in memory until downloaded (the zip is at most this size).' +
+    (big ? ' That is a lot for a phone: the browser may run out of memory; use fewer frames or a lower camera resolution.' : '');
+  el.est.dataset.kind = big ? 'warn' : '';
 }
 
 // ---------------------------------------------------------------- analysis display
