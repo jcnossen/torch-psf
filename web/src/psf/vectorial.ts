@@ -34,6 +34,21 @@ export function nollToNm(j: number): [number, number] {
   return [n, m];
 }
 
+/** Human-readable names in this model's convention: positive m is cosine (x), negative m sine (y). */
+export function nollModeName(j: number): string {
+  const [n, m] = nollToNm(j), a = Math.abs(m);
+  if (n === 0) return 'Piston';
+  if (n === 1) return m > 0 ? 'X-tilt' : 'Y-tilt';
+  if (n === 2 && a === 0) return 'Defocus';
+  if (a === 0) return ({ 4: 'Spherical aberration', 6: 'Secondary spherical aberration', 8: 'Tertiary spherical aberration' } as Record<number, string>)[n] ?? `Spherical aberration (radial order ${n})`;
+  const order = (n - a) / 2 - (a === 1 ? 1 : 0);
+  const secondary = order === 1 ? 'Secondary ' : order === 2 ? 'Tertiary ' : order > 2 ? `Order ${order + 1} ` : '';
+  if (a === 1) return `${secondary}${m > 0 ? 'X' : 'Y'}-coma`;
+  if (a === 2) return `${secondary}${m > 0 ? 'Axial' : 'Oblique'} astigmatism`;
+  const name = ({ 3: 'Trefoil', 4: 'Quadrafoil', 5: 'Pentafoil', 6: 'Hexafoil' } as Record<number, string>)[a];
+  return name ? `${secondary}${name} (${m > 0 ? 'cosine' : 'sine'})` : `Zernike mode (n=${n}, m=${m})`;
+}
+
 function fact(n: number): number { let r = 1; for (let i = 2; i <= n; i++) r *= i; return r; }
 
 /** Noll-normalized Zernike polynomial (rms 1 over the unit disk). */

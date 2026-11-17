@@ -5,7 +5,7 @@
 // during a run the tab of the running stage opens. All GPU work runs in the compute worker (../worker.ts).
 import { View3D, Volume } from './view3d';
 import { drawArray } from './colormap';
-import { DEFAULT_NOLL, Optics } from '../psf/vectorial';
+import { DEFAULT_NOLL, Optics, nollModeName } from '../psf/vectorial';
 import { readPsfFile } from '../io/psfzip';
 import { beadZipRequest, insituZipRequest, ZipOptions } from './exportzip';
 import type { PsfZipRequest } from '../psf/makezip';
@@ -675,7 +675,7 @@ export function startApp(root: HTMLElement) {
     const spec: VolumeSpec = { optics: optics(), npupil: 64, noll: r.noll, zcoef: r.zcoef, nxy: g.nu, dxy_um: pxUm() / g.S, zmin: g.z0, zmax: g.z0 + (g.nz - 1) * g.hz, nz: g.nz, ze_um: 0, focus_um: n('m-focus') };
     sel.value = 'refined';
     const kept = r.refine!.kept;
-    setVolume(K, spec, `In-situ refined spline: free knots regularised towards the vectorial fit; ${kept ? 'kept (held-out NLL better than the vectorial fit; the movie was localized with it)' : 'NOT kept: it explains the held-out spots worse than the vectorial fit, so the movie was localized with the vectorial PSF'}. The knots themselves, ` +
+    setVolume(K, spec, `In-situ refined spline: free knots regularised towards the vectorial fit; ${kept ? 'kept (predicts independent test spots better than the vectorial fit; the movie was localized with it)' : 'NOT kept: it predicts independent test spots worse than the vectorial fit, so the movie was localized with the vectorial PSF'}. The knots themselves, ` +
       `every ${(n('o-px') / g.S).toFixed(0)} nm laterally and ${(1000 * g.hz).toFixed(0)} nm in z. ${FREE_KNOT_WARNING}.`);
   }
   function showInsituEmpty() {
@@ -692,9 +692,7 @@ export function startApp(root: HTMLElement) {
       ['Held-out χ² / px', chi === null ? 'n/a' : chi.toFixed(3), chi === null ? 'na' : chi > 0.8 && chi < 1.25 ? 'ok' : 'warn'],
       ['rms aberration', `${(1000 * rms).toFixed(0)} mλ`, 'na'],
       ['Overlaps rejected', r.deviance ? `${(100 * r.deviance.rejected_fraction).toFixed(1)} %` : 'off', r.deviance ? (r.deviance.rejected_fraction < 0.25 ? 'ok' : 'warn') : 'na'],
-      ['Held-out NLL vs start', r.heldout ? r.heldout.diff.toFixed(4) : 'n/a', r.heldout ? (r.heldout.diff <= 0 ? 'ok' : 'warn') : 'na'],
       ['Spline refinement', r.refine ? (r.refine.kept ? 'kept' : 'not kept') : 'off', r.refine?.kept ? 'ok' : 'na'],
-      ['Spots at offset limit', (100 * r.at_limit).toFixed(1) + ' %', r.at_limit < 0.02 ? 'ok' : 'warn'],
     ];
     if (r.warnings.length) kv.push(['Warnings', String(r.warnings.length), 'warn']);
     if (truthZ) {
@@ -708,16 +706,13 @@ export function startApp(root: HTMLElement) {
       ['overlapping spots rejected', !r.deviance ? 'off' : `${r.n_rejected} (${(100 * r.deviance.rejected_fraction).toFixed(0)} %; deviance per pixel > ${r.deviance.threshold.toFixed(3)} = median ${r.deviance.median.toFixed(3)} + k x ${r.deviance.scale.toFixed(3)}), then a second pass`],
       ['held-out median chi2 per px', chi === null ? 'n/a' : `${chi.toFixed(3)} (about 1 if the camera gain / offset / excess noise are right)`],
       ['iterations', `${r.iterations}${r.partial ? ' (stopped early)' : ''}, ${r.seconds.toFixed(1)} s`],
-      ['held-out NLL / px, fitted - start', r.heldout ? `${r.heldout.diff.toFixed(4)} (negative: the fitted PSF explains spots it was not fitted to better)` : 'no held-out spots'],
       ['z scale vs the start PSF', `${r.z_scale.toFixed(3)} (offset ${(1000 * r.z_offset_um).toFixed(0)} nm)`],
-      ['spots at the offset limit', (100 * r.at_limit).toFixed(2) + ' %'],
       ['Zernikes (waves rms)', fmtZ(r.noll, r.zcoef)],
     ];
     if (r.warnings.length) rows.push(['warnings', r.warnings.join('; ')]);
     if (r.refine) {
       const f = r.refine;
-      rows.push(['spline refinement', `${f.kept ? 'kept' : 'not kept'}: held-out NLL / px ${f.heldout_refined === null ? 'n/a' : (f.heldout_refined - (r.heldout?.start ?? 0)).toFixed(4)} vs start ` +
-        `(vectorial ${r.heldout ? r.heldout.diff.toFixed(4) : 'n/a'}); z scale vs vectorial ${f.z_scale_vs_vectorial.toFixed(3)}; ${f.outer} outer iterations, ${f.seconds.toFixed(1)} s` +
+      rows.push(['spline refinement', `${f.kept ? 'kept' : 'not kept'}; z scale vs vectorial ${f.z_scale_vs_vectorial.toFixed(3)}; ${f.outer} outer iterations, ${f.seconds.toFixed(1)} s` +
         (f.kept ? '. The movie is localized with the refined spline. ' + FREE_KNOT_WARNING : '. The refined spline can still be viewed: PSF menu, "In-situ refined spline (not kept)".')]);
     }
     if (truthZ) {
@@ -785,7 +780,6 @@ export function startApp(root: HTMLElement) {
       ['localizations', `${s.n_locs} (${(s.n_locs / Math.max(1, s.frames_read)).toFixed(2)} per frame) from ${s.frames_read} of ${s.frames_total} frames`],
       ['median photons / bg', `${med(4).toFixed(0)} / ${med(5).toFixed(1)}`],
       ['median CRLB x / y / z', `${med(6, px).toFixed(1)} / ${med(7, px).toFixed(1)} / ${med(8, 1000).toFixed(1)} nm`],
-      ['at the offset limit', (100 * s.at_limit_fraction).toFixed(2) + ' %'],
       ['time', `${s.seconds.toFixed(1)} s (${s.spots_per_s.toFixed(0)} spots / s)`],
       ['read / detect / fit', `${(s.timing_ms.read / 1000).toFixed(2)} / ${(s.timing_ms.detect / 1000).toFixed(2)} / ${(s.timing_ms.localize / 1000).toFixed(2)} s`],
     ]);
@@ -974,6 +968,15 @@ function drawZernikeSets(cv: HTMLCanvasElement, noll: number[], sets: { z: numbe
   ctx.clearRect(0, 0, W, H);
   const m = Math.max(0.02, ...sets.flatMap((s) => s.z.map(Math.abs)));
   const bw = (W - pad - 6) / noll.length, y0 = H / 2 + 6, k = sets.length;
+  cv.onpointermove = (event) => {
+    const rect = cv.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * W / rect.width;
+    const y = (event.clientY - rect.top) * H / rect.height;
+    const i = Math.floor((x - pad) / bw);
+    if (i < 0 || i >= noll.length || y < 20) { cv.removeAttribute('title'); return; }
+    cv.title = `${nollModeName(noll[i])} (Noll ${noll[i]})\n` + sets.map((s) => `${s.label}: ${s.z[i].toFixed(4)} waves rms`).join('\n');
+  };
+  cv.onpointerleave = () => cv.removeAttribute('title');
   ctx.strokeStyle = '#aeb6bf'; ctx.beginPath(); ctx.moveTo(pad, y0 + .5); ctx.lineTo(W - 4, y0 + .5); ctx.stroke();
   ctx.font = "10px Inter, 'Segoe UI', system-ui, sans-serif"; ctx.fillStyle = '#8c959f';
   ctx.fillText(`+${m.toFixed(3)}`, 0, 30); ctx.fillText(`-${m.toFixed(3)}`, 0, H - 16);
@@ -1108,7 +1111,7 @@ const TEMPLATE = `
     <h3 class="grp">Fit</h3>
     <label class="field"><span class="fl">Start PSF</span><select id="m-psf"><option value="guess">generic astigmatic</option><option value="view">PSF in the 3D view</option><option value="insitu">last in-situ estimate</option><option value="json">PSF file (psf.zip)…</option></select></label>
     <input id="m-psfjson" type="file" accept=".zip" hidden><p id="m-psfinfo" class="hint"></p>
-    ${check('m-refine', 'Spline refinement' + cite('torchpsf', 'lbfgs'), false, 'free spline knots regularised towards the fitted vectorial PSF (torch_psf InSituEstimator refine=True); kept only if the held-out NLL improves')}
+    ${check('m-refine', 'Spline refinement' + cite('torchpsf', 'lbfgs'), false, 'free spline knots regularised towards the fitted vectorial PSF; kept only if they predict independent test spots better')}
     <details class="adv" data-key="adv-fit"><summary>Advanced <span class="dim">spot counts, iterations, overlaps</span></summary>
       ${field('m-nspots', 'Spots for the fit', 8000, '', '1')}${field('m-nheld', 'Held-out spots', 4000, '', '1')}${field('m-iters', 'Iterations' + cite('adam'), 80, '', '1')}
       ${field('m-schunk', 'Sampling chunk', 50, 'frames', '1', 'the PSF fit samples spots from chunks spread over the whole movie (bit-reversed order; torch_psf InSituEstimator chunk=50)')}
@@ -1172,7 +1175,7 @@ const TEMPLATE = `
     <div class="view cloudwrap"><canvas id="recon" class="cloud" tabindex="0"></canvas><div id="r-empty" class="empty">Fills in live while the movie is localized.</div></div>
     <div class="ctrls">
       ${check('r-colorz', 'Colour by z', true)}<span class="mini"><input id="r-zlo" type="number" step="any" value="0">–<input id="r-zhi" type="number" step="any" value="0.8"> µm</span>
-      <label class="mini">Splat <select id="r-mode"><option value="precision">precision</option><option value="fixed">fixed blur</option></select></label>
+      <label class="mini">Render mode <select id="r-mode"><option value="precision">precision</option><option value="fixed">fixed blur</option></select></label>
       <label class="mini" title="fixed blur, or the minimum sigma in precision mode">σ <input id="r-blur" type="number" step="any" value="8"> nm</label>
       <label class="mini" title="drop localizations with CRLB x above this (0 = keep all)">CRLB ≤ <input id="r-crlb" type="number" step="any" value="0"> nm</label>
     </div>
