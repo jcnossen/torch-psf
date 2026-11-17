@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#ffffff" />
+  <title>PSF grab</title>
+  <meta name="description" content="Collects microscope movies and focus sweeps from a phone camera or files for PSF estimation. Everything stays on the device." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%232f6feb'%3E%3Ccircle cx='12' cy='12' r='11' opacity='.22'/%3E%3Ccircle cx='12' cy='12' r='7.2' opacity='.45'/%3E%3Ccircle cx='12' cy='12' r='3.6'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="appbar pg-bar">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="11" opacity=".22"/><circle cx="12" cy="12" r="7.2" opacity=".45"/><circle cx="12" cy="12" r="3.6"/></svg>
+    <div class="pg-brand">
+      <div class="name">PSF grab <span>v0.1</span></div>
+      <div class="tag">Collects movies for PSF estimation; analysis is coming.</div>
+    </div>
+  </header>
+
+  <main class="pg">
+    <p class="privacy">Everything stays on this device until you download it. Nothing is uploaded.</p>
+
+    <section class="card" id="src-card">
+      <div class="bigrow">
+        <button id="btn-camera" class="big primary">Camera</button>
+        <button id="btn-open" class="big">Open file</button>
+      </div>
+      <input type="file" id="file" multiple accept=".tif,.tiff,image/tiff,image/*,video/*,.mp4,.webm,.mov" hidden />
+      <div class="drop" id="drop">or drop a TIFF stack, a set of PNG / JPEG images or a video (MP4 / WebM) here</div>
+      <div class="status" id="status" role="status"></div>
+    </section>
+
+    <section class="card" id="view-card" hidden>
+      <div class="viewer" id="viewer">
+        <video id="live" playsinline muted autoplay></video>
+        <canvas id="frame-view"></canvas>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="viewinfo" id="viewinfo"></div>
+      <div id="file-nav" hidden>
+        <div class="navrow">
+          <input type="range" id="frame-slider" min="0" max="0" value="0" step="1" aria-label="frame" />
+          <span id="frame-label" class="mono">0 / 0</span>
+        </div>
+        <div class="field" id="fps-field" hidden><span class="fl">Video frame rate</span><span class="inp"><input type="number" id="fps" min="1" max="1000" step="any" /><i>fps</i></span></div>
+      </div>
+    </section>
+
+    <section class="card" id="ana-card" hidden>
+      <header><h2>Spectrum and sharpness</h2><span class="meta" id="ana-meta"></span></header>
+      <div class="sharp">
+        <div><div class="big-num" id="sharp-val">-</div><div class="lab">sharpness, var(Laplacian) / mean&sup2;</div></div>
+        <div><div class="big-num sm" id="hf-val">-</div><div class="lab">power above Nyquist / 2 (R, G, B)</div></div>
+      </div>
+      <canvas id="spec" class="plot" aria-label="radially averaged log power spectrum per colour channel"></canvas>
+      <canvas id="trace" class="plot small" aria-label="sharpness trace"></canvas>
+      <div class="field"><span class="fl">Analysis crop (centre of the record crop)</span>
+        <select id="ana-size"><option value="256">256 px</option><option value="512" selected>512 px</option><option value="1024">1024 px</option></select></div>
+      <div class="bigrow" id="ana-all-row" hidden><button id="btn-ana-all" class="mid">Analyse all frames</button></div>
+    </section>
+
+    <section class="card" id="cam-card" hidden>
+      <header><h2>Camera</h2><span class="meta" id="cam-meta"></span></header>
+      <div class="field"><span class="fl">Camera</span><select id="cam-dev"></select></div>
+      <div class="field"><span class="fl">Resolution (requested)</span>
+        <select id="cam-res">
+          <option value="1280x720">1280 x 720</option>
+          <option value="1920x1080" selected>1920 x 1080</option>
+          <option value="2560x1440">2560 x 1440</option>
+          <option value="3840x2160">3840 x 2160</option>
+          <option value="4096x3072">4096 x 3072</option>
+        </select></div>
+      <div class="field"><span class="fl">Frame rate (requested)</span>
+        <select id="cam-fps"><option value="15">15</option><option value="24">24</option><option value="30" selected>30</option><option value="60">60</option></select></div>
+      <div id="controls"></div>
+      <details class="adv" id="caps-box"><summary>What this camera reports</summary>
+        <p class="hint" id="caps-note"></p>
+        <table class="caps" id="caps"></table>
+      </details>
+      <div class="bigrow"><button id="btn-cam-stop" class="mid">Stop camera</button></div>
+    </section>
+
+    <section class="card" id="rec-card" hidden>
+      <header><h2 id="rec-title">Record</h2></header>
+      <div class="field"><span class="fl">Crop (around the tapped point)</span>
+        <select id="crop"><option value="256">256 px</option><option value="512" selected>512 px</option><option value="1024">1024 px</option><option value="2048">2048 px</option><option value="0">full frame</option></select></div>
+      <div class="field"><span class="fl">Downscale</span>
+        <select id="down"><option value="1" selected>1 (native pixels)</option><option value="2">2</option><option value="4">4</option></select></div>
+      <div id="cam-n">
+        <div class="field"><span class="fl">Frames</span><span class="inp"><input type="number" id="nframes" min="1" max="10000" value="60" /></span></div>
+      </div>
+      <div id="file-range" hidden>
+        <div class="field"><span class="fl">Frames from / to / step</span>
+          <span class="trip"><span class="inp"><input type="number" id="f-from" min="0" value="0" /></span><span class="inp"><input type="number" id="f-to" min="0" value="0" /></span><span class="inp"><input type="number" id="f-step" min="1" value="1" /></span></span></div>
+      </div>
+      <div class="est" id="est"></div>
+      <div class="field col"><span class="fl">Label (file name)</span><input type="text" id="label" placeholder="e.g. 60x-beads" maxlength="60" /></div>
+      <div class="field col"><span class="fl">Notes (saved in the JSON)</span><textarea id="notes" rows="3" placeholder="objective, sample, illumination, adapter ..."></textarea></div>
+      <label class="chk" id="still-row" hidden><input type="checkbox" id="still" /> Also take a full-resolution still photo (ImageCapture)</label>
+      <div class="bigrow"><button id="btn-rec" class="big primary">Record</button></div>
+
+      <div id="sweep" hidden>
+        <h3 class="grp">Focus sweep</h3>
+        <p class="hint">Steps the lens through manual focus distances; one or more frames per step, with the focus distance the camera reports.</p>
+        <div class="field"><span class="fl">Steps</span><span class="inp"><input type="number" id="sw-steps" min="2" max="500" value="21" /></span></div>
+        <div class="field"><span class="fl">Focus distance from / to</span>
+          <span class="pair"><span class="inp"><input type="number" id="sw-from" step="any" /></span><span class="inp"><input type="number" id="sw-to" step="any" /></span></span></div>
+        <div class="field"><span class="fl">Frames per step</span><span class="inp"><input type="number" id="sw-m" min="1" max="50" value="1" /></span></div>
+        <div class="field"><span class="fl">Settle time</span><span class="inp"><input type="number" id="sw-settle" min="0" max="10000" value="400" /><i>ms</i></span></div>
+        <div class="bigrow"><button id="btn-sweep" class="big">Focus sweep</button></div>
+      </div>
+
+      <div id="prog-box" hidden>
+        <div class="progress"><div id="prog-bar"></div></div>
+        <div class="progrow"><span id="prog-msg"></span><button id="btn-stop" class="mid">Stop</button></div>
+      </div>
+    </section>
+
+    <section class="card" id="out-card" hidden>
+      <header><h2>Recording</h2><span class="meta" id="out-meta"></span></header>
+      <canvas id="out-trace" class="plot small" aria-label="sharpness per recorded frame"></canvas>
+      <div class="bigrow">
+        <button id="btn-zip" class="big primary">Download .zip</button>
+        <button id="btn-share" class="big" hidden>Share</button>
+      </div>
+      <p class="hint" id="out-hint"></p>
+    </section>
+
+    <footer class="pg-foot">
+      PSF grab is part of <a href="https://github.com/jcnossen/torch-psf">torch-psf</a>.
+      The zip holds <code>frames.tif</code> (ImageJ hyperstack, axes N, C, Y, X; C = R, G, B), <code>meta.json</code>
+      and, when taken, <code>still.jpg</code>.
+    </footer>
+  </main>
+  <script type="module" src="../src/psfgrab/main.ts"></script>
+</body>
+</html>

@@ -29,36 +29,71 @@ async function streamBytes(b: Uint8Array, t: { readable: ReadableStream; writabl
 export const deflateRaw = (b: Uint8Array) => streamBytes(b, new CompressionStream('deflate-raw'));
 export const inflateRaw = (b: Uint8Array) => streamBytes(b, new DecompressionStream('deflate-raw'));
 
+interface ZipItemHead { name: string; method: 0 | 8; crc: number; csize: number; usize: number }
+
+/** Local header and central-directory record of one member whose body starts at byte `off`. */
+function memberHeaders(it: ZipItemHead, off: number): [Uint8Array, Uint8Array] {
+  const fn = new TextEncoder().encode(it.name);
+  const utf8 = /[^\x00-\x7f]/.test(it.name) ? 0x800 : 0;
+  const lh = new Uint8Array(30 + fn.length), dv = new DataView(lh.buffer);
+  dv.setUint32(0, 0x04034b50, true); dv.setUint16(4, 20, true); dv.setUint16(6, utf8, true); dv.setUint16(8, it.method, true);
+  dv.setUint16(10, DOS_TIME, true); dv.setUint16(12, DOS_DATE, true);
+  dv.setUint32(14, it.crc, true); dv.setUint32(18, it.csize, true); dv.setUint32(22, it.usize, true);
+  dv.setUint16(26, fn.length, true); lh.set(fn, 30);
+  const ch = new Uint8Array(46 + fn.length), cv = new DataView(ch.buffer);
+  cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, (3 << 8) | 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, utf8, true);
+  cv.setUint16(10, it.method, true); cv.setUint16(12, DOS_TIME, true); cv.setUint16(14, DOS_DATE, true);
+  cv.setUint32(16, it.crc, true); cv.setUint32(20, it.csize, true); cv.setUint32(24, it.usize, true);
+  cv.setUint16(28, fn.length, true); cv.setUint32(38, EXT_ATTR >>> 0, true); cv.setUint32(42, off, true); ch.set(fn, 46);
+  return [lh, ch];
+}
+
+/** End-of-central-directory record. */
+function endRecord(count: number, csize: number, off: number): Uint8Array {
+  const end = new Uint8Array(22), ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, count, true); ev.setUint16(10, count, true);
+  ev.setUint32(12, csize, true); ev.setUint32(16, off, true);
+  return end;
+}
+
 /** Assemble a zip from members whose (possibly compressed) bodies are given: method 0 (stored) or 8 (deflate). */
 export function buildZip(items: { name: string; body: Uint8Array; method: 0 | 8; crc: number; usize: number }[]): Uint8Array {
-  const enc = new TextEncoder();
   const parts: Uint8Array[] = [], central: Uint8Array[] = [];
   let off = 0;
   for (const it of items) {
-    const fn = enc.encode(it.name);
-    const utf8 = /[^\x00-\x7f]/.test(it.name) ? 0x800 : 0;
-    const lh = new Uint8Array(30 + fn.length), dv = new DataView(lh.buffer);
-    dv.setUint32(0, 0x04034b50, true); dv.setUint16(4, 20, true); dv.setUint16(6, utf8, true); dv.setUint16(8, it.method, true);
-    dv.setUint16(10, DOS_TIME, true); dv.setUint16(12, DOS_DATE, true);
-    dv.setUint32(14, it.crc, true); dv.setUint32(18, it.body.length, true); dv.setUint32(22, it.usize, true);
-    dv.setUint16(26, fn.length, true); lh.set(fn, 30);
-    const ch = new Uint8Array(46 + fn.length), cv = new DataView(ch.buffer);
-    cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, (3 << 8) | 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, utf8, true);
-    cv.setUint16(10, it.method, true); cv.setUint16(12, DOS_TIME, true); cv.setUint16(14, DOS_DATE, true);
-    cv.setUint32(16, it.crc, true); cv.setUint32(20, it.body.length, true); cv.setUint32(24, it.usize, true);
-    cv.setUint16(28, fn.length, true); cv.setUint32(38, EXT_ATTR >>> 0, true); cv.setUint32(42, off, true); ch.set(fn, 46);
+    const [lh, ch] = memberHeaders({ ...it, csize: it.body.length }, off);
     parts.push(lh, it.body); central.push(ch);
     off += lh.length + it.body.length;
   }
   const csize = central.reduce((s, c) => s + c.length, 0);
-  const end = new Uint8Array(22), ev = new DataView(end.buffer);
-  ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, central.length, true); ev.setUint16(10, central.length, true);
-  ev.setUint32(12, csize, true); ev.setUint32(16, off, true);
-  const all = [...parts, ...central, end];
+  const all = [...parts, ...central, endRecord(central.length, csize, off)];
   const out = new Uint8Array(all.reduce((s, c) => s + c.length, 0));
   let p = 0;
   for (const c of all) { out.set(c, p); p += c.length; }
   return out;
+}
+
+/** CRC-32 continued over one more chunk: crc32Update(crc32Update(0, a), b) === crc32(a + b). */
+export function crc32Update(crc: number, b: Uint8Array): number {
+  if (!crcTable) crc32(new Uint8Array(0));
+  const t = crcTable!;
+  let c = (crc ^ 0xffffffff) >>> 0;
+  for (let i = 0; i < b.length; i++) c = t[(c ^ b[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** As buildZip, but the bodies are Blobs and so is the result: the member data are referenced, not copied, so a
+ *  large archive does not need a second copy in memory. */
+export function buildZipBlob(items: { name: string; body: Blob; method: 0 | 8; crc: number; usize: number }[]): Blob {
+  const parts: BlobPart[] = [], central: Uint8Array[] = [];
+  let off = 0;
+  for (const it of items) {
+    const [lh, ch] = memberHeaders({ ...it, csize: it.body.size }, off);
+    parts.push(lh as BlobPart, it.body); central.push(ch);
+    off += lh.length + it.body.size;
+  }
+  const csize = central.reduce((s, c) => s + c.length, 0);
+  return new Blob([...parts, ...central as BlobPart[], endRecord(central.length, csize, off) as BlobPart], { type: 'application/zip' });
 }
 
 /** Stored-only zip (synchronous). */
