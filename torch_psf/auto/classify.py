@@ -174,7 +174,7 @@ def movie_statistics(frames, band=None, spectrum=None, device=None, max_spot_fra
     st['skewness'] = float(torch.median(k3[act] / k2[act] ** 1.5)) if act.sum() > 20 else float('nan')
 
     # spots in up to max_spot_frames frames (contiguous)
-    Ts = min(T, max_spot_frames)
+    Ts = min(T, max_spot_frames, max(20, int(30e6 // (Hb * Wb))))          # max-pool indices etc.: ~30 M px at a time
     Bs = B[:Ts]
     thr = threshold * math.sqrt(max(nv, 1e-30))
     k = 2 * int(round(1.5 * sp)) + 1
