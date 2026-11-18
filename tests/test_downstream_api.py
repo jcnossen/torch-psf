@@ -187,3 +187,22 @@ def test_per_pixel_readnoise():
     hs, hc, hm = heldout_tracks(tr, vec, readnoise_e=1.0, **hk), heldout_tracks(tr, vec, readnoise_e=torch.ones(B, R, R, device=DEV), **hk), \
         heldout_tracks(tr, vec, readnoise_e=rn, **hk)
     assert np.allclose(hs['nll'], hc['nll'], rtol=1e-5) and hm['nll_per_px'] < hs['nll_per_px']
+
+
+def test_fit_tracks_cov_blur():
+    """blur='cov': a general (here isotropic) image-plane blur is recovered; 'line' cannot hold its second axis"""
+    R, B, T = 11, 200, 4
+    vec = VectorialPSF(R, npupil=32, oversample=2, device=DEV)      # no aberrations, emitters in focus: the blur shape is identifiable
+    g = torch.Generator(device=DEV).manual_seed(4)
+    xy = torch.rand(B, 2, generator=g, device=DEV) - 0.5
+    cov = torch.tensor([0.2, 0.2, 0.0], device=DEV)
+    with torch.no_grad():
+        img = vec(torch.cat([xy, torch.full((B, 1), 0.01, device=DEV)], 1), torch.zeros(B, device=DEV), blur=cov)
+    rois = torch.poisson(3000 * img[:, None].expand(-1, T, -1, -1) + 5, generator=g)
+    tr = Tracks(rois, torch.ones(B, T, dtype=torch.bool, device=DEV), torch.arange(T, device=DEV)[None].expand(B, -1),
+                torch.zeros(B, 2, dtype=torch.long, device=DEV), xy + (R - 1) / 2)
+    kw = dict(readnoise_e=1.0, iters=300, warmup=50, fix_zernike=True, fix_focus=True, zmax_um=0.02)
+    rc, rl = fit_tracks(tr, vec, blur='cov', **kw), fit_tracks(tr, vec, blur='line', **kw)
+    b = rc['psf'].blur.detach().cpu()
+    assert abs(float(b[0]) - 0.2) < 0.06 and abs(float(b[1]) - 0.2) < 0.06 and abs(float(b[2])) < 0.04, b
+    assert rc['report']['nll_per_px'] < rl['report']['nll_per_px']

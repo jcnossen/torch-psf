@@ -28,7 +28,8 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     """tracks: Tracks (rois [B, T, R, R] in photons, mask, xy_init). vectorial: starting VectorialPSF (copied;
     roisize = R). readnoise_e: read noise (e- rms): a scalar, or per pixel of every sample [B, R, R] (an sCMOS
     read-noise map cut at each sample's crop; the variance model is then mu + rn^2 per pixel). zmax_um: emitter heights 0..zmax_um. focus_um: starting
-    focus (fitted). blur: 'none' or 'line' (image-plane line blur v v^T, px^2). groups [B, T] (long, values
+    focus (fitted). blur: 'none', 'line' (image-plane line blur v v^T, px^2) or 'cov' (a general 2 x 2 Gaussian blur
+    covariance L L^T, px^2; the line blur plus an isotropic / second-axis part). groups [B, T] (long, values
     0..ngroups-1): background groups and PSF groups (default one group). group_psf_kwargs / extra_params: per-group
     PSF hook (module docstring). fix_zernike / fix_focus: hold the Zernikes / the focus at their starting values.
     Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
@@ -46,6 +47,10 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     BL = None
     if blur == 'line':
         BL = torch.tensor([0.05, 0.0], device=dev, requires_grad=True)   # start off zero (the gradient of v v^T vanishes there)
+    elif blur == 'cov':
+        BL = torch.tensor([0.05, 0.0, 0.05], device=dev, requires_grad=True)   # Cholesky factor (a, b, c) of the covariance
+    elif blur != 'none':
+        raise ValueError(f"blur: 'none' | 'line' | 'cov', not {blur!r}")
     grp = torch.zeros(B, T, dtype=torch.long, device=dev) if groups is None else groups.to(dev)
     mask = tracks.mask
     extra = list(extra_params)
@@ -56,7 +61,9 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     npx = float(mask.sum()) * R * R
 
     def blur_cov():
-        return None if BL is None else torch.stack([BL[0] ** 2, BL[1] ** 2, BL[0] * BL[1]])
+        if BL is None: return None
+        if len(BL) == 2: return torch.stack([BL[0] ** 2, BL[1] ** 2, BL[0] * BL[1]])                  # line: v v^T
+        return torch.stack([BL[0] ** 2, BL[1] ** 2 + BL[2] ** 2, BL[0] * BL[1]])                   # cov: L L^T, L = [[a, 0], [b, c]]
 
     def psf_of(pos, b):
         if group_psf_kwargs is None:
