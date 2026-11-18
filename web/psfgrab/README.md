@@ -15,7 +15,7 @@ cd web
 npm ci
 npm run build:psfgrab                       # -> web/dist-psfgrab/ (ignored by git)
 npm run build:psfgrab -- --outDir /some/dir # or any other folder
-npm run dev:psfgrab                         # dev server, http://localhost:5174/
+npm run dev:psfgrab                         # dev server, http://localhost:5174/psfgrab/
 npm run test:psfgrab                        # node unit checks (FFT, spectrum, TIFF and zip writers), no browser
 ```
 

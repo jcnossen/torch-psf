@@ -20,7 +20,7 @@ button.big.primary { background: var(--acc); border-color: var(--acc); color: #f
 button.big.primary:hover:not(:disabled) { background: var(--acc-dark); }
 .bigrow { display: flex; gap: 10px; margin-top: 10px; } .bigrow button { flex: 1 1 0; min-width: 0; }
 .card > .bigrow:first-child { margin-top: 0; }
-.busy #btn-rec, .busy #btn-sweep, .busy #btn-camera, .busy #btn-open, .busy #btn-ana-all, .busy #btn-zip, .busy #btn-share { opacity: .45; pointer-events: none; }
+.busy #btn-rec, .busy #btn-sweep, .busy #btn-camera, .busy #btn-open, .busy #btn-ana-all, .busy #btn-zip, .busy #btn-share, .busy #btn-upload { opacity: .45; pointer-events: none; }
 
 .drop { margin-top: 10px; border: 2px dashed var(--line); border-radius: 9px; padding: 16px; text-align: center; color: var(--fg2); font-size: 13.5px; }
 .drop.over { border-color: var(--acc); background: var(--acc-bg); color: var(--acc-dark); }

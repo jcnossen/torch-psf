@@ -1,6 +1,7 @@
 // PSF grab: capture page for PSF estimation (camera recordings, focus sweeps, dropped TIFF / image / video files),
 // with a live spectrum + sharpness display and a zip export (frames.tif + meta.json [+ still.jpg]).
-// Everything runs in the browser; nothing is uploaded.
+// Everything runs in the browser; nothing is uploaded, except when the page is served next to a writable files/ folder
+// (a private upload copy of the page, see uploadBase below): then each recording is also PUT there.
 import '../ui/style.css';
 import './psfgrab.css';
 import { Analyzer } from './analyzer';
@@ -107,6 +108,11 @@ el.overlay.addEventListener('click', (e) => {
 for (const id of ['crop', 'down', 'ana-size']) $(id).addEventListener('change', () => { drawOverlay(); if (mode === 'file') analyzeCurrentFile(); });
 for (const id of ['nframes', 'f-from', 'f-to', 'f-step', 'sw-steps', 'sw-m']) $(id).addEventListener('input', updateEstimate);
 
+// Record button under the camera image (no scrolling to the Record card): "Record N frames" when idle, "Stop · frame
+// i / N" (the progress message) while recording; a tap then stops, like the Stop button.
+function quickRecLabel() { $('btn-rec-quick').textContent = `Record ${outCount()} frame${outCount() === 1 ? '' : 's'}`; }
+$('nframes').addEventListener('input', () => { if (!busy) quickRecLabel(); });
+
 function outCount(): number {
   if (mode === 'file') { const [a, b, s] = fileRange(); return a > b ? 0 : Math.floor((b - a) / s) + 1; }
   return Math.max(1, Math.floor(num('nframes')));
@@ -171,6 +177,7 @@ async function startCamera(keepDevice = false) {
   $('file-nav').hidden = true; $('cam-n').hidden = false; $('file-range').hidden = true; $('ana-all-row').hidden = true;
   $('rec-title').textContent = 'Record';
   $('btn-rec').textContent = 'Record';
+  $('quick-rec-row').hidden = false; quickRecLabel();
   liveHist.length = 0;
   setViewerAspect();
   await fillDevices();
@@ -192,6 +199,7 @@ function stopCamera(updateUi = true) {
   wake?.release().catch(() => { /* ignore */ }); wake = null;
   if (mode === 'camera') mode = 'none';
   if (updateUi) { for (const c of [el.viewCard, el.anaCard, el.camCard, el.recCard]) c.hidden = true; setStatus(''); }
+  $('quick-rec-row').hidden = true;
 }
 
 el.live.addEventListener('resize', () => { if (mode === 'camera') { const [W, H] = srcSize(); cx = Math.min(cx, W); cy = Math.min(cy, H); setViewerAspect(); } });
@@ -354,6 +362,7 @@ async function openFile(fs: File[]) {
   $('file-nav').hidden = false; $('cam-n').hidden = true; $('file-range').hidden = false; $('ana-all-row').hidden = false;
   $('fps-field').hidden = f.kind !== 'video';
   if (f.kind === 'video') $<HTMLInputElement>('fps').value = String((f as unknown as { fps: number }).fps);
+  $('quick-rec-row').hidden = true;
   $('rec-title').textContent = 'Export frames';
   $('btn-rec').textContent = 'Export as TIFF + JSON';
   setFileFrames();
@@ -443,6 +452,7 @@ let rec: Recording | null = null;
 function progress(frac: number, msg: string) {
   el.progBar.style.width = `${Math.round(100 * Math.max(0, Math.min(1, frac)))}%`;
   el.progMsg.textContent = msg;
+  if (busy) $('btn-rec-quick').textContent = msg ? `Stop · ${msg}` : 'Stop';
 }
 
 async function runBusy(f: () => Promise<void>) {
@@ -450,9 +460,10 @@ async function runBusy(f: () => Promise<void>) {
   document.body.classList.add('busy');
   el.progBox.hidden = false; progress(0, '');
   try { await f(); } catch (e) { setStatus(errMsg(e), 'err'); }
-  finally { busy = false; document.body.classList.remove('busy'); el.progBox.hidden = true; }
+  finally { busy = false; document.body.classList.remove('busy'); el.progBox.hidden = true; quickRecLabel(); }
 }
 $('btn-stop').addEventListener('click', () => { stopFlag = true; });
+$('btn-rec-quick').addEventListener('click', () => { if (busy) stopFlag = true; else if (mode === 'camera') recordCamera(); });
 
 $('btn-rec').addEventListener('click', () => { if (mode === 'camera') recordCamera(); else if (mode === 'file') exportFile(); });
 $('btn-sweep').addEventListener('click', () => focusSweep());
@@ -460,7 +471,7 @@ $('btn-sweep').addEventListener('click', () => focusSweep());
 function newRecording(m: Recording['mode'], C: number): Recording {
   const r = recRegion(), f = downF();
   // drop the previous recording (and its zip) first (memory)
-  rec = null; lastZip = null; el.outCard.hidden = true;
+  rec = null; lastZip = null; el.outCard.hidden = true; $('btn-upload').textContent = 'Upload';
   return { mode: m, planes: [], N: 0, C, w: Math.floor(r.w / f), h: Math.floor(r.h / f), region: r, downscale: f, frames: [], source: {},
     created: new Date().toISOString(), t0: performance.now() };
 }
@@ -496,7 +507,7 @@ async function recordCamera() {
       const m = await waitFrame(el.live);
       checkSize(r);
       grabCamera(r, m);
-      if (i % 3 === 0 || i === N - 1) progress((i + 1) / N, `frame ${i + 1} / ${N}`);
+      progress((i + 1) / N, `frame ${i + 1} / ${N}`);
     }
     if (!r.N) return;
     await maybeStill(r);
@@ -604,6 +615,8 @@ function finish(r: Recording) {
       if (i % 4 === 0 || i === r.N - 1) drawTrace(el.outTrace, sharp, -1, 'sharpness per frame');
     }
   })();
+  // private upload copy: upload as soon as the busy recording step has ended (runBusy clears busy after this returns)
+  if (uploadBase) setTimeout(() => { if (!uploaded.has(r)) uploadRec(r); }, 0);
 }
 
 // ---------------------------------------------------------------- export
@@ -707,6 +720,51 @@ $('btn-share').addEventListener('click', async () => {
     else if (name !== 'AbortError') setStatus(`share: ${errMsg(e)}`, 'err');
   }
 });
+
+// ---------------------------------------------------------------- upload (private copy of the page only)
+// A copy of the page served next to a files/ folder that lists as JSON and accepts PUT (nginx dav_methods PUT +
+// autoindex_format json) uploads every finished recording there. On the public page files/ is a 404, so nothing changes.
+let uploadBase: URL | null = null;
+const uploaded = new WeakSet<Recording>();
+
+function putBlob(url: URL, blob: Blob, onProgress: (f: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', url.href);
+    x.setRequestHeader('Content-Type', 'application/zip');
+    x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => (x.status >= 200 && x.status < 300 ? resolve() : reject(new Error(`upload failed: HTTP ${x.status}`)));
+    x.onerror = () => reject(new Error('upload failed: network error'));
+    x.send(blob);
+  });
+}
+
+async function uploadRec(r: Recording) {
+  if (!uploadBase || busy || rec !== r) return;
+  const base = uploadBase;
+  await runBusy(async () => {
+    const z = await zipOf(r);
+    const mb = (z.blob.size / 2 ** 20).toFixed(1);
+    await putBlob(new URL(encodeURIComponent(z.name), base), z.blob, (f) => progress(f, `uploading ${z.name}: ${Math.round(f * 100)} % of ${mb} MB`));
+    uploaded.add(r);
+    $('btn-upload').textContent = 'Uploaded';
+    setStatus(`${z.name} (${mb} MB) is uploaded to the server.`, 'ok');
+  });
+}
+
+$('btn-upload').addEventListener('click', () => { if (rec) uploadRec(rec); });
+
+async function detectUpload() {
+  try {
+    const res = await fetch('files/', { cache: 'no-store', headers: { Accept: 'application/json' } });
+    if (!res.ok || !(res.headers.get('content-type') ?? '').includes('json') || !Array.isArray(await res.json())) return;
+  } catch { return; }
+  uploadBase = new URL('files/', location.href);
+  $('btn-upload').hidden = false;
+  const p = document.querySelector('.privacy') as HTMLElement | null;
+  if (p) p.textContent = 'Private upload page: every recording is uploaded to the server when it is done (and can still be downloaded).';
+}
+detectUpload();
 
 // ---------------------------------------------------------------- start
 drawSpectrum(el.spec, null, 512);

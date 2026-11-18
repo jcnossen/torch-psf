@@ -5,9 +5,11 @@ import { resolve } from 'node:path';
 // relative asset paths, so the folder can be copied to the root (or any path) of a web server.
 //   npm run build:psfgrab                      -> web/dist-psfgrab/
 //   npm run build:psfgrab -- --outDir /some/dir
-//   npm run dev:psfgrab                        -> http://localhost:5174/
-export default defineConfig({
-  root: resolve(__dirname, 'psfgrab'),
+//   npm run dev:psfgrab                        -> http://localhost:5174/psfgrab/
+// The dev server serves from web/ (not web/psfgrab/): index.html loads ../src/psfgrab/main.ts, which the browser
+// resolves against the page URL, so with root = web/psfgrab it would point above the server root and 404.
+export default defineConfig(({ command }) => ({
+  root: command === 'serve' ? __dirname : resolve(__dirname, 'psfgrab'),
   base: './',
   publicDir: false,
   worker: { format: 'es' },
@@ -18,4 +20,4 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: { input: { index: resolve(__dirname, 'psfgrab/index.html') } },
   },
-});
+}));
