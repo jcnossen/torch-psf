@@ -70,6 +70,7 @@ def test_zstack_astigmatism_visible():
 @pytest.mark.parametrize('expected,make', [
     ('scene', lambda: scene_movie(T=30, N=256, seed=1)),                       # handheld, large shifts
     ('scene', lambda: scene_movie(T=30, N=256, step_px=(0.0, 0.3), zoom=0.0, seed=3)),   # still, autofocus hunting
+    ('scene', lambda: scene_movie(T=20, N=256, blur=(1.5, 3.0), seed=6)),       # blurry: slope ~ -3 .. -4 like real clips
     ('moving', lambda: moving_movie(T=40, seed=1)),                            # fluorescent cells, stage panning
     ('moving', lambda: moving_movie(T=40, brightfield=True, photons=3000, seed=2)),
     ('static', lambda: moving_movie(T=40, brightfield=True, photons=3000, pan_px=0, swim_px=0.0,

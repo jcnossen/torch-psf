@@ -9,7 +9,8 @@ scene_statistics: two cues that separate a photograph of the world from a micros
                   scenes are close to scale invariant (occlusion of objects of all sizes, "dead leaves"): P ~ f^-2,
                   slope about -2 (-1.6 .. -2.6). Fluorescence spots are white up to the OTF roll-off (slope ~ 0 at
                   low f), filaments ~ -1; bright-field cells on an empty background are flatter than -1.5 at these
-                  scales unless the field is crowded.
+                  scales unless the field is crowded. Real phone clips (motion blur, ISP denoising) are steeper:
+                  -3.3 .. -4.1 measured on three handheld 1080p clips, so only a lower limit is used.
   dark_frac       fraction of pixels close to the dark level (fluorescence: most of the field is background)
   flat_frac       fraction of the field without structure (local band-pass energy at the noise level)
 """

@@ -330,10 +330,12 @@ def classify_movie(stats):
                                                                           0.5, 0.45, 0.1)
     slope = -g('spectral_slope', 0)
     slope = slope if np.isfinite(slope) else 0.0
-    p_scene = (_soft(max(slope, 1e-3), 1.6, 0.12) * _soft(2.9 / max(slope, 1e-3), 1.0, 0.08) *  # ~ -2, not OTF roll-off
-               _soft(0.25 / max(g('dark_frac', 1), 1e-4), 1.0, 0.4) *
-               _soft(0.2 / max(g('flat_frac', 1), 1e-4), 1.0, 0.3) * edge_free) ** (1 / 4)
-    p_scene = p_scene ** 2 if p_scene < 0.5 else p_scene                    # sharpen the low end
+    # featureless background is the decisive cue (phone clips of rooms: <= 1 % of the field; microscopy: >= 12 % in
+    # the 19 real sets, the empty space between cells / spots); the others are combined by a geometric mean.
+    # The slope has no upper limit: real phone clips (motion blur, ISP denoising) measure -3.3 .. -4.1.
+    p_flat = _soft(0.06 / max(g('flat_frac', 1), 1e-4), 1.0, 0.3)
+    p_scene = p_flat * (_soft(max(slope, 1e-3), 1.6, 0.12) * _soft(0.25 / max(g('dark_frac', 1), 1e-4), 1.0, 0.4) *
+                        edge_free) ** (1 / 3)
     # global motion of a microscope sample / stage: most steps confident, most of them moving, a path of several
     # PSF widths
     mc, mm = g('motion_conf', 0), g('motion_moving', 0)

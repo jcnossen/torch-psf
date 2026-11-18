@@ -208,10 +208,11 @@ sharpness / anisotropy; lag correlation and spot persistence; the numbers and th
 
 Two modes for inputs that are not one of the standard microscopy acquisitions, decided before the rest of the tree:
 
-- `scene`: a camera filming the world (phone clips). Cues (`torch_psf.auto.motion.scene_statistics`): the power
-  spectrum's log-log slope over 0.02 .. min(0.15, 0.35 f_c) cycles/px is about -2 (scale-invariant natural scenes;
-  between -1.6 and -2.9, steeper is OTF roll-off), structure everywhere (`flat_frac` low), no dark background
-  (`dark_frac` low), no band edge below Nyquist. Geometric mean of the four cues.
+- `scene`: a camera filming the world (phone clips). Cues (`torch_psf.auto.motion.scene_statistics`): structure
+  everywhere (`flat_frac`, the featureless fraction of the field, < ~6 %: decisive, multiplies the rest), and the
+  geometric mean of: the power spectrum's log-log slope over 0.02 .. min(0.15, 0.35 f_c) cycles/px steeper than -1.6
+  (natural scenes ~ -2, real phone clips with motion blur / ISP denoising -3.3 .. -4.1), no dark background
+  (`dark_frac` low), no band edge below Nyquist.
 - `moving`: a microscope sample or stage that moves. `global_motion`: partially whitened phase correlation
   (cross-power / |cross-power|^0.5, below 0.3 cycles/px) on frames downsampled to <= 256 px; a step t -> t+1 counts
   when its peak is strong (z > 8 robust sd), unique (> 1.5 x the highest peak outside a few peak widths: sparse spots
