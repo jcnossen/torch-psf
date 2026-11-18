@@ -6,7 +6,7 @@ per-sample NLL difference of two PSFs on the same samples."""
 import math
 import numpy as np
 import torch
-from torch_psf.fit import localize, at_limit, solve_linear
+from torch_psf.fit import localize, at_limit, solve_linear, readnoise_variance
 
 
 def split_checkerboard(x, y, tile=16):
@@ -103,7 +103,7 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
     (default 0): the background groups (one background per sample and group) and, with a list of ngroups PSFs, the
     PSF of each frame (as fit_tracks with group_psf_kwargs). refit_psfs: models used for the refit iterations (same layout as
     psfs, e.g. their to_spline() tables, much faster); the NLL is then evaluated with psfs. readnoise_e: read noise
-    (e- rms). NLL: Gaussian approximation of Poisson + read noise, 0.5 (d - mu)^2 / v + 0.5 log(2 pi v), v = mu + rn^2,
+    (e- rms): a scalar or per pixel of every sample [B, R, R] (as fit_tracks). NLL: Gaussian approximation of Poisson + read noise, 0.5 (d - mu)^2 / v + 0.5 log(2 pi v), v = mu + rn^2,
     over the present frames.
 
     Returns dict(nll [B], chi2 [B] (mean (d - mu)^2 / v per pixel of the sample's present frames), xy [B, 2] (px
@@ -122,24 +122,25 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
     assert len(psfs) in (1, ng), 'psfs: one model or one per group'
     grp = torch.zeros(B, T, dtype=torch.long, device=dev) if groups is None else groups.to(dev).long()
     grp = torch.where(mask, grp, torch.zeros_like(grp))
-    rn2 = torch.tensor(float(readnoise_e) ** 2, device=dev)
+    rn2, pix = readnoise_variance(readnoise_e, B, R, dev)
     chunks = torch.arange(B, device=dev).split(batch)
 
     def evaluate(models, xy, zr, sl):
         data, g_, m_ = rois[sl], grp[sl], mask[sl]
         b = data.shape[0]
+        r2 = rn2[sl] if pix else rn2
         pos = torch.cat([xy[sl], zmax_um * torch.sigmoid(zr[sl])[:, None]], 1)
         if len(models) == 1:
             psf = models[0].render(pos)
-            I, bg = solve_linear(psf.reshape(b, -1).detach(), data.reshape(b, T, -1), m_, g_, rn2, ng)
+            I, bg = solve_linear(psf.reshape(b, -1).detach(), data.reshape(b, T, -1), m_, g_, r2, ng)
             mu = I[..., None, None] * psf[:, None]
         else:
             psf = torch.stack([m.render(pos) for m in models], 1)                       # [b, ng, R, R]
             psf = torch.gather(psf, 1, g_[..., None, None].expand(-1, -1, R, R))         # [b, T, R, R]
-            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), m_, g_, rn2, ng)
+            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), m_, g_, r2, ng)
             mu = I[..., None, None] * psf
         mu = (mu + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
-        var = mu + rn2
+        var = mu + (r2.reshape(b, 1, R, R) if pix else r2)
         mk = m_[..., None, None]
         nll = torch.where(mk, 0.5 * (data - mu) ** 2 / var + 0.5 * torch.log(2 * math.pi * var), torch.zeros_like(mu))
         chi = torch.where(mk, (data - mu) ** 2 / var, torch.zeros_like(mu))

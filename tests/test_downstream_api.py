@@ -163,3 +163,27 @@ def test_heldout_tracks_z_starts_inside_range():
     import pytest
     with pytest.raises(AssertionError, match='z_starts_um'):
         heldout_tracks(None, [], zmax_um=0.2, z_starts_um=(0.05, 0.25))
+
+
+def test_per_pixel_readnoise():
+    """read noise per pixel of every sample [B, R, R]: a constant map gives the scalar result (fit and held-out); a map
+    with hot pixels gives those pixels less weight (the held-out NLL of data with hot-pixel noise is lower with the map)"""
+    R, B, T = 11, 30, 4
+    vec = VectorialPSF(R, npupil=32, oversample=2, device=DEV).set_zernike({6: 0.05})
+    g = torch.Generator(device=DEV).manual_seed(3)
+    xy = torch.rand(B, 2, generator=g, device=DEV) - 0.5
+    with torch.no_grad():
+        img = vec(torch.cat([xy, torch.full((B, 1), 0.05, device=DEV)], 1), torch.zeros(B, device=DEV))
+    rn = torch.full((B, R, R), 1.0, device=DEV)
+    hot = torch.rand(B, R, R, generator=g, device=DEV) < 0.05
+    rn[hot] = 8.0
+    rois = torch.poisson(1500 * img[:, None].expand(-1, T, -1, -1) + 3, generator=g) + torch.randn(B, T, R, R, generator=g, device=DEV) * rn[:, None]
+    tr = Tracks(rois, torch.ones(B, T, dtype=torch.bool, device=DEV), torch.arange(T, device=DEV)[None].expand(B, -1),
+                torch.zeros(B, 2, dtype=torch.long, device=DEV), xy + (R - 1) / 2)
+    kw = dict(iters=30, warmup=5, fix_zernike=True, fix_focus=True)
+    a, b = fit_tracks(tr, vec, readnoise_e=1.0, **kw), fit_tracks(tr, vec, readnoise_e=torch.ones(B, R, R, device=DEV), **kw)
+    assert abs(a['report']['nll_per_px'] - b['report']['nll_per_px']) < 1e-6
+    hk = dict(zmax_um=0.2, z_starts_um=(0.03, 0.12), iters=40)
+    hs, hc, hm = heldout_tracks(tr, vec, readnoise_e=1.0, **hk), heldout_tracks(tr, vec, readnoise_e=torch.ones(B, R, R, device=DEV), **hk), \
+        heldout_tracks(tr, vec, readnoise_e=rn, **hk)
+    assert np.allclose(hs['nll'], hc['nll'], rtol=1e-5) and hm['nll_per_px'] < hs['nll_per_px']
