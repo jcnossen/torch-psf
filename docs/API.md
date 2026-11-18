@@ -235,6 +235,18 @@ loss = NLL(rois) + w_stack NLL(stack) + lam_ref sum((K - ref)^2 / (|ref| + 1e-4)
 `compare_heldout(psfs, rois, var=None)`: for each PSF: localize every ROI (no theta0), mean NLL per pixel
 (`nll.mean() / P^2`), the fraction at the offset limit, and the difference to the first PSF.
 
+`heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngroups=1, refit_psfs=None,
+z_starts_um=(0.02, 0.08, 0.15), iters=300, lr=0.03, batch=3000)`: held-out check of a frozen PSF on track samples
+(`spots.Tracks`, the data of `fit_tracks`): per sample x, y and z (sigmoid on [0, zmax_um]) refitted by Adam from each
+start z, I per frame and bg per (sample, group) by `solve_linear` at every step, the start with the lowest NLL kept.
+psfs: one model or one per group (anything with `render(pos)`, e.g. a VectorialPSF at its focus_um with dipM / blur
+set); refit_psfs: faster models for the refit iterations (e.g. their `to_spline()`), the NLL then from psfs. NLL:
+Gaussian approximation of Poisson + read noise (as `fit_tracks`). Returns nll [B], chi2 [B], xy, z, I, bg, nll_per_px,
+chi2_per_px, n (numpy).
+
+`paired_nll(nll_a, nll_b)`: paired per-sample difference b - a on the same samples: mean, se (ddof 1), z = mean / se,
+frac_better.
+
 `z_scale(psf_new, psf_ref, z_range=None, n=33, photons=1e5, bg=1)`: noise-free emitters at x = y = 0 and n heights
 `linspace(z_range)` rendered with psf_new, localized with psf_ref; least-squares line through the inner 80 % (indices
 `int(0.1 n) .. n - int(0.1 n)`): returns (slope d z_ref / d z_new, offset at the centre of that range, um).

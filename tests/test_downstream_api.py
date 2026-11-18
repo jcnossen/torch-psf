@@ -12,7 +12,7 @@ from torch_psf.io import load_camera
 from torch_psf.movie import TiffMovie, ArrayMovie
 from torch_psf.fit import lm_poisson, fisher, model_and_jacobian, solve_linear
 from torch_psf.spots import Tracks
-from torch_psf.estimation import fit_tracks
+from torch_psf.estimation import fit_tracks, heldout_tracks, paired_nll
 from torch_psf.vectorial import photosel_tensor
 
 
@@ -119,3 +119,41 @@ def test_fit_tracks_fixed_zernikes():
     r = fit_tracks(tr, vec, readnoise_e=0.0, iters=30, warmup=5, fix_zernike=True, fix_focus=True)
     assert torch.equal(r['psf'].zcoef.detach(), vec.zcoef.detach()) and r['report']['focus_um'] == 0.0
     assert r['report']['nll_per_px'] <= r['report']['nll_per_px_before_last_step'] + 1e-6
+
+
+def test_heldout_tracks_frozen_psf_paired():
+    """frozen-PSF refit of track samples (per-group PSF, background per group, z multi-start): the true PSF beats an
+    aberrated one on the paired per-sample NLL; chi2 about 1; the spline refit gives about the same NLL"""
+    R, B, T = 11, 60, 6
+    vec = VectorialPSF(R, npupil=32, oversample=2, device=DEV).set_zernike({6: 0.05})
+    M = [photosel_tensor(torch.tensor(0.3, device=DEV), e) for e in ((1.0, 0.0), (0.0, 1.0))]
+    g = torch.Generator(device=DEV).manual_seed(2)
+    xy = torch.rand(B, 2, generator=g, device=DEV) - 0.5
+    z = 0.02 + 0.12 * torch.rand(B, generator=g, device=DEV)
+    groups = torch.tensor([[0, 0, 0, 1, 1, 1]] * B, device=DEV)
+    with torch.no_grad():
+        pos = torch.cat([xy, z[:, None]], 1)
+        imgs = torch.stack([vec(pos, torch.zeros(B, device=DEV), dipM=M[k]) for k in range(2)], 1)
+        mu = 3000 * torch.gather(imgs, 1, groups[..., None, None].expand(-1, -1, R, R)) + 10 + 5 * groups[..., None, None]
+    rois = torch.poisson(mu, generator=g)
+    tr = Tracks(rois, torch.ones(B, T, dtype=torch.bool, device=DEV), torch.arange(T, device=DEV)[None].expand(B, -1),
+                torch.zeros(B, 2, dtype=torch.long, device=DEV), xy + (R - 1) / 2)
+
+    def per_group(v):
+        out = []
+        for k in range(2):
+            m = v.resized(R)
+            m.dipM = M[k]
+            out.append(m)
+        return out
+    wrong = VectorialPSF(R, npupil=32, oversample=2, device=DEV).set_zernike({6: -0.05, 8: 0.05})
+    kw = dict(readnoise_e=0.0, zmax_um=0.2, groups=groups, ngroups=2, z_starts_um=(0.03, 0.12), iters=80)
+    ht, hw = heldout_tracks(tr, per_group(vec), **kw), heldout_tracks(tr, per_group(wrong), **kw)
+    assert ht['nll'].shape == (B,) and ht['I'].shape == (B, T) and ht['bg'].shape == (B, 2)
+    assert 0.8 < ht['chi2_per_px'] < 1.2 and hw['chi2_per_px'] > ht['chi2_per_px']
+    p = paired_nll(ht['nll'], hw['nll'])
+    assert p['mean'] > 0 and p['z'] > 3, p
+    assert np.median(np.abs(ht['z'] - z.cpu().numpy())) < 0.03
+    spl = [m.to_spline(z_range=(0.0, 0.2), oversample=4, dz_um=0.01, zpad=3, xy_limit=2.0) for m in per_group(vec)]
+    hs = heldout_tracks(tr, per_group(vec), refit_psfs=spl, **kw)
+    assert abs(hs['nll_per_px'] - ht['nll_per_px']) < 2e-3
