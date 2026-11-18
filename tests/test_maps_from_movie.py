@@ -72,3 +72,57 @@ def test_white_photon_transfer_gain_with_fixed_pattern_and_sample_fluctuations()
     cam2, rep2 = white_photon_transfer(mov, nblocks=2, block=300, lag=1, readnoise_e=float(np.sqrt(np.mean(rn ** 2))), device='cpu')
     assert abs(cam2.offset_adu - off) < 3.0, cam2.offset_adu                         # = slope error x (level - offset)
     assert rep['fpn_sd_adu'] > 1.5 and len(rep['bins']) > 10
+
+
+def _blinking_background_movie(T=600, H=96, W=96, gain=0.5, off=100.0, bg=5.0, n_dim=1000, dim_photons=150, rn=1.5, seed=0):
+    """flat background + sub-threshold blinking emitters (150 photons, PSF sigma 1.3 px) whose density rises across
+    the field: the level and the non-shot-noise (band-limited) fluctuation rise together, as along a dense structure"""
+    from scipy import ndimage as ndi
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[:H, :W]
+    p = ((xx / W) ** 2).ravel()
+    p = p / p.sum()
+    lam = np.full((T, H, W), bg)
+    for t in range(T):
+        img = np.zeros(H * W)
+        np.add.at(img, rng.choice(H * W, size=rng.poisson(n_dim), p=p), dim_photons)
+        lam[t] += ndi.gaussian_filter(img.reshape(H, W), 1.3)
+    e = rng.poisson(lam) + rng.normal(0, rn, (T, H, W))
+    return (e / gain + off).astype(np.float32)
+
+
+def test_gain_with_subthreshold_blinking_background():
+    """photon_transfer (temporal variance of consecutive-frame differences per pixel, binned by the pixel mean) takes
+    the blinking fluctuations for shot noise: the slope is far too high (gain ~0.07 here, true 0.5). The white
+    (beyond-OTF) noise does not contain them."""
+    from torch_psf.camera import white_photon_transfer, photon_transfer
+    mov = _blinking_background_movie()
+    cam, rep = white_photon_transfer(mov, nblocks=2, block=300, lag=1, offset_adu=100.0, device='cpu')
+    assert abs(cam.gain_e_per_adu / 0.5 - 1) < 0.08 and rep['warning'] is None, rep['gain_e_per_adu']
+    pt, _ = photon_transfer(mov, offset_adu=100.0, device='cpu')
+    assert pt.gain_e_per_adu < 0.25, pt.gain_e_per_adu
+
+
+def test_white_photon_transfer_warns_without_level_variation():
+    """a flat, constant background carries no information on the gain: NaN or an undetermined slope, and a warning"""
+    import pytest
+    from torch_psf.camera import white_photon_transfer
+    rng = np.random.default_rng(5)
+    e = rng.poisson(20.0, (600, 64, 64)) + rng.normal(0, 1.5, (600, 64, 64))
+    with pytest.warns(UserWarning, match='not determined'):
+        cam, rep = white_photon_transfer((e / 0.5 + 100).astype(np.float32), nblocks=2, block=300, offset_adu=100.0,
+                                         device='cpu')
+    assert rep['warning'] and not (rep['slope_rel_se'] < 0.1)
+
+
+def test_detect_spots_on_raw_adu_finds_the_frame_edges():
+    """the zero-padded band-pass of detect_spots turns a large offset into responses along the frame edges: on raw
+    ADU most detections are there (white_photon_transfer detects on x - median)"""
+    import torch
+    from torch_psf.detect import detect_spots
+    rng = np.random.default_rng(0)
+    x = torch.as_tensor(rng.poisson(20.0, (50, 64, 64)) / 0.5 + 100.0, dtype=torch.float32)
+    edge = lambda p: float(((p['x'] < 6) | (p['y'] < 6) | (p['x'] >= 58) | (p['y'] >= 58)).float().mean())
+    assert edge(detect_spots(x, threshold=4.0)) > 0.5
+    p = detect_spots(x - x.median(), threshold=4.0)
+    assert len(p['x']) == 0 or edge(p) < 0.5
