@@ -133,10 +133,15 @@ def test_read_psfgrab(tmp_path):
 
 def test_large_frames_memory():
     """Full-HD phone frames: the classifier crops / chunks instead of allocating ~T x H x W x kernel taps."""
-    import resource
+    try:                                   # peak resident memory in GB: resource on Linux / macOS, psutil on Windows
+        import resource
+        peak_gb = lambda: resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6   # ru_maxrss in kB (Linux)
+    except ImportError:
+        psutil = pytest.importorskip('psutil')
+        peak_gb = lambda: psutil.Process().memory_info().peak_wset / 1e9
     mov = np.random.default_rng(0).normal(100, 5, (24, 1920, 1080)).astype(np.float32)
-    r0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    r0 = peak_gb()
     st = movie_statistics(mov, device='cpu')
-    grow_gb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - r0) / 1e6
+    grow_gb = peak_gb() - r0
     assert st['crop'][2:] == [1024, 1024]
     assert grow_gb < 3.0, grow_gb
