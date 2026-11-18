@@ -7,7 +7,16 @@ point emitters on the pixel grid (or a static filament image). Poisson noise on 
 ADU = photons / gain + offset + Gaussian read noise. Small and fast (CPU), deterministic for a given seed.
 
 synthetic_movie(mode, ...) with mode one of 'smlm', 'sofi', 'zstack', 'static', 'noise'; returns (movie [T, H, W]
-float32 ADU, info dict with the truth: fc_px, NA, pixel_um, wavelength_um, mode)."""
+float32 ADU, info dict with the truth: fc_px, NA, pixel_um, wavelength_um, mode).
+
+Two more generators, for the non-standard routes:
+  scene_movie   a handheld camera filming the world (not a microscope): a "dead leaves" scene (occluding disks of
+                power-law sizes, the classic model of natural-image statistics, P(f) ~ f^-2), camera shake and
+                pans of many px per frame, small zoom changes, autofocus hunting (blur that changes over frames),
+                gamma, sharpening, 8-bit quantisation with clipping
+  moving_movie  a microscope sample that moves: rod-shaped cells (fluorescent, or dark on a bright field), stage
+                panning, cells swimming, slow refocusing; exact band limit as above (incoherent imaging; the
+                bright-field variant is the same image with inverted contrast, not a partially coherent model)"""
 import math
 import numpy as np
 
@@ -101,3 +110,98 @@ def synthetic_movie(mode='smlm', T=200, N=128, pixel_um=0.1, NA=1.2, wavelength_
     ph = rng.poisson(mu).astype(np.float64)
     adu = ph / gain + offset + readnoise / gain * rng.standard_normal(ph.shape)
     return adu.astype(np.float32), info
+
+
+def _dead_leaves(M, rng, n=None, rmin=1.5, rmax=None):
+    """Dead-leaves image [M, M] in [0, 1]: disks with radius density ~ r^-3 (scale invariant), random grey levels,
+    later disks occlude earlier ones; plus a little texture inside the disks."""
+    rmax = rmax or M / 4
+    n = n or int(12 * (M / rmin) ** 2 / np.log(rmax / rmin) / 50)
+    u = rng.random(n)
+    r = 1.0 / np.sqrt(u / rmin ** 2 + (1 - u) / rmax ** 2)           # p(r) ~ r^-3 on [rmin, rmax]
+    img = np.full((M, M), 0.5)
+    yy, xx = np.mgrid[0:M, 0:M]
+    for k in np.argsort(-r):                                           # big first, small (front) last
+        cy, cx = rng.uniform(-rmax, M + rmax, 2)
+        R = r[k]
+        y0, y1 = int(max(0, cy - R)), int(min(M, cy + R + 1))
+        x0, x1 = int(max(0, cx - R)), int(min(M, cx + R + 1))
+        if y1 <= y0 or x1 <= x0:
+            continue
+        m = (yy[y0:y1, x0:x1] - cy) ** 2 + (xx[y0:y1, x0:x1] - cx) ** 2 < R * R
+        img[y0:y1, x0:x1][m] = rng.uniform(0.05, 0.95)
+    return np.clip(img + 0.02 * rng.standard_normal((M, M)), 0, 1)
+
+
+def _gauss_blur_fft(img, sigma):
+    if sigma <= 0:
+        return img
+    ky = np.fft.fftfreq(img.shape[0])[:, None]; kx = np.fft.fftfreq(img.shape[1])[None, :]
+    return np.real(np.fft.ifft2(np.fft.fft2(img) * np.exp(-2 * np.pi ** 2 * sigma ** 2 * (kx ** 2 + ky ** 2))))
+
+
+def scene_movie(T=40, N=160, step_px=(3.0, 40.0), zoom=0.02, blur=(0.5, 2.0), noise=2.0, seed=0):
+    """Handheld camera movie of a dead-leaves scene (see the module docstring): [T, N, N] float32 in 0..255
+    (8-bit levels) and an info dict."""
+    from scipy.ndimage import map_coordinates
+    rng = np.random.default_rng(seed)
+    M = 4 * N
+    world = _dead_leaves(M, rng)
+    pos = np.array([M / 2, M / 2]); scale = 1.0
+    s_blur = blur[0] + (blur[1] - blur[0]) * (0.5 + 0.5 * np.sin(np.linspace(0, 2 * np.pi, T) + rng.uniform(0, 6)))
+    yy, xx = np.mgrid[0:N, 0:N] - N / 2
+    out = np.zeros((T, N, N), np.float32); path = []
+    for t in range(T):
+        a = rng.uniform(0, 2 * np.pi)
+        pos = pos + rng.uniform(*step_px) * np.array([np.sin(a), np.cos(a)])
+        pos = np.clip(pos, N, M - N)
+        scale *= np.exp(zoom * rng.standard_normal())
+        rot = 0.01 * rng.standard_normal()
+        c, s_ = np.cos(rot), np.sin(rot)
+        Y = pos[0] + scale * (c * yy - s_ * xx); X = pos[1] + scale * (s_ * yy + c * xx)
+        f = map_coordinates(world, [Y, X], order=1, mode='reflect')
+        f = _gauss_blur_fft(f, s_blur[t])                              # lens + demosaic + autofocus hunting
+        f = f + 0.6 * (f - _gauss_blur_fft(f, 1.5))                    # in-camera sharpening
+        f = 255 * np.clip(f, 0, 1) ** (1 / 2.2)
+        f = f + noise * rng.standard_normal(f.shape)
+        out[t] = np.clip(np.round(f), 0, 255); path.append(pos.copy())
+    return out, dict(mode='scene', T=T, N=N, path=np.asarray(path).tolist(), blur_px=s_blur.tolist())
+
+
+def moving_movie(T=60, N=128, pixel_um=0.1, NA=0.9, wavelength_um=0.55, brightfield=False, pan_px=3.0,
+                 swim_px=1.0, focus_range=(0.0, 1.0), n_cells=60, photons=300.0, bg=10.0, seed=0):
+    """Microscopy movie of rod-shaped cells with stage panning (random walk, pan_px per frame), swimming
+    (swim_px per frame per cell) and a slow focus change over focus_range (um); exact band limit 2 NA / lambda.
+    [T, N, N] float32 (photon counts with Poisson noise) and an info dict."""
+    rng = np.random.default_rng(seed)
+    G = N + 64                                                         # canvas with margins for panning
+    ang = rng.uniform(0, np.pi, n_cells)
+    Lc = rng.uniform(1.5, 4.0, n_cells) / pixel_um
+    stage = np.array([2 * G - G / 2, 2 * G - G / 2], float)
+    cy, cx = rng.uniform(G, 3 * G, n_cells), rng.uniform(G, 3 * G, n_cells)  # 1/4 of them in view at the start
+    out = np.zeros((T, N, N), np.float32)
+    focus = np.linspace(*focus_range, T)
+    fc = 2 * NA / wavelength_um * pixel_um
+    for t in range(T):
+        a = rng.uniform(0, 2 * np.pi)
+        stage += pan_px * rng.standard_normal(2)
+        cy += swim_px * np.sin(ang) * rng.uniform(0.5, 1.5, n_cells)
+        cx += swim_px * np.cos(ang) * rng.uniform(0.5, 1.5, n_cells)
+        o = np.zeros((G, G))
+        for k in range(n_cells):
+            s = np.linspace(-Lc[k] / 2, Lc[k] / 2, max(2, int(2 * Lc[k])))
+            for wdt in np.linspace(-0.35, 0.35, 5) / pixel_um:          # ~0.7 um wide rods
+                y = cy[k] + s * np.sin(ang[k]) + wdt * np.cos(ang[k]) - stage[0]
+                x = cx[k] + s * np.cos(ang[k]) - wdt * np.sin(ang[k]) - stage[1]
+                ok = (y >= 0) & (y < G - 1) & (x >= 0) & (x < G - 1)
+                yi, xi = np.floor(y[ok]).astype(int), np.floor(x[ok]).astype(int)
+                fy, fx = y[ok] - yi, x[ok] - xi
+                for dy, dx, wgt in ((0, 0, (1 - fy) * (1 - fx)), (1, 0, fy * (1 - fx)), (0, 1, (1 - fy) * fx),
+                                    (1, 1, fy * fx)):
+                    np.add.at(o, (yi + dy, xi + dx), wgt)
+        img = np.real(np.fft.ifft2(np.fft.fft2(o) * pupil_otf(G, pixel_um, NA, wavelength_um, focus[t])))
+        img = img[32:32 + N, 32:32 + N] / 5.0
+        mu = bg + photons * img if not brightfield else photons * np.clip(1 - 0.5 * img, 0.05, None)
+        out[t] = rng.poisson(np.maximum(mu, 0))
+    return out, dict(mode='moving', fc_px=fc, NA=NA, pixel_um=pixel_um, wavelength_um=wavelength_um, T=T, N=N,
+                     brightfield=brightfield, focus_um=focus.tolist())
