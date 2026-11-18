@@ -1,5 +1,6 @@
 """The camera of an acquisition (Camera: ADU -> photons, read-noise variance) and its calibration from the SMLM movie
-itself (photon_transfer: offset and gain from background pixels).
+itself (photon_transfer: offset and gain from background pixels; maps_from_movie: per-pixel offset and read-noise maps of
+an sCMOS from a sparse movie, no dark frames).
 
 A pipeline configuration with a `camera` block of the same field names maps 1:1 onto Camera:
     Camera.from_dict(cfg['camera']).
@@ -212,4 +213,120 @@ def photon_transfer(movie, frames=None, nblocks=8, block=400, mask_radius=4, thr
     rep = dict(slope_adu=k, offset_adu=off, gain_e_per_adu=g, poisson_equivalent_gain=1.0 / k,
                excess_noise=float(excess_noise), readnoise_e=cam.readnoise_e, per_block=per,
                slope_spread=float(np.std([b['slope'] for b in per]) / k) if len(per) > 1 else 0.0)
+    return cam, rep
+
+
+def _shift_of(ref_var, var):
+    """sensor-ROI shift (dy, dx) with ref[y + dy, x + dx] = this[y, x]: peak of the cross-correlation of the high-pass log
+    temporal-variance maps, and the peak correlation"""
+    from scipy import ndimage as ndi
+    hp = lambda v: np.clip(np.log(v) - ndi.median_filter(np.log(v), 5), -1, 3)
+    A, B = hp(ref_var), hp(var)
+    F = np.fft.ifft2(np.fft.fft2(A - A.mean()) * np.conj(np.fft.fft2(B - B.mean()))).real / (A.std() * B.std() * A.size)
+    iy, ix = np.unravel_index(F.argmax(), F.shape)
+    dy = iy if iy < F.shape[0] // 2 else iy - F.shape[0]
+    dx = ix if ix < F.shape[1] // 2 else ix - F.shape[1]
+    return (int(dy), int(dx)), float(F.max())
+
+
+def maps_from_movie(movie, spots, gain_e_per_adu, offset_adu, nframes=20000, lag=6, mask_radius=3.0, readnoise_floor_e=0.9,
+                readnoise_ref=None, readnoise_shift='auto', log=None):
+    """Per-pixel sCMOS offset and read-noise maps from a sparse SMLM movie (ADU), without dark frames.
+
+    - offset: global offset_adu + the per-pixel deviation = temporal median of the pixel over the frames away from
+      emitters (spots: not within mask_radius px of a spot in its frames frame - 1 .. frame + win) minus its spatially
+      smoothed version (median filter 9 px, then Gaussian sigma 2 px: the smooth part is background).
+    - read noise: robust variance (1.4826 MAD) of the differences of frames `lag` apart (e.g. one illumination-pattern
+      cycle, which removes the pattern and static structure; the MAD rejects blinking), / 2, minus the shot noise of the
+      pixel's level (median - offset map) x gain, floored at readnoise_floor_e.
+    - readnoise_ref: optional dict of reference maps of the same camera (readnoise_e, var_adu, offset_adu, e.g. a
+      previous result of this function) recorded at another sensor ROI position: the read noise is taken from it,
+      shifted by readnoise_shift (dy, dx), ref[y + dy, x + dx] = this[y, x], or 'auto' (cross-correlation of the
+      high-pass log temporal-variance maps); uncovered pixels get the own estimate high-passed (median filter 7 px).
+
+    movie: path / Movie / array [T, H, W]; the first nframes frames are used. spots: dict of arrays x, y (px, pixel
+    centres at integers), frame and optionally win (frames after `frame` that the spot covers, default 0).
+    Returns (Camera with the maps as offset_adu / readnoise_e (gain and the scalar offset in `scalars`, the other
+    maps in map_extra: var_adu, low5, readnoise_shift, readnoise_covered), report dict)."""
+    from scipy import ndimage as ndi
+    say = log or (lambda *a: None)
+    mv = open_movie(movie)
+    n = int(min(nframes, mv.n))
+    mov = np.asarray(mv.read(0, n), dtype=np.float32)
+    gain, off0 = float(gain_e_per_adu), float(offset_adu)
+    low = np.percentile(mov, 5, axis=0)
+    x, y = np.asarray(spots['x']), np.asarray(spots['y'])
+    fr = np.asarray(spots['frame'])
+    win = np.asarray(spots['win']) if 'win' in spots else np.zeros(len(x), int)
+    k = (fr < n) & np.isfinite(x) & np.isfinite(y)
+    x, y, fr, win = x[k], y[k], fr[k], win[k]
+    say(f'{len(x)} localizations used for the mask')
+    H, W = mov.shape[1:]
+    busy = np.zeros(mov.shape, bool)
+    r = int(mask_radius)
+    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+    disk = (yy ** 2 + xx ** 2) <= mask_radius ** 2
+    dy_, dx_ = yy[disk], xx[disk]
+    cx, cy = np.round(x).astype(int), np.round(y).astype(int)
+    for df in range(-1, int(win.max(initial=0)) + 1):
+        f = fr.astype(int) + df
+        ok = (f >= 0) & (f < n) & (df <= win)
+        for oy, ox in zip(dy_, dx_):
+            y2, x2 = cy[ok] + oy, cx[ok] + ox
+            good = (y2 >= 0) & (y2 < H) & (x2 >= 0) & (x2 < W)
+            busy[f[ok][good], y2[good], x2[good]] = True
+    say(f'masked fraction of pixel-frames: {busy.mean():.3f}')
+    m = mov.copy()
+    m[busy] = np.nan
+    med = np.nanmedian(m, axis=0)
+    del m
+    med = np.where(np.isfinite(med), med, np.median(mov, axis=0))
+    offset_dev = med - ndi.gaussian_filter(ndi.median_filter(med, size=9), 2)
+    dens = np.zeros((H, W))
+    np.add.at(dens, (np.clip(cy, 0, H - 1), np.clip(cx, 0, W - 1)), 1)
+    dens = ndi.gaussian_filter(dens, 1.0)
+    corr = float(np.corrcoef(offset_dev.ravel(), dens.ravel())[0, 1])
+    say(f'corr(offset_dev, loc density) = {corr:.3f}  (target < 0.05)')
+    d = mov[lag:] - mov[:-lag]
+    mad = np.median(np.abs(d - np.median(d, 0)), 0) * 1.4826
+    var_adu = mad ** 2 / 2
+    level_e = np.clip((np.median(mov, 0) - (off0 + offset_dev)) * gain, 0, None)
+    rn2_e = var_adu * gain ** 2 - level_e
+    rn_e = np.sqrt(np.clip(rn2_e, readnoise_floor_e ** 2, None))
+    shift, cov = (0, 0), np.ones((H, W), bool)
+    rep = dict(corr_offset_density=corr)
+    if readnoise_ref is not None:
+        rn_ref = np.asarray(readnoise_ref['readnoise_e'], dtype=np.float64)
+        if isinstance(readnoise_shift, str) and readnoise_shift == 'auto':
+            shift, pk = _shift_of(np.asarray(readnoise_ref['var_adu']), var_adu)
+            say(f'sensor-ROI shift vs reference (high-pass log variance cross-correlation): dy {shift[0]}, dx {shift[1]}, '
+                f'peak corr {pk:.3f}')
+            rep['shift_peak_corr'] = pk
+        else:
+            shift = tuple(int(v) for v in readnoise_shift)
+        y3, x3 = np.mgrid[:H, :W]
+        ys, xs = y3 + shift[0], x3 + shift[1]
+        cov = (ys >= 0) & (ys < rn_ref.shape[0]) & (xs >= 0) & (xs < rn_ref.shape[1])
+        rn_sh = np.full((H, W), np.nan)
+        rn_sh[cov] = rn_ref[ys[cov], xs[cov]]
+        # own estimate, high-passed (emitter signal variance is smooth on the pixel scale; camera excess is per pixel)
+        rn_hp = np.sqrt(readnoise_floor_e ** 2 + np.clip(rn2_e - ndi.median_filter(rn2_e, 7), 0, None))
+        say(f'read-noise map from the reference shifted by ({shift[0]},{shift[1]}): {cov.mean()*100:.1f}% of pixels covered; '
+            f'uncovered -> high-passed own estimate. Check on the covered pixels: corr(own raw, ref) '
+            f'{np.corrcoef(rn_e[cov], rn_sh[cov])[0, 1]:.3f}, corr(own high-passed, ref) {np.corrcoef(rn_hp[cov], rn_sh[cov])[0, 1]:.3f}; '
+            f'median own raw {np.median(rn_e):.2f} / hp {np.median(rn_hp):.2f} / ref {np.median(rn_sh[cov]):.2f} e; '
+            f'ref>3e px: hp median {np.median(rn_hp[cov][rn_sh[cov] > 3]):.2f} vs ref {np.median(rn_sh[cov][rn_sh[cov] > 3]):.2f}')
+        rn_e = np.where(cov, rn_sh, rn_hp)
+        if 'offset_adu' in readnoise_ref:
+            od_ref = np.full((H, W), np.nan)
+            od_ref[cov] = np.asarray(readnoise_ref['offset_adu'])[ys[cov], xs[cov]] - off0
+            say(f'offset deviation vs the shifted reference map: corr {np.corrcoef(offset_dev[cov], od_ref[cov])[0, 1]:.3f}, '
+                f'rms difference {np.std(offset_dev[cov] - od_ref[cov]):.2f} ADU (own sd {offset_dev.std():.2f}, ref sd {np.nanstd(od_ref):.2f})')
+    rep.update(offset_dev_p1=float(np.percentile(offset_dev, 1)), offset_dev_p99=float(np.percentile(offset_dev, 99)),
+               offset_dev_min=float(offset_dev.min()), rn_median=float(np.median(rn_e)), rn_p99=float(np.percentile(rn_e, 99)),
+               rn_max=float(rn_e.max()), frac_rn_gt_2x=float(np.mean(rn_e > 2 * np.median(rn_e))), nframes=n,
+               masked_frac=float(busy.mean()), readnoise_shift=list(shift))
+    cam = Camera(gain_e_per_adu=gain, offset_adu=(off0 + offset_dev).astype(np.float32), readnoise_e=rn_e.astype(np.float32))
+    cam.scalars = dict(offset_adu=off0, gain_e_per_adu=gain)
+    cam.map_extra = dict(low5=low, var_adu=var_adu, readnoise_shift=np.array(shift), readnoise_covered=cov)
     return cam, rep

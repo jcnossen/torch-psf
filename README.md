@@ -141,7 +141,7 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `dataset.py` | `Dataset`: the localizations (dict of tensors; format in [docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)). |
 | `optics.py` | `Optics` (pixel size, NA, wavelength, refractive indices). |
 | `simulate.py` | simulated data with known truth: isolated emitters, bead z-stacks, blinking SMLM movies, filaments. |
-| `camera.py` | `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs); `photon_transfer`: camera offset and gain from the background pixels of a movie. |
+| `camera.py` | `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs); `photon_transfer`: camera offset and gain from the background pixels of a movie; `maps_from_movie`: per-pixel sCMOS offset and read-noise maps from a sparse SMLM movie without dark frames (optionally the read noise of a reference recording at another sensor-ROI position). |
 | `movie.py`, `io.py` | movie readers (TIFF incl. ImageJ > 4 GB and multi-part, memory-mapped), PSF files. |
 | `psfzip.py`, `psfreport.py` | the psf.zip writer / reader (channels, mappings, field dependence, z-stack, preview) and its fit report. |
 | `__main__.py`, `viewer.py` | the command line, the viewer server. |
