@@ -109,6 +109,7 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
     Returns dict(nll [B], chi2 [B] (mean (d - mu)^2 / v per pixel of the sample's present frames), xy [B, 2] (px
     from the ROI centre), z [B] (um), I [B, T], bg [B, ngroups], nll_per_px (sum NLL / pixels), chi2_per_px (mean of
     chi2), n); arrays as numpy."""
+    assert all(0 < float(z0) < zmax_um for z0 in z_starts_um), f'z_starts_um {z_starts_um} must lie inside (0, zmax_um = {zmax_um})'
     rois, mask = tracks.rois, tracks.mask
     dev = rois.device
     B, T, R = rois.shape[0], rois.shape[1], rois.shape[-1]

@@ -157,3 +157,9 @@ def test_heldout_tracks_frozen_psf_paired():
     spl = [m.to_spline(z_range=(0.0, 0.2), oversample=4, dz_um=0.01, zpad=3, xy_limit=2.0) for m in per_group(vec)]
     hs = heldout_tracks(tr, per_group(vec), refit_psfs=spl, **kw)
     assert abs(hs['nll_per_px'] - ht['nll_per_px']) < 2e-3
+
+
+def test_heldout_tracks_z_starts_inside_range():
+    import pytest
+    with pytest.raises(AssertionError, match='z_starts_um'):
+        heldout_tracks(None, [], zmax_um=0.2, z_starts_um=(0.05, 0.25))
