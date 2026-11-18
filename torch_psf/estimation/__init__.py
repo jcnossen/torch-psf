@@ -13,7 +13,8 @@ from torch_psf.estimation.phase_diversity import (fit_phase_diversity, PDPatches
 from torch_psf.estimation.knots import (fit_zernike_knots, fit_pupil_knots, fit_free_knots, bead_theta, knot_loss,
                                     knot_gradient, vectorial_gradient, limit_fraction)
 from torch_psf.estimation.tracks import fit_tracks
-from torch_psf.estimation.heldout import split_checkerboard, heldout_nll, compare_heldout, spot_deviance
+from torch_psf.estimation.heldout import (split_checkerboard, heldout_nll, compare_heldout, spot_deviance,
+                                         heldout_tracks, paired_nll)
 from torch_psf.estimation.field_knots import fit_field_knots, tile_assign, localize_field, expected_field
 from torch_psf.estimation.multichannel_beads import (fit_multichannel_beads, multichannel_nll, MultiChannelBeads,
                                                      build_multichannel_beads, detect_channels, register_channels,

@@ -123,3 +123,51 @@ class AstigmaticGaussianPSF(_GaussianBase):
     def __repr__(self):
         return (f'AstigmaticGaussianPSF(roisize={self.roisize}, sigma_px={self.sigma}, gamma_um={self.gamma}, '
                 f'd_um={self.d}, z_range={self.z_range})')
+
+
+@torch.no_grad()
+def fit_gaussian_free_sigma(rois, sigma0, sigma_limits=(0.5, 2.5), iters=30, min_photons=20.0, min_bg=0.05):
+    """Spot fit with a free width: maximum-likelihood (Poisson) x, y (px from the ROI centre), photons, bg (photons /
+    px) and sigma (px) of a pixel-integrated isotropic Gaussian on each ROI [N, P, P] (photons), by fit.lm_poisson
+    (Levenberg-Marquardt, `iters` iterations). Start: x = y = 0, sigma = sigma0, bg = the 20 % quantile of the ROI (>=
+    min_bg), photons = the sum above it (>= min_photons). Limits: |x|, |y| <= (P - 1) / 2 - 1, photons >= 1, bg >= 0.01,
+    sigma within sigma_limits x sigma0. For spot finding and quality filters (width, chi2) on frames or frame sums.
+    Returns (theta [N, 5] = x, y, photons, bg, sigma; crlb [N, 5] (sqrt of the diagonal of the pseudo-inverse of the
+    Fisher matrix); chi2 [N] = sum((d - mu)^2 / mu) / P^2)."""
+    from torch_psf.fit import lm_poisson
+    d = torch.as_tensor(rois, dtype=torch.float32)
+    N, P = d.shape[0], d.shape[-1]
+    dev = d.device
+    o = torch.arange(P, device=dev, dtype=torch.float32) - (P - 1) / 2
+    h = (P - 1) / 2
+
+    def model(th):
+        x, y, I, bg, s = th.unbind(1)
+        ex, dex, dsx = _axis(o, x, s)
+        ey, dey, dsy = _axis(o, y, s)
+        g = ey[:, :, None] * ex[:, None, :]
+        Ib = I[:, None, None]
+        J = torch.stack([Ib * ey[:, :, None] * dex[:, None, :], Ib * dey[:, :, None] * ex[:, None, :], g,
+                         torch.ones_like(g), Ib * (ey[:, :, None] * dsx[:, None, :] + dsy[:, :, None] * ex[:, None, :])], 1)
+        return Ib * g + bg[:, None, None], J
+
+    lo, hi = sigma_limits[0] * sigma0, sigma_limits[1] * sigma0
+
+    def clamp(th):
+        th[:, 0:2].clamp_(-h + 1, h - 1)
+        th[:, 2].clamp_(min=1)
+        th[:, 3].clamp_(min=1e-2)
+        th[:, 4].clamp_(lo, hi)
+        return th
+
+    bg0 = d.flatten(1).quantile(0.2, 1).clamp(min=min_bg) if N else torch.zeros(0, device=dev)
+    I0 = (d - bg0[:, None, None]).sum((1, 2)).clamp(min=min_photons)
+    th0 = torch.stack([torch.zeros_like(I0), torch.zeros_like(I0), I0, bg0, torch.full_like(I0, float(sigma0))], 1)
+    th, _ = lm_poisson(model, d, th0, clamp=clamp, iters=iters, mu_min=1e-3)
+    mu, J = model(th)
+    mu = mu.clamp(min=1e-3).flatten(1)
+    Jf = J.flatten(2)
+    H = torch.einsum('nap,nbp->nab', Jf / mu[:, None], Jf)
+    crlb = torch.diagonal(torch.linalg.pinv(H), dim1=1, dim2=2).clamp(min=0).sqrt()
+    chi2 = ((d.flatten(1) - mu) ** 2 / mu).sum(1) / (P * P)
+    return th, crlb, chi2
