@@ -49,3 +49,20 @@ def test_lm_poisson_generic_and_fisher():
     assert float((th[:, :2] - th0[:, :2]).abs().max()) < 1e-3
     F = fisher(psf, th0, params=(0, 1, 3, 4))
     assert F.shape == (1, 4, 4) and bool((torch.linalg.eigvalsh(F.double()) > 0).all())
+
+
+def test_fit_gaussian_free_sigma_recovers_width_and_position():
+    import torch
+    from torch_psf.gaussian import fit_gaussian_free_sigma, GaussianPSF
+    g = torch.Generator().manual_seed(4)
+    N, P = 400, 11
+    for s_true in (1.0, 1.6):
+        psf = GaussianPSF(P, sigma_px=s_true, device='cpu')
+        pos = torch.cat([torch.rand(N, 2, generator=g) - 0.5, torch.zeros(N, 1)], 1)
+        mu = 2000 * psf.render(pos) + 10
+        d = torch.poisson(mu, generator=g)
+        th, crlb, chi2 = fit_gaussian_free_sigma(d, sigma0=1.3)
+        assert abs(float(th[:, 4].median()) - s_true) < 0.03
+        assert float((th[:, :2] - pos[:, :2]).abs().median()) < 0.05
+        assert abs(float(th[:, 2].median()) / 2000 - 1) < 0.05 and abs(float(th[:, 3].median()) - 10) < 0.5
+        assert 0.8 < float(chi2.median()) < 1.2 and (crlb[:, 0] > 0).all()

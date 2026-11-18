@@ -131,7 +131,7 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `vectorial.py` | `VectorialPSF`: dipole emission with Fresnel transmission and supercritical-angle fluorescence, refractive-index mismatch, Zernike aberrations (also per emitter), free pupil phase / amplitude maps, image-plane (line) blur, emission-dipole tensor (photoselection), diattenuation; chirp-z transform to an oversampled grid and pixel integration. |
 | `psf.py` | `PSF`: the base class (statistics, fitting, localization, files, to_spline). |
 | `spline.py` | `CubicSplinePSF`: Catmull-Rom (cubic) knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_zstack`. |
-| `gaussian.py` | `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D), pixel-integrated. |
+| `gaussian.py` | `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D), pixel-integrated; `fit_gaussian_free_sigma`: spot fit with a free width (x, y, photons, bg, sigma; CRLB, chi2) for spot finding and width / chi2 filters. |
 | `fourpi.py` | `FourPiPSF`: coherent two-objective (4Pi) PSF with C interference channels; `FourPiSplinePSF`: its spline table with the 4Pi phase as an analytic dependence. |
 | `zernike.py` | Zernike polynomials (Noll index and normalization). |
 | `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`; `solve_linear` (variable projection: closed-form per-frame intensities and backgrounds of a track). |
@@ -141,7 +141,7 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `dataset.py` | `Dataset`: the localizations (dict of tensors; format in [docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)). |
 | `optics.py` | `Optics` (pixel size, NA, wavelength, refractive indices). |
 | `simulate.py` | simulated data with known truth: isolated emitters, bead z-stacks, blinking SMLM movies, filaments. |
-| `camera.py` | `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs); `photon_transfer`: camera offset and gain from the background pixels of a movie. |
+| `camera.py` | `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs); `photon_transfer`: camera offset and gain from the background pixels of a movie; `white_photon_transfer`: the gain from the spatially white (beyond-OTF) part of the background noise of frame differences, robust to sample fluctuations, a patterned illumination and the offset fixed pattern; `maps_from_movie`: per-pixel sCMOS offset and read-noise maps from a sparse SMLM movie without dark frames (optionally the read noise of a reference recording at another sensor-ROI position). |
 | `movie.py`, `io.py` | movie readers (TIFF incl. ImageJ > 4 GB and multi-part, memory-mapped), PSF files. |
 | `psfzip.py`, `psfreport.py` | the psf.zip writer / reader (channels, mappings, field dependence, z-stack, preview) and its fit report. |
 | `__main__.py`, `viewer.py` | the command line, the viewer server. |
