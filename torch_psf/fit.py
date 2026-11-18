@@ -186,6 +186,7 @@ def readnoise_variance(readnoise_e, B, R, device):
     return r ** 2, False
 
 
+@torch.no_grad()
 def solve_linear(psf, data, mask, group, rn2, ngroups=2, iters=3, I_min=0.0):
     """Variable projection helper: closed-form (iteratively reweighted linear least squares) solution of the linear
     parameters of a track sample,
