@@ -19,6 +19,12 @@ class AutoResult:
         return (f'{self.band.summary()}\n  {self.band.message}\nmode: {self.mode.mode} '
                 f'(confidence {self.mode.confidence:.2f})\n  {self.mode.reason}\n  {self.mode.advice}')
 
+    def route(self, **kw):
+        """The PSF-estimation route for this movie (torch_psf.auto.route.plan_route; kw: pixel_um, wavelength_um,
+        NA, dz_um, meta)."""
+        from torch_psf.auto.route import plan_route
+        return plan_route(self, **kw)
+
     def to_dict(self):
         return dict(band=self.band.to_dict(), mode=self.mode.to_dict(),
                     spectrum_frames=[int(self.spectrum_frames[0]), int(self.spectrum_frames[-1]),

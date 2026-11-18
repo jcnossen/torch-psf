@@ -204,7 +204,42 @@ sharpness / anisotropy; lag correlation and spot persistence; the numbers and th
 5. All of it is FFTs, Gaussian blurs and reductions: straightforward WebGPU (the existing detect / camera kernels cover
    most); the fit is a 5-parameter least squares on ~150 rings (CPU in the worker is fine).
 
+## Scene and moving-sample modes, routing (branch auto-classes)
+
+Two modes for inputs that are not one of the standard microscopy acquisitions, decided before the rest of the tree:
+
+- `scene`: a camera filming the world (phone clips). Cues (`torch_psf.auto.motion.scene_statistics`): structure
+  everywhere (`flat_frac`, the featureless fraction of the field, < ~6 %: decisive, multiplies the rest), and the
+  geometric mean of: the power spectrum's log-log slope over 0.02 .. min(0.15, 0.35 f_c) cycles/px steeper than -1.6
+  (natural scenes ~ -2, real phone clips with motion blur / ISP denoising -3.3 .. -4.1), no dark background
+  (`dark_frac` low), no band edge below Nyquist.
+- `moving`: a microscope sample or stage that moves. `global_motion`: partially whitened phase correlation
+  (cross-power / |cross-power|^0.5, below 0.3 cycles/px) on frames downsampled to <= 256 px; a step t -> t+1 counts
+  when its peak is strong (z > 8 robust sd), unique (> 1.5 x the highest peak outside a few peak widths: sparse spots
+  give many equal peaks, one per pair of spots) and closes (shift(t, t+1) + shift(t+1, t+2) = shift(t, t+2)).
+  Mode when most steps are confident, most of them moved, and the path is > 3 PSF sigma.
+- Large frames: the motion and scene statistics use the whole frame (downsampled) / a central 512 px crop, the rest a
+  central crop of <= 1024 x 1024 px, and the band-pass runs in ~4 M px chunks (a 1920 x 1080 x 100 phone clip used to
+  ask for 13 GB).
+
+Synthetic (`synth.scene_movie`: dead-leaves scene, handheld shake and pans, zoom, autofocus hunting, gamma, sharpening,
+8 bit; `synth.moving_movie`: rod-shaped cells, fluorescent or dark on a bright field, stage panning, swimming,
+refocusing): all 5 new cases and the 11 earlier ones correct. Real data (cached frames of the 19 sets): all modes
+unchanged, scene and moving probabilities <= 0.15. Real phone clips (PSF grab, kept off qnano1) and real moving-sample
+microscopy are still to be checked; the thresholds of the two new modes are set on synthetic data only.
+
+`torch_psf.auto.route`: `plan_route(result)` / `AutoResult.route(...)` maps the mode to an estimator (smlm ->
+InSituEstimator, sofi -> SOFIEstimator (sofi-psf branch), zstack -> ZStackEstimator / DenseBeadEstimator /
+PhaseDiversityEstimator by spot isolation, static / moving / scene / no_signal -> none yet) with the inputs still
+missing (pixel size, wavelength, NA, focus step) and the analysis' own hints (effective NA, motion). `make_estimator`
+builds it. `torch_psf.auto.psfgrab.read_psfgrab` reads PSF grab zips (luminance or raw RGB, meta.json).
+
 ## Open points / next steps
+
+- Moving route: register the frames on the measured shifts (plus zoom / rotation: not estimated yet), then the band
+  limit and phase diversity with fitted focus steps.
+- Bright field is partially coherent: the cutoff is (NA_obj + NA_cond) / lambda, so the spectrum alone does not give
+  the objective NA.
 
 - A PSF-aware edge model (defocus spread, or the averaged |OTF(z)|^2 of a fitted pupil) instead of OTF0^2 x exp(poly),
   to remove the 3D-PSF bias; or flag 3D PSFs from spot size vs the diffraction width.

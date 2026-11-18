@@ -9,6 +9,12 @@ Modes:
   static     a static or slowly varying scene: only the band limit (NA / lambda) from the spectrum is safe, plus a
              blind estimate with its ambiguities
   no_signal  no band-limited signal: dark frames, flat illumination, not a fluorescence image, far too few photons
+  scene      not a microscope image: a camera filming the world (natural-scene statistics: power spectrum ~ f^-2,
+             structure everywhere, no dark background, no band edge below Nyquist); only the camera's own
+             resolution (MTF) can be measured, not an NA
+  moving     a microscope sample or stage that moves (panning, swimming cells): consistent global shifts between
+             frames; register the frames first, then the band limit, and a blind / phase-diversity estimate if the
+             focus also changes
 
 Statistics (movie_statistics; all on a band-passed copy B of the frames, a difference of Gaussians matched to the PSF
 size implied by the cutoff f_c, so that slow background and white noise are both suppressed):
@@ -32,6 +38,12 @@ size implied by the cutoff f_c, so that slow background and white noise are both
   aniso_frame_rms   robust (median-based) rms frame-to-frame spread of the complex in-band anisotropy (SMLM: astigmatic emitters at
                     different z make single frames anisotropic even when the average cancels; also raised by few,
                     interfering emitters per frame, so only comparable at similar densities)
+  motion_*          global frame-to-frame translation (torch_psf.auto.motion.global_motion / motion_summary):
+                    motion_conf (fraction of steps with a strong, unique, self-consistent correlation peak),
+                    motion_step_px, motion_moving (fraction of those that moved), motion_path_px
+  spectral_slope, dark_frac, flat_frac   natural-scene cues (torch_psf.auto.motion.scene_statistics)
+Large frames: the motion and scene statistics use the whole frame (downsampled) and a central 512 px crop; all the
+others a central crop of at most max_side x max_side px (memory; the statistics are per area or per pixel).
 classify_movie turns them into the mode, a confidence (the winning class probability from soft rules), the key
 numbers and a plain-language reason.
 """
@@ -44,6 +56,7 @@ import torch.nn.functional as Fn
 from torch_psf.optics import resolve_device
 from torch_psf.detect import blur
 from torch_psf.auto.spectrum import hann2d, power_spectrum, fit_band_limit, _jsonable
+from torch_psf.auto.motion import global_motion, motion_summary, scene_statistics
 
 
 def _soft(x, thr, width=0.35):
@@ -94,7 +107,7 @@ def _running_mean(s, w):
 
 @torch.no_grad()
 def movie_statistics(frames, band=None, spectrum=None, device=None, max_spot_frames=300, lags=(1, 2, 5, 10, 20, 50),
-                     threshold=5.0):
+                     threshold=5.0, max_side=1024):
     """Statistics of a contiguous block of frames [T, H, W] (numpy or torch; ADU or photons). band: a BandLimit of
     these (or similar) frames (computed when None). Returns a dict (see the module docstring)."""
     dev = resolve_device(device)
@@ -114,8 +127,17 @@ def movie_statistics(frames, band=None, spectrum=None, device=None, max_spot_fra
 
     # band-pass matched to the PSF size: Gaussian sigma of an Airy core ~ 0.42 / f_c px
     sp = float(np.clip(0.42 / fc, 0.7, 4.0))
+    st['psf_sigma_px'] = sp
+    st.update(motion_summary(global_motion(x, fc=fc), psf_sigma_px=sp))
+    st.update(scene_statistics(x, floor=floor, fc=band.fc_px))
+    if H > max_side or W > max_side:                                        # central crop for the rest
+        y0, x0 = max(0, (H - max_side) // 2), max(0, (W - max_side) // 2)
+        x = x[:, y0:y0 + max_side, x0:x0 + max_side]
+        T, H, W = x.shape
+        st['crop'] = [y0, x0, H, W]
     s1, s2 = sp, 3.0 * sp
-    B = torch.cat([blur(x[i:i + 128], s1) - blur(x[i:i + 128], s2) for i in range(0, T, 128)])
+    ck = max(1, min(128, int(4e6 // (H * W))))                       # ~4 M px per chunk: conv2d memory ~ px x taps
+    B = torch.cat([blur(x[i:i + ck], s1) - blur(x[i:i + ck], s2) for i in range(0, T, ck)])
     m = int(math.ceil(3 * s2))
     if H > 2 * m + 8 and W > 2 * m + 8:
         B = B[:, m:H - m, m:W - m]
@@ -126,7 +148,6 @@ def movie_statistics(frames, band=None, spectrum=None, device=None, max_spot_fra
     Hf = torch.exp(-2 * math.pi ** 2 * s1 ** 2 * F2) - torch.exp(-2 * math.pi ** 2 * s2 ** 2 * F2)
     nv = floor * float((Hf ** 2).mean())
     st['noise_var'] = nv
-    st['psf_sigma_px'] = sp
 
     mB = B.mean(0)
     dB = B - mB
@@ -153,7 +174,7 @@ def movie_statistics(frames, band=None, spectrum=None, device=None, max_spot_fra
     st['skewness'] = float(torch.median(k3[act] / k2[act] ** 1.5)) if act.sum() > 20 else float('nan')
 
     # spots in up to max_spot_frames frames (contiguous)
-    Ts = min(T, max_spot_frames)
+    Ts = min(T, max_spot_frames, max(20, int(30e6 // (Hb * Wb))))          # max-pool indices etc.: ~30 M px at a time
     Bs = B[:Ts]
     thr = threshold * math.sqrt(max(nv, 1e-30))
     k = 2 * int(round(1.5 * sp)) + 1
@@ -250,6 +271,11 @@ ADVICE = dict(
            'DenseBeadEstimator, or phase diversity for an extended object).',
     static='static scene: only the band limit (NA / lambda) is reliable; a blind PSF estimate is ambiguous (object '
            'and PSF trade off; aberrations of even and odd symmetry are not separable without diversity).',
+    scene='not a microscope image (a camera filming the world): there is no NA to estimate; the camera\'s own '
+          'resolution (MTF / blur kernel) can be estimated from edges, or point the camera at a microscope.',
+    moving='moving sample or stage: register the frames (global shifts are known from the motion statistics), then '
+           'estimate the band limit on the registered frames; if the focus also changes, use phase diversity on the '
+           'registered stack.',
     no_signal='no usable signal: check that the movie holds fluorescence images (not dark / flat frames) and enough '
               'photons.')
 
@@ -297,22 +323,60 @@ def classify_movie(stats):
     r1 = rho.get(1, float('nan'))
     slow_ratio = rho_far / r1 if np.isfinite(rho_far) and np.isfinite(r1) and r1 > 0.05 else 0.0
     p_slow = _soft(max(slow_ratio, 1e-3), 0.5, 0.3) * _soft(0.3 / max(kurt, 0.01) if np.isfinite(kurt) else 1.0, 1.0, 0.5)
+    # natural scene (not a microscope): scale-invariant spectrum, structure everywhere, no dark background, no band
+    # edge below Nyquist (geometric mean of the cues, so one borderline cue does not veto)
+    fcp = g('fc_px', 0.5)
+    edge_free = 1.0 if s.get('band_status') == 'undersampled' else _soft(max(fcp, 1e-3) if np.isfinite(fcp) else
+                                                                          0.5, 0.45, 0.1)
+    slope = -g('spectral_slope', 0)
+    slope = slope if np.isfinite(slope) else 0.0
+    # featureless background is the decisive cue (phone clips of rooms: <= 1 % of the field; microscopy: >= 12 % in
+    # the 19 real sets, the empty space between cells / spots); the others are combined by a geometric mean.
+    # The slope has no upper limit: real phone clips (motion blur, ISP denoising) measure -3.3 .. -4.1.
+    p_flat = _soft(0.06 / max(g('flat_frac', 1), 1e-4), 1.0, 0.3)
+    p_scene = p_flat * (_soft(max(slope, 1e-3), 1.6, 0.12) * _soft(0.25 / max(g('dark_frac', 1), 1e-4), 1.0, 0.4) *
+                        edge_free) ** (1 / 3)
+    # global motion of a microscope sample / stage: most steps confident, most of them moving, a path of several
+    # PSF widths
+    mc, mm = g('motion_conf', 0), g('motion_moving', 0)
+    p_mot = _soft(max(mc, 1e-3), 0.5, 0.25) * _soft(max(mm if np.isfinite(mm) else 0, 1e-3), 0.5, 0.25) * \
+        _soft(max(g('motion_path_px', 0), 1e-3) / (3 * g('psf_sigma_px', 1.0)), 1.0, 0.4)
+    rest = p_sig * (1 - p_scene) * (1 - p_mot)
     P = dict(no_signal=1 - p_sig,
-             zstack=p_sig * p_z,
-             smlm=p_sig * (1 - p_z) * p_dyn * p_sparse,
-             sofi=p_sig * (1 - p_z) * p_dyn * (1 - p_sparse) * (1 - p_slow),
-             static=p_sig * (1 - p_z) * ((1 - p_dyn) + p_dyn * (1 - p_sparse) * p_slow))
+             scene=p_sig * p_scene,
+             moving=p_sig * (1 - p_scene) * p_mot,
+             zstack=rest * p_z,
+             smlm=rest * (1 - p_z) * p_dyn * p_sparse,
+             sofi=rest * (1 - p_z) * p_dyn * (1 - p_sparse) * (1 - p_slow),
+             static=rest * (1 - p_z) * ((1 - p_dyn) + p_dyn * (1 - p_sparse) * p_slow))
     mode = max(P, key=P.get)
     key = dict(band_snr=g('band_snr'), fc_px=g('fc_px'), dyn_snr=g('dyn_snr'), static_snr=g('static_snr'),
                dyn_fraction=g('dyn_fraction'), rho_1=rho.get(1), rho_far=rho_far, kurtosis=kurt,
                spots_per_psf=g('spots_per_psf'), isolated=g('isolated'), persist_1=pers.get(1), persist_long=p_long,
                persist_wide_long=pw_long,
                trend_r2=g('trend_r2'), trend_range=g('trend_range'), peak_pos=g('peak_pos'),
-               astig_swing=g('astig_swing'), aniso_frame_rms=g('aniso_frame_rms'), slow_ratio=slow_ratio)
+               astig_swing=g('astig_swing'), aniso_frame_rms=g('aniso_frame_rms'), slow_ratio=slow_ratio,
+               motion_conf=mc, motion_moving=mm, motion_step_px=g('motion_step_px'),
+               motion_path_px=g('motion_path_px'), spectral_slope=g('spectral_slope'), dark_frac=g('dark_frac'),
+               flat_frac=g('flat_frac'))
     f = lambda v, n=2: 'n/a' if v is None or not np.isfinite(v) else f'{v:.{n}g}'
     if mode == 'no_signal':
         reason = (f'No band-limited signal: in-band power is {f(g("band_snr"))} x the noise floor, fluctuations '
                   f'{f(g("dyn_snr"))} x and static structure {f(g("static_snr"))} x the noise in the PSF band.')
+    elif mode == 'scene':
+        reason = (f'Not a microscope image: the power spectrum falls like a natural scene (slope '
+                  f'{f(g("spectral_slope"))} in log-log, a photograph of the world is ~ -2; fluorescence is flatter), '
+                  f'structure everywhere ({f(100 * g("flat_frac", 0), 2)} % of the field featureless, '
+                  f'{f(100 * g("dark_frac", 0), 2)} % dark background) and no band edge below Nyquist '
+                  f'(band: {s.get("band_status")}).')
+        if np.isfinite(mm) and mc > 0.3:
+            reason += (f' The camera moves (median step {f(g("motion_step_px"))} px, path '
+                       f'{f(g("motion_path_px"), 3)} px).')
+    elif mode == 'moving':
+        reason = (f'The field moves as a whole between frames: {f(100 * mc, 3)} % of the frame steps have a strong, '
+                  f'unique and self-consistent correlation peak, {f(100 * mm, 3)} % of those moved (median step '
+                  f'{f(g("motion_step_px"))} px, path {f(g("motion_path_px"), 3)} px): stage panning or drift of a '
+                  f'microscope sample.')
     elif mode == 'zstack':
         reason = (f'The sharpness changes systematically over the frames (a smooth trend explains '
                   f'{f(100 * g("trend_r2"), 3)} % of its variation, range {f(100 * g("trend_range"), 3)} %, '

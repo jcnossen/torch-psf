@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from torch_psf.auto import (synthetic_movie, power_spectrum, fit_band_limit, otf_circ, movie_statistics,
-                            classify_movie, analyze_movie, pupil_otf)
+                            classify_movie, analyze_movie, pupil_otf, scene_movie, moving_movie, global_motion,
+                            motion_summary, plan_route, make_estimator, read_psfgrab)
 
 
 def test_otf_circ():
@@ -64,3 +65,78 @@ def test_zstack_astigmatism_visible():
     s = movie_statistics(a, device='cpu')
     assert classify_movie(s).mode == 'zstack'
     assert s['astig_swing'] > 0.35
+
+
+@pytest.mark.parametrize('expected,make', [
+    ('scene', lambda: scene_movie(T=30, N=256, seed=1)),                       # handheld, large shifts
+    ('scene', lambda: scene_movie(T=30, N=256, step_px=(0.0, 0.3), zoom=0.0, seed=3)),   # still, autofocus hunting
+    ('scene', lambda: scene_movie(T=20, N=256, blur=(1.5, 3.0), seed=6)),       # blurry: slope ~ -3 .. -4 like real clips
+    ('moving', lambda: moving_movie(T=40, seed=1)),                            # fluorescent cells, stage panning
+    ('moving', lambda: moving_movie(T=40, brightfield=True, photons=3000, seed=2)),
+    ('static', lambda: moving_movie(T=40, brightfield=True, photons=3000, pan_px=0, swim_px=0.0,
+                                    focus_range=(0.3, 0.3), seed=3)),
+])
+def test_classifier_scene_and_moving(expected, make):
+    mov, _ = make()
+    r = analyze_movie(mov, n_boot=0, device='cpu')
+    assert r.mode.mode == expected, (r.mode.probs, r.mode.reason)
+    assert r.mode.confidence > 0.5
+
+
+def test_global_motion_shift_and_sparse_spots():
+    import torch
+    mov, info = scene_movie(T=12, N=128, step_px=(4.0, 8.0), zoom=0.0, blur=(0.6, 0.6), seed=4)
+    g = global_motion(torch.from_numpy(mov))
+    p = np.asarray(info['path'])
+    steps = g['pairs'][:, 1] == g['pairs'][:, 0] + 1
+    # camera moved by +d -> the image content moves by -d
+    np.testing.assert_allclose(g['shift'][steps], -np.diff(p, axis=0)[g['pairs'][steps, 0]], atol=0.6)
+    ms = motion_summary(g)
+    assert ms['motion_conf'] > 0.8 and ms['motion_moving'] == 1.0
+    # sparse blinking spots: no consistent global motion
+    mov, _ = synthetic_movie('smlm', T=80, N=96, density=0.02, duty=0.01, seed=2)
+    ms = motion_summary(global_motion(torch.from_numpy(mov)))
+    assert not (ms['motion_conf'] > 0.5 and ms['motion_moving'] > 0.5), ms
+
+
+def test_routes():
+    mov, _ = synthetic_movie('smlm', T=150, N=96, density=0.02, duty=0.01, seed=2)
+    r = analyze_movie(mov, pixel_um=0.1, wavelength_um=0.6, n_boot=0, device='cpu')
+    rt = r.route(pixel_um=0.1, wavelength_um=0.6)
+    assert rt.estimator == 'InSituEstimator' and rt.needs == ['NA'] and 'NA_eff' in rt.hints
+    assert 'InSituEstimator' in rt.summary()
+    mov, _ = synthetic_movie('zstack', T=61, N=96, density=0.002, photons=20000, seed=2)
+    rt = analyze_movie(mov, n_boot=0, device='cpu').route()
+    assert rt.estimator in ('ZStackEstimator', 'DenseBeadEstimator') and 'dz_um' in rt.needs
+    mov, _ = scene_movie(T=20, N=192, seed=5)
+    rt = analyze_movie(mov, n_boot=0, device='cpu').route()
+    assert rt.mode == 'scene' and rt.estimator is None
+    with pytest.raises(ValueError):
+        make_estimator(rt)
+
+
+def test_read_psfgrab(tmp_path):
+    import json, zipfile, tifffile, io
+    rng = np.random.default_rng(0)
+    a = rng.integers(0, 255, (3, 3, 20, 24), dtype=np.uint8)
+    buf = io.BytesIO(); tifffile.imwrite(buf, a, imagej=True, metadata={'axes': 'TCYX'})
+    meta = dict(format='psfgrab/1', frames=[dict(t_ms=72 * i, settings={}) for i in range(3)])
+    p = tmp_path / 'rec.zip'
+    with zipfile.ZipFile(p, 'w') as z:
+        z.writestr('frames.tif', buf.getvalue()); z.writestr('meta.json', json.dumps(meta))
+    f, m = read_psfgrab(p)
+    assert f.shape == (3, 20, 24) and f.dtype == np.float32 and m['format'] == 'psfgrab/1'
+    np.testing.assert_allclose(f[1], 0.2126 * a[1, 0] + 0.7152 * a[1, 1] + 0.0722 * a[1, 2], rtol=1e-5)
+    raw, _ = read_psfgrab(p, gray=False)
+    assert raw.shape == a.shape and raw.dtype == np.uint8
+
+
+def test_large_frames_memory():
+    """Full-HD phone frames: the classifier crops / chunks instead of allocating ~T x H x W x kernel taps."""
+    import resource
+    mov = np.random.default_rng(0).normal(100, 5, (24, 1920, 1080)).astype(np.float32)
+    r0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    st = movie_statistics(mov, device='cpu')
+    grow_gb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - r0) / 1e6
+    assert st['crop'][2:] == [1024, 1024]
+    assert grow_gb < 3.0, grow_gb
