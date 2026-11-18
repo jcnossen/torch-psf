@@ -47,3 +47,28 @@ def test_camera_maps_reference_readnoise_shift():
     assert np.allclose(cam.readnoise_e[:h - dy, :w - dx], ref.readnoise_e[dy:, dx:])
     cam2, _ = maps_from_movie(*crop(dy, dx), 0.5, 100.0, readnoise_ref=R, readnoise_shift=(dy, dx))
     assert np.array_equal(cam2.readnoise_e, cam.readnoise_e)
+
+
+def test_white_photon_transfer_gain_with_fixed_pattern_and_sample_fluctuations():
+    """gain from the white noise: a background that fluctuates smoothly in time and space (sample) and an offset fixed
+    pattern do not bias it; photon_transfer-style binning by absolute level would"""
+    from torch_psf.camera import white_photon_transfer
+    rng = np.random.default_rng(3)
+    T, H, W, gain, off = 600, 64, 64, 0.45, 100.0
+    yy, xx = np.mgrid[:H, :W]
+    fpn = rng.normal(0, 2.0, (H, W))
+    rn = np.where(rng.random((H, W)) < 0.05, 3.5, 1.2)
+    base = 6 + 6 * (xx / W)                                             # level span across the field
+    from scipy import ndimage as ndi
+    e = np.empty((T, H, W))
+    for t in range(T):
+        fl = ndi.gaussian_filter(rng.normal(0, 1, (H, W)), 3) * 8         # band-limited sample fluctuation (photons)
+        e[t] = rng.poisson(np.clip(base * (1 + 0.1 * np.sin(t / 7)) + fl, 0, None))
+    e += rng.normal(0, 1, e.shape) * rn
+    mov = (e / gain + off + fpn).astype(np.float32)
+    cam, rep = white_photon_transfer(mov, nblocks=2, block=300, lag=1, offset_adu=off, device='cpu')
+    assert abs(cam.gain_e_per_adu / gain - 1) < 0.08, rep['gain_e_per_adu']             # statistics of 2 x 300 frames: ~4 %
+    assert abs(cam.readnoise_e - np.sqrt(np.mean(rn ** 2))) < 0.6, cam.readnoise_e
+    cam2, rep2 = white_photon_transfer(mov, nblocks=2, block=300, lag=1, readnoise_e=float(np.sqrt(np.mean(rn ** 2))), device='cpu')
+    assert abs(cam2.offset_adu - off) < 3.0, cam2.offset_adu                         # = slope error x (level - offset)
+    assert rep['fpn_sd_adu'] > 1.5 and len(rep['bins']) > 10

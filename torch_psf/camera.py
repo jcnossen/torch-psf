@@ -1,5 +1,6 @@
 """The camera of an acquisition (Camera: ADU -> photons, read-noise variance) and its calibration from the SMLM movie
-itself (photon_transfer: offset and gain from background pixels; maps_from_movie: per-pixel offset and read-noise maps of
+itself (photon_transfer: offset and gain from background pixels; white_photon_transfer: the gain from the white,
+beyond-OTF part of the background noise; maps_from_movie: per-pixel offset and read-noise maps of
 an sCMOS from a sparse movie, no dark frames).
 
 A pipeline configuration with a `camera` block of the same field names maps 1:1 onto Camera:
@@ -329,4 +330,114 @@ def maps_from_movie(movie, spots, gain_e_per_adu, offset_adu, nframes=20000, lag
     cam = Camera(gain_e_per_adu=gain, offset_adu=(off0 + offset_dev).astype(np.float32), readnoise_e=rn_e.astype(np.float32))
     cam.scalars = dict(offset_adu=off0, gain_e_per_adu=gain)
     cam.map_extra = dict(low5=low, var_adu=var_adu, readnoise_shift=np.array(shift), readnoise_covered=cov)
+    return cam, rep
+
+
+def _occupied(x, threshold, R):
+    """pixel-frames within R px of a detection in this, the previous or the next frame (x [T, H, W]; the detection runs
+    on x minus its median: the zero-padded band-pass of detect_spots turns a large offset into edge responses that
+    inflate its noise estimate)"""
+    p = detect_spots(x - x.median(), threshold=threshold)
+    occ = torch.zeros_like(x)
+    occ[p['frame'], p['y'], p['x']] = 1
+    occ = Fn.max_pool2d(occ[:, None], 2 * R + 1, 1, R)[:, 0] > 0
+    T, H, W = x.shape
+    occ = Fn.max_pool1d(occ.permute(1, 2, 0).reshape(-1, 1, T).float(), 3, 1, 1)
+    return occ.reshape(H, W, T).permute(2, 0, 1) > 0
+
+
+@torch.no_grad()
+def white_photon_transfer(movie, frames=None, nblocks=25, block=600, lag=1, patch=16, step=8, f_cut=0.5, threshold=4.0,
+                          mask_radius=4, fpn_frames=2000, offset_adu=None, readnoise_e=None, excess_noise=1.0, nbins=20,
+                          device=None, type=None):
+    """Gain (and offset or read noise) of the camera from the spatially white part of the background noise of a movie
+    (ADU).
+
+    Shot noise and read noise are independent per pixel (white); intensity fluctuations of the sample (sub-threshold
+    blinks, diffusing fluorophores, haze, a patterned illumination) are imaged through the PSF and so band-limited by
+    the OTF cutoff 2 NA / lambda (in cycles / px: 2 NA pixel / lambda, e.g. 0.46 for NA 1.49, 0.70 um, 108 nm px).
+    Per patch x patch window (every `step` px) of the differences of frames `lag` apart (lag = the period of a
+    patterned illumination cancels static and periodic structure) without a detection (detect_spots at `threshold`,
+    mask_radius px, frames t - 1 .. t + 1) in either frame: the mean power of the Hann-windowed patch above f_cut
+    cycles / px (set f_cut above the OTF cutoff) = the per-pixel noise variance, against the patch mean level. The
+    level is taken after removing the per-pixel offset fixed pattern (masked temporal median of the first fpn_frames
+    frames minus its median-9 / Gaussian-2 smoothed version; fpn_frames=0: none), which would otherwise dilute the slope. A line
+    var = k level + c through nbins quantile bins gives the gain g = excess_noise / k (e- / ADU). nblocks blocks of
+    `block` frames spread over `frames` (f0, f1; default the whole movie); the spread of the per-block slopes is
+    reported.
+
+    Offset and read noise are not separately identifiable without dark frames: from the mean level L and variance V
+    of the patches, V = k (L - offset) + (readnoise / g)^2. offset_adu given: the read noise follows; readnoise_e given:
+    the offset follows; neither: the read noise is taken as 0 (as photon_transfer). Returns (Camera, report dict:
+    slope_adu, gain_e_per_adu, offset_adu, readnoise_e, level_mean_adu, var_mean_adu2, level_span_adu, r2, bins
+    [[level, var, n]], per_block slopes, slope_spread, fpn_sd_adu)."""
+    from scipy import ndimage as ndi
+    mv = open_movie(movie)
+    dev = resolve_device(device)
+    f0, f1 = (0, mv.n) if frames is None else (int(frames[0]), int(min(frames[1], mv.n)))
+    block = min(block, f1 - f0)
+    P = int(patch)
+    f = torch.fft.fftfreq(P, device=dev)
+    hi = (f[:, None] ** 2 + f[None, :] ** 2).sqrt() > f_cut
+    w = torch.hann_window(P, periodic=False, device=dev)
+    W2 = w[:, None] * w[None, :]
+    norm = (W2 ** 2).sum()
+    # offset fixed pattern
+    if fpn_frames:
+        x = torch.as_tensor(mv.read(f0, min(f0 + fpn_frames, f1)), device=dev).float()
+        occ = _occupied(x, threshold, int(mask_radius))
+        med = torch.nanmedian(torch.where(occ, torch.full_like(x, float('nan')), x), 0).values.cpu().numpy()
+        med = np.where(np.isfinite(med), med, x.median(0).values.cpu().numpy())
+        fpn = torch.as_tensor(med - ndi.gaussian_filter(ndi.median_filter(med, size=9), 2), device=dev).float()
+    else:
+        fpn = torch.zeros(mv.shape[-2:], device=dev)
+    lev, var, blk = [], [], []
+    for i, b0 in enumerate(np.linspace(f0, f1 - block, nblocks).astype(int) if nblocks > 1 else [f0]):
+        x = torch.as_tensor(mv.read(int(b0), int(b0) + block), device=dev).float()
+        occ = _occupied(x, threshold, int(mask_radius))
+        T, H, W = x.shape
+        for y0 in range(0, H - P + 1, step):
+            for x0 in range(0, W - P + 1, step):
+                o = occ[:, y0:y0 + P, x0:x0 + P].flatten(1).any(1)
+                t = torch.nonzero(~o[:-lag] & ~o[lag:])[:, 0]
+                if len(t) == 0:
+                    continue
+                a, b = x[t, y0:y0 + P, x0:x0 + P], x[t + lag, y0:y0 + P, x0:x0 + P]
+                d = b - a
+                d = d - d.mean((1, 2), keepdim=True)
+                pw = torch.fft.fft2(d * W2).abs() ** 2 / norm / 2
+                var.append(pw[:, hi].mean(1))
+                lev.append((0.5 * (a + b)).mean((1, 2)) - fpn[y0:y0 + P, x0:x0 + P].mean())
+                blk.append(torch.full((len(t),), i, device=dev))
+    if not lev:
+        raise ValueError('white_photon_transfer: no background patches')
+    lev, var, blk = (torch.cat(v).cpu().numpy() for v in (lev, var, blk))
+
+    def line(L, V):
+        q = np.quantile(L, np.linspace(0.02, 0.98, nbins + 1))
+        rows = [[float(L[s].mean()), float(V[s].mean()), int(s.sum())] for s in ((L >= q[j]) & (L < q[j + 1]) for j in range(nbins)) if s.sum()]
+        A = np.array(rows)
+        k, c = np.polyfit(A[:, 0], A[:, 1], 1)
+        pred = k * A[:, 0] + c
+        r2 = 1 - ((A[:, 1] - pred) ** 2).sum() / max(((A[:, 1] - A[:, 1].mean()) ** 2).sum(), 1e-12)
+        return float(k), float(c), float(r2), rows
+
+    k, c, r2, rows = line(lev, var)
+    per = [line(lev[blk == i], var[blk == i])[0] for i in np.unique(blk) if (blk == i).sum() >= 20 * nbins]
+    g = float(excess_noise) / k
+    Lm, Vm = float(lev.mean()), float(var.mean())
+    if offset_adu is not None:
+        off = float(offset_adu)
+        rn = float(np.sqrt(max(Vm - k * (Lm - off), 0.0))) * g
+    elif readnoise_e is not None:
+        rn = float(readnoise_e)
+        off = Lm - (Vm - (rn / g) ** 2) / k
+    else:
+        rn, off = 0.0, Lm - Vm / k
+    cam = Camera(gain_e_per_adu=g, offset_adu=off, readnoise_e=rn, excess_noise=float(excess_noise),
+                 type=type or ('emccd' if excess_noise > 1 else 'scmos'))
+    rep = dict(slope_adu=k, intercept_adu2=c, gain_e_per_adu=g, offset_adu=off, readnoise_e=rn, level_mean_adu=Lm,
+               var_mean_adu2=Vm, level_span_adu=float(rows[-1][0] - rows[0][0]), r2=r2, bins=rows, per_block=per,
+               slope_spread=float(np.std(per) / k) if len(per) > 1 else 0.0, fpn_sd_adu=float(fpn.std()),
+               n_patches=int(len(lev)), lag=int(lag), f_cut=float(f_cut), excess_noise=float(excess_noise))
     return cam, rep
