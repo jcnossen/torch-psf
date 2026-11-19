@@ -19,7 +19,7 @@ A = np.array([[np.cos(np.deg2rad(1.5)) * 1.004, -np.sin(np.deg2rad(1.5)), 3.2],
               [np.sin(np.deg2rad(1.5)), np.cos(np.deg2rad(1.5)) * 0.998, -2.7]])
 
 
-def setup(dev, npupil=32, nk=21, sizes=((1, 1, 1, 2, 2, 1, 1, 2, 1, 1), (1, 1, 2, 1, 1, 1, 2, 1)), photons=20000.0):
+def make_setup(dev, npupil=32, nk=21, sizes=((1, 1, 1, 2, 2, 1, 1, 2, 1, 1), (1, 1, 2, 1, 1, 1, 2, 1)), photons=20000.0):
     maps = [ChannelMap.identity_map(0, NORM), ChannelMap.from_affine(A, norm=NORM)]
 
     def vec(z):
@@ -41,7 +41,7 @@ def setup(dev, npupil=32, nk=21, sizes=((1, 1, 1, 2, 2, 1, 1, 2, 1, 1), (1, 1, 2
 
 
 def test_data_registration_and_masks():
-    maps, vecs, fields, focus, stacks = setup('cpu', npupil=16, nk=5)
+    maps, vecs, fields, focus, stacks = make_setup('cpu', npupil=16, nk=5)
     dets = detect_channels(stacks)
     reg, info = register_channels(dets, [(H, W)] * 2)
     assert info[1]['flip'] == 'none' and info[1]['n_pairs'] >= 20
@@ -76,7 +76,7 @@ def test_data_registration_and_masks():
 @needs_gpu
 def test_joint_fit_recovers_mapping_aberrations_fields():
     dev = 'cuda'
-    maps, vecs, fields, focus, stacks = setup(dev)
+    maps, vecs, fields, focus, stacks = make_setup(dev)
     dets = detect_channels(stacks)
     reg, _ = register_channels(dets, [(H, W)] * 2)
     data = build_multichannel_beads(stacks, reg, 17, dets=dets, render_pad=5)
@@ -112,7 +112,7 @@ def test_estimator_two_channels_zip(tmp_path):
     import warnings
     from torch_psf.psfzip import PSFZip
     dev = 'cuda'
-    maps, vecs, fields, focus, stacks = setup(dev, nk=11)
+    maps, vecs, fields, focus, stacks = make_setup(dev, nk=11)
     frames = [torch.cat([stacks[0][s], stacks[1][s]], 2).cpu().numpy() for s in range(2)]
     est = MultiChannelBeadEstimator(regions=[(0, 0, W, H), (W, 0, 2 * W, H)], names=['a', 'b'],
                                     optics=dict(pixel_um=0.1, NA=1.4, wavelength_um=0.67), zernike_indices=ZID,
