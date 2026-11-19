@@ -186,16 +186,19 @@ def readnoise_variance(readnoise_e, B, R, device):
     return r ** 2, False
 
 
-@torch.no_grad()
-def solve_linear(psf, data, mask, group, rn2, ngroups=2, iters=3, I_min=0.0):
+def solve_linear_grad(psf, data, mask, group, rn2, ngroups=2, iters=3, I_min=0.0):
     """Variable projection helper: closed-form (iteratively reweighted linear least squares) solution of the linear
     parameters of a track sample,
         mu[b, t, :] = I[b, t] psf[b, :] + bg[b, group[b, t]],
     per-frame intensities and a background shared per group (e.g. per illumination-pattern angle). The weights are
-    1 / (mu + rn2) (Poisson + read noise). Nonlinear parameters then get gradients with I / bg held fixed.
+    1 / (mu + rn2) (Poisson + read noise).
 
     psf [B, P] (or [B, T, P]: per-frame PSF), data [B, T, P], mask [B, T] bool, group [B, T] long in [0, ngroups),
-    rn2: read-noise variance (e^2). Returns I [B, T], bg [B, ngroups]."""
+    rn2: read-noise variance (e^2). Returns I [B, T], bg [B, ngroups].
+
+    Differentiable (solve_linear is the same without gradient). The solution is the Poisson-weighted IRLS estimate, not
+    the minimiser of the Gaussian NLL that fit_tracks / heldout_tracks evaluate, so the envelope theorem does not hold:
+    the gradient of the profiled NLL must go through this solve (holding I / bg fixed biases the PSF fit)."""
     B, T, P = data.shape
     pf = psf[:, None, :] if psf.dim() == 2 else psf                  # [B, 1|T, P]
     n = T + ngroups
@@ -221,3 +224,7 @@ def solve_linear(psf, data, mask, group, rn2, ngroups=2, iters=3, I_min=0.0):
         mu = I[..., None] * pf + (G * bg[:, None, :]).sum(-1, keepdim=True)
         w = m[..., None] / (mu.clamp(min=1e-3) + rn2)
     return I, bg
+
+
+solve_linear = torch.no_grad()(solve_linear_grad)
+solve_linear.__doc__ = """solve_linear_grad without gradient (I / bg as constants)."""

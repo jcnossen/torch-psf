@@ -206,3 +206,36 @@ def test_fit_tracks_cov_blur():
     b = rc['psf'].blur.detach().cpu()
     assert abs(float(b[0]) - 0.2) < 0.06 and abs(float(b[1]) - 0.2) < 0.06 and abs(float(b[2])) < 0.04, b
     assert rc['report']['nll_per_px'] < rl['report']['nll_per_px']
+
+
+def test_vp_gradient_through_solve():
+    """The track fits differentiate through the closed-form I / bg (solve_linear_grad): the autograd gradient of the
+    profiled NLL matches finite differences, while holding I / bg fixed does not (solve_linear is the Poisson-weighted
+    IRLS estimate, not the minimiser of the evaluated Gaussian NLL)"""
+    from torch_psf.fit import solve_linear_grad
+    import math
+    R, B, T = 11, 6, 4
+    vec = VectorialPSF(R, npupil=32, oversample=2, device='cpu').set_zernike({6: 0.04})
+    g = torch.Generator().manual_seed(5)
+    pos0 = torch.cat([torch.rand(B, 2, generator=g) - 0.5, torch.full((B, 1), 0.05)], 1)
+    with torch.no_grad():
+        img = vec(pos0, 0.0)
+    data = torch.poisson(800 * img[:, None].expand(-1, T, -1, -1) + 4, generator=g) + torch.randn(B, T, R, R, generator=g) * 2
+    mask, grp, rn2 = torch.ones(B, T, dtype=torch.bool), torch.zeros(B, T, dtype=torch.long), torch.tensor(4.0)
+
+    def profiled(focus, detach=False):
+        psf = vec(pos0 + torch.tensor([0.1, -0.1, 0.0]), focus)
+        p = psf.reshape(B, -1)
+        I, bg = solve_linear_grad(p.detach() if detach else p, data.reshape(B, T, -1), mask, grp, rn2, 1)
+        mu = (I[..., None, None] * psf[:, None] + bg[:, :1, None, None]).clamp(min=1e-3)
+        v = mu + rn2
+        return (0.5 * (data - mu) ** 2 / v + 0.5 * torch.log(2 * math.pi * v)).sum()
+
+    f = torch.tensor(0.05, requires_grad=True)
+    gt = torch.autograd.grad(profiled(f), f)[0]
+    gd = torch.autograd.grad(profiled(f, detach=True), f)[0]
+    h = 2e-3
+    with torch.no_grad():
+        fd = (profiled(torch.tensor(0.05 + h)) - profiled(torch.tensor(0.05 - h))) / (2 * h)
+    assert abs(float(gt - fd)) < 0.02 * abs(float(fd)) + 1e-3, (float(gt), float(fd))
+    assert abs(float(gd - fd)) > 3 * abs(float(gt - fd)), (float(gd), float(gt), float(fd))

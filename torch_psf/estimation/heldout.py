@@ -6,7 +6,7 @@ per-sample NLL difference of two PSFs on the same samples."""
 import math
 import numpy as np
 import torch
-from torch_psf.fit import localize, at_limit, solve_linear, readnoise_variance
+from torch_psf.fit import localize, at_limit, solve_linear_grad, readnoise_variance
 
 
 def split_checkerboard(x, y, tile=16):
@@ -94,7 +94,7 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
                    z_starts_um=(0.02, 0.08, 0.15), iters=300, lr=0.03, batch=3000):
     """Held-out NLL of a frozen PSF on track samples (the model of estimation.fit_tracks): per sample x, y and z
     (through a sigmoid on [0, zmax_um]) are refitted by Adam (lr, iters) from every start z in z_starts_um, with the
-    per-frame intensities I [B, T] and the per-(sample, group) backgrounds solved in closed form (fit.solve_linear)
+    per-frame intensities I [B, T] and the per-(sample, group) backgrounds solved in closed form (fit.solve_linear_grad; the x, y, z gradient goes through it)
     at every step; per sample the start with the lowest NLL is kept.
 
     tracks: Tracks (rois [B, T, R, R] in photons, mask, xy_init). psfs: the PSF model, or one per group (a list; frames
@@ -132,12 +132,12 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
         pos = torch.cat([xy[sl], zmax_um * torch.sigmoid(zr[sl])[:, None]], 1)
         if len(models) == 1:
             psf = models[0].render(pos)
-            I, bg = solve_linear(psf.reshape(b, -1).detach(), data.reshape(b, T, -1), m_, g_, r2, ng)
+            I, bg = solve_linear_grad(psf.reshape(b, -1), data.reshape(b, T, -1), m_, g_, r2, ng)
             mu = I[..., None, None] * psf[:, None]
         else:
             psf = torch.stack([m.render(pos) for m in models], 1)                       # [b, ng, R, R]
             psf = torch.gather(psf, 1, g_[..., None, None].expand(-1, -1, R, R))         # [b, T, R, R]
-            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), m_, g_, r2, ng)
+            I, bg = solve_linear_grad(psf.reshape(b, T, -1), data.reshape(b, T, -1), m_, g_, r2, ng)
             mu = I[..., None, None] * psf
         mu = (mu + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
         var = mu + (r2.reshape(b, 1, R, R) if pix else r2)
