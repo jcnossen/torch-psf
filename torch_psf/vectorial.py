@@ -132,6 +132,14 @@ def pixel_box_spectral(I, os_, pad, R, fc, cov=None):
     return J[:, ::os_, ::os_][:, pad:pad + R, pad:pad + R]
 
 
+def _angle_index(angle, n):
+    """Index of a pattern angle into n per-angle terms; ValueError for bool, fractional or out-of-range values."""
+    a = None if isinstance(angle, bool) else int(angle)
+    if a is None or a != angle or not 0 <= a < n:
+        raise ValueError(f'angle={angle!r}: this PSF has per-angle terms for angles 0..{n - 1}')
+    return a
+
+
 def dipole_tensor(M=None, w=None, dev=None):
     """Emission-dipole second-moment tensor (trace 1) from M ([3, 3] or [B, 3, 3]) or diagonal weights w ([3], mean 1);
     None if both are None (isotropic emitter)."""
@@ -201,6 +209,10 @@ class VectorialPSF(torch.nn.Module, PSF):
         self.blur = None    # image-plane Gaussian blur covariance [sxx, syy, sxy] px^2 ([B, 3] per emitter)
         self.dipw = None    # emission-dipole diagonal weights [wx, wy, wz] (mean 1)
         self.dipM = None    # emission-dipole second-moment tensor (3 x 3, trace 1)
+        # per illumination-pattern angle terms of a file (psf_dipole_M_angle [A, 3, 3], psf_blur_angle_px2 [A, 3]): kept
+        # so that writing the model keeps them; dipM / blur hold the selected angle (or the average)
+        self.dipM_angle = None
+        self.blur_angle = None
 
         # normalized pupil grid (unit disk), fixed; physical k scales with NA
         g = (torch.arange(npupil, device=self.dev) - (npupil - 1) / 2) / (npupil / 2)
@@ -414,7 +426,7 @@ class VectorialPSF(torch.nn.Module, PSF):
         converted in place; the optional plain tensor attributes (blur, dipM, dipw, diat) and self.dev follow. Returns
         self. (A copy of another size: resized().)"""
         super()._apply(fn, *args, **kwargs)
-        for k in ('blur', 'dipM', 'dipw', 'diat'):
+        for k in ('blur', 'dipM', 'dipw', 'diat', 'dipM_angle', 'blur_angle'):
             v = getattr(self, k, None)
             if torch.is_tensor(v):
                 setattr(self, k, fn(v))
@@ -439,6 +451,10 @@ class VectorialPSF(torch.nn.Module, PSF):
             d['psf_dipole_w'] = _list(self.dipw)
         if self.pixel_integration != 'box':
             d['pixel_integration'] = self.pixel_integration
+        if getattr(self, 'dipM_angle', None) is not None:
+            d['psf_dipole_M_angle'] = _list(self.dipM_angle)
+        if getattr(self, 'blur_angle', None) is not None:
+            d['psf_blur_angle_px2'] = _list(self.blur_angle)
         d.update(pixelsize_um=o.pixel_um, wavelength_um=o.wavelength_um, NA=o.NA, n_imm=o.n_imm, n_med=o.n_med)
         arrays = {}
         if bool((self.pupil_phase != 0).any()):
@@ -484,11 +500,11 @@ class VectorialPSF(torch.nn.Module, PSF):
         if d.get('psf_dipole_w') is not None:
             vec.dipw = t(d['psf_dipole_w'])
         if d.get('psf_dipole_M_angle') is not None:
-            M = t(d['psf_dipole_M_angle'])
-            vec.dipM = M.mean(0) if angle is None else M[angle]
+            M = vec.dipM_angle = t(d['psf_dipole_M_angle'])
+            vec.dipM = M.mean(0) if angle is None else M[_angle_index(angle, len(M))]
         if d.get('psf_blur_angle_px2') is not None:
-            Bc = t(d['psf_blur_angle_px2'])
-            vec.blur = Bc.mean(0) if angle is None else Bc[angle]
+            Bc = vec.blur_angle = t(d['psf_blur_angle_px2'])
+            vec.blur = Bc.mean(0) if angle is None else Bc[_angle_index(angle, len(Bc))]
         if d.get('diattenuation') is not None:
             vec.diat = float(d['diattenuation'])
         return vec
@@ -525,8 +541,8 @@ class VectorialPSF(torch.nn.Module, PSF):
                                                                align_corners=False)[0, 0]
                 new.pupil_phase.copy_(rs(self.pupil_phase) * new.mask)
                 new.pupil_amp.copy_(rs(self.pupil_amp))
-        for k in ('blur', 'diat', 'dipw', 'dipM'):
-            v = getattr(self, k)
+        for k in ('blur', 'diat', 'dipw', 'dipM', 'dipM_angle', 'blur_angle'):
+            v = getattr(self, k, None)
             if v is not None:
                 setattr(new, k, v.detach().clone().to(new.dev) if torch.is_tensor(v) else copy.deepcopy(v))
         return new
