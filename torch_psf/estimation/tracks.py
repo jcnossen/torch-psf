@@ -1,8 +1,9 @@
 """In-situ vectorial PSF fit on emitter tracks with variable projection.
 
 Each sample is one emitter seen on up to T consecutive frames (torch_psf.spots.Tracks). Per frame
-the intensity, per (sample, group) the background are solved exactly (weighted linear least squares,
-torch_psf.fit.solve_linear) at every iteration; the per-sample position (x, y, and z through a sigmoid on
+the intensity, per (sample, group) the background are solved in closed form (Poisson-weighted IRLS,
+torch_psf.fit.solve_linear_grad) at every iteration, and the gradient goes through that solve (it is not the exact
+minimiser of the NLL below, so holding I / bg fixed would not give the gradient of the profiled NLL); the per-sample position (x, y, and z through a sigmoid on
 [0, zmax_um]) and the global PSF parameters (Zernikes, focus, optional line blur, optional extra parameters of a
 per-group PSF hook) are fitted with Adam on the Gaussian approximation of the Poisson + read-noise likelihood. The
 first `warmup` iterations move only the per-sample positions.
@@ -18,13 +19,13 @@ import torch
 def _result(psf, report, history, data):
     """Result of the low-level estimators: dict(psf, report, history, **data)."""
     return dict(psf=psf, report=report, history=history, **data)
-from torch_psf.fit import solve_linear, readnoise_variance
+from torch_psf.fit import solve_linear_grad, readnoise_variance
 
 
 def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0, blur='none',
                groups=None, ngroups=1, group_psf_kwargs=None, extra_params=(), batch=2000, lr_xyz=0.03,
                lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False, fix_focus=False,
-               log=None, stop=None):
+               log=None, stop=None, pixel_integration=None):
     """tracks: Tracks (rois [B, T, R, R] in photons, mask, xy_init). vectorial: starting VectorialPSF (copied;
     roisize = R). readnoise_e: read noise (e- rms): a scalar, or per pixel of every sample [B, R, R] (an sCMOS
     read-noise map cut at each sample's crop; the variance model is then mu + rn^2 per pixel). zmax_um: emitter heights 0..zmax_um. focus_um: starting
@@ -32,13 +33,16 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     covariance L L^T, px^2; the line blur plus an isotropic / second-axis part). groups [B, T] (long, values
     0..ngroups-1): background groups and PSF groups (default one group). group_psf_kwargs / extra_params: per-group
     PSF hook (module docstring). fix_zernike / fix_focus: hold the Zernikes / the focus at their starting values.
+    pixel_integration: the pixel integration of the fitted model (VectorialPSF.pixel_integration: 'box' = the midpoint
+    rule with the model's oversample, 'spectral' / 'exact' = the exact pixel integral, 'gauss_legendre'); None = that
+    of `vectorial`. The returned psf keeps it.
     Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
     (variance of the normalized residuals, 1 for a perfect model), nll_per_px, focus_um; data: xy [B, 2] px rel. to
     the ROI centre, z [B] um, I [B, T] photons, bg [B, ngroups]."""
     dev = tracks.rois.device
     B, T, R = tracks.rois.shape[0], tracks.rois.shape[1], tracks.rois.shape[-1]
     c = (R - 1) / 2
-    model = vectorial.resized(R)
+    model = vectorial.resized(R, pixel_integration=pixel_integration)
     model.zcoef.requires_grad_(True)
     focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
     rn2, pix = readnoise_variance(readnoise_e, B, R, dev)
@@ -85,10 +89,10 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
         psf = psf_of(pos, b)
         if psf.dim() == 4:      # per-group PSF -> per-frame PSF [b, T, R, R]
             psf = torch.gather(psf, 1, g_[..., None, None].expand(-1, -1, R, R))
-            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
+            I, bg = solve_linear_grad(psf.reshape(b, T, -1), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
             mu = I[..., None, None] * psf
         else:
-            I, bg = solve_linear(psf.reshape(b, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
+            I, bg = solve_linear_grad(psf.reshape(b, -1), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
             mu = I[..., None, None] * psf[:, None]
         mu = (mu + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
         var = mu + (r2.reshape(b, 1, R, R) if pix else r2)

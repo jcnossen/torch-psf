@@ -25,8 +25,15 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
 
 ## Versioning
 
-- `format` is `"torch-psf"`; `version` is `"0.2.0"` for the zip. A reader accepts every `0.2.x` (later minor revisions
-  only add optional keys; unknown keys are ignored) and refuses other versions.
+- `format` is `"torch-psf"`; `version` is `"0.2.0"` or `"0.3.0"` for the zip. A reader accepts the minor versions it
+  knows (this one: every `0.2.x` and `0.3.x`; unknown keys are ignored) and refuses others.
+- `0.3.0` = `0.2.0` plus two things a `0.2` reader would read wrongly without noticing (it ignores unknown keys): a
+  model with a `pixel_integration` other than `box` (a 0.2 reader renders `box`, up to ~0.6 % of the peak off) and the
+  `integrated_spline` model type. A writer writes `0.3.0` exactly when a model block of the file (a channel, its
+  `source`, the top-level `source`) is an `integrated_spline` or has `pixel_integration` other than `box`, and
+  `0.2.0` otherwise, so every file a 0.2 reader can read correctly stays a 0.2.0 file (byte for byte as before), and
+  the others are refused by 0.2 readers (the Python reader before this revision and the web app check the minor
+  version).
 - The 0.1.0 files (one JSON with `type` at the top level plus a sidecar `.npz` named by `arrays`) are still written by
   `PSF.save` and read by `PSF.load`; so are plain SIMCODE calibration JSONs (no `format`, the vectorial keys at the top
   level). A 0.2.0 channel `model` block holds exactly the keys of the 0.1.0 JSON of that model type, so a 0.1.0 file
@@ -48,7 +55,7 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
 | key | type | required | meaning |
 |---|---|---|---|
 | `format` | str | yes | `"torch-psf"` |
-| `version` | str | yes | `"0.2.0"` |
+| `version` | str | yes | `"0.2.0"`, or `"0.3.0"` for the files that need it (Versioning) |
 | `psf_type` | str | yes | reader hint: the torch-psf type of the whole file: a model type (single channel or coupled) or `"channels"` (independent channels) |
 | `n_dims` | int | yes | 3, or 2 for models without a z axis (z ignored) |
 | `emitter_params` | [str] | yes | the parameters of one emitter, in order: `["x","y","z","I","bg"]`, 2D `["x","y","I","bg"]`, 4Pi `["x","y","z","I","bg","phi"]` |
@@ -85,9 +92,9 @@ Channel entry:
 | key | type | required | meaning |
 |---|---|---|---|
 | `name` | str | yes | unique name (`ch0`, `ch1`, ... by default; e.g. `plane0`, `red`, `top`) |
-| `type` | str | yes | model type: `vectorial`, `spline`, `gaussian`, `astig_gaussian` (independent), `phase_spline`, `source_output` (coupled) |
+| `type` | str | yes | model type: `vectorial`, `spline`, `integrated_spline`, `gaussian`, `astig_gaussian` (independent), `phase_spline`, `source_output` (coupled) |
 | `model` | dict | yes | the model's parameters: exactly the keys of the 0.1.0 JSON of that type, without `format` / `version` / `type` / `camera` / `provenance` / `arrays` (tables below) |
-| `arrays` | {name: member} | no | the model's arrays by their 0.1.0 npz names (`pupil_phase`, `pupil_amp`, `knots`; `inc` / `cr` / `ci` for phase_spline) |
+| `arrays` | {name: member} | no | the model's arrays by their 0.1.0 npz names (`pupil_phase`, `pupil_amp`, `knots`; `coefs` / `coefs_angle` for integrated_spline; `inc` / `cr` / `ci` for phase_spline) |
 | `source` | {type, model, arrays} | no | independent channels: the model this channel was derived from (e.g. the vectorial model a spline was tabulated from) |
 | `index` | int | source_output | the output index of the source model |
 | `phase_param` | str | phase_spline | the emitter parameter of the phase (default `"phi"`) |
@@ -105,7 +112,11 @@ Any other key is kept (written as given, ignored by readers that do not know it)
 indices), `zernike_waves` [nz], `apod` [3] (radial amplitude exp(sum_n c_n rho^(2n))), `saf` [4] (supercritical annulus
 tilt x / y, amplitude x / y), `focus_um` (focal plane relative to the coverslip), `psf_blur_px2` [3] or null (image
 blur covariance sxx, syy, sxy in px^2), `psf_dipole_M` [3, 3] or null (emission dipole tensor), optional
-`psf_dipole_w` [3], `diattenuation` or null, `npupil`, `oversample`, `roisize`, `z_range_um` [2] or null; the SIMCODE
+`psf_dipole_w` [3], `diattenuation` or null, `npupil`, `oversample`, `roisize`, `z_range_um` [2] or null, optional
+`pixel_integration` (`box` = the mean of oversample x oversample point samples per pixel, the default when absent;
+`spectral` = the exact pixel integral of the band-limited image; `gauss_legendre` = oversample Gauss-Legendre nodes
+per axis; a reader must refuse a value it does not know instead of rendering `box`; readers written before the key
+existed ignore it and render `box`: off by up to ~0.6 % of the peak at oversample 3, 108 nm pixels); the SIMCODE
 calibration names `pixelsize_um`, `wavelength_um`, `NA`, `n_imm`, `n_med` (duplicates of `optics`, so SIMCODE reads the
 block as a calibration). Optional per-pattern-angle terms (SIMCODE): `psf_dipole_M_angle` [A, 3, 3],
 `psf_blur_angle_px2` [A, 3]. z = emitter height above the coverslip (um) at focus `focus_um`.
@@ -117,6 +128,28 @@ float32 factor; pupil grid: sample i at (i - (npupil - 1) / 2) / (npupil / 2) of
 px), pixel_um}. Array `knots` [nz, n, n] float32 (n = (2c + 1) S), Catmull-Rom knots of the pixel-integrated PSF
 g(u, v, z), knot (k, i, j) at z = z0_um + k dz_um, v = u0_px + i / S, u = u0_px + j / S. z: the coordinate the spline
 was tabulated in (emitter height for in-situ models; -focus for bead stacks).
+
+**integrated_spline** (`IntegratedSplinePSF`, torch_psf/pixint.py): a different representation from `spline`, under its
+own type name and array names so that readers that do not know it refuse it (an unknown `type`) instead of reading
+its coefficients as `spline` knots. `integrated_spline` {basis `"cubic_bspline"`, value `"pixel_integral"`, roisize,
+z_range [2] um (the heights it is accurate on), oversample S (knots per px), dz_um, zpad (knot planes outside z_range),
+xy_limit (px, at roisize), c (stored half width, px), z0_um, nz, u0_px, pixel_um, n_angles (0 = one model)}, the grid
+of `spline` (knot (k, i, j) at z = z0_um + k dz_um, v = u0_px + i / S, u = u0_px + j / S; u, v = offset of a point
+from the emitter, px). Arrays: `coefs` [nz, n, n] float32 (n = (2c + 1) S), or with per-pattern-angle terms
+`coefs_angle` [n_angles, nz, n, n] float32 (exactly one of the two). The coefficients c_kij are those of a
+tensor-product cubic B-spline (kernel B(t) = 2/3 - t^2 + |t|^3 / 2 for |t| <= 1, (2 - |t|)^3 / 6 for 1 < |t| < 2,
+0 beyond) that interpolates the point density of the PSF (fraction of the photons per px^2) at the knots:
+f(u, v, z) = sum_kij c_kij B((z - z_k) / dz_um) B(S (v - v_i)) B(S (u - u_j)). The value of a pixel is the exact
+integral of f over the pixel (1 x 1 px, centred at the pixel offset (o_x - x, o_y - y) from the emitter): per lateral
+axis the integral of B over the pixel is a difference of its antiderivative (a piecewise quartic), so the patch is
+separable and exact; it is not an interpolation of pixel-integrated values (the `spline` knots). Coefficients of
+the knots beyond the stored grid are not defined: readers clamp |x|, |y| to the offset limit and z to the knot range
+(it is accurate on z_range). Per-angle models (SIMCODE photoselection; the vectorial `psf_dipole_M_angle` /
+`psf_blur_angle_px2`): one coefficient set per pattern angle, selected per frame by the parameter `angle` (Python:
+`PSF.load(path, angle=a)`); the model without an angle is the mean of the angle coefficient sets (= the mean of the
+angle images). `source` (optional): the vectorial model the coefficients were built from
+(`IntegratedSplinePSF.from_vectorial`: the point density of the exact band-limited image, prefiltered with the cubic
+B-spline, mirror boundary in all three axes).
 
 **gaussian** (`GaussianPSF`, 2D): `gaussian` {sigma_px [2], pixel_um}, `roisize`. No arrays.
 

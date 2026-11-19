@@ -27,6 +27,11 @@ from torch_psf.psf import PSF, FORMAT
 from torch_psf.dataset import _plain
 
 ZIP_VERSION = '0.2.0'
+# 0.3.0: written only for files that a 0.2 reader would render wrongly without noticing (it ignores unknown keys): a
+# model with pixel_integration other than 'box', or an 'integrated_spline' channel (docs/PSF_FORMAT.md, Versioning);
+# every 0.2 / 0.3 reader checks the minor version and refuses a newer one. Other files stay 0.2.0, byte for byte.
+ZIP_VERSION_NEW = '0.3.0'
+READ_VERSIONS = ((0, 2), (0, 3))
 JSON_NAME, ZSTACK_NAME, PREVIEW_NAME, REPORT_NAME = 'psf.json', 'zstack.tif', 'preview.png', 'fit_report.pdf'
 COUPLED = ('fourpi', 'fourpi_spline')
 UNITS = dict(x='px', y='px', z='um', I='photons', bg='photons / px', phi='rad')
@@ -224,8 +229,8 @@ def _check_version(meta):
         raise ValueError(f"not a torch-psf psf.json (format {meta.get('format')!r})")
     v = str(meta.get('version', '0'))
     major_minor = tuple(int(p) for p in v.split('.')[:2])
-    if major_minor != (0, 2):
-        raise ValueError(f'psf.zip version {v}: this reader supports 0.2.x')
+    if major_minor not in READ_VERSIONS:
+        raise ValueError(f'psf.zip version {v}: this reader supports 0.2.x and 0.3.x')
 
 
 def read_zip(path):
@@ -454,6 +459,19 @@ class PSFZip:
 
 
 # ====================================================================================================== rendering
+def _zip_version(meta):
+    """ZIP_VERSION_NEW when a model block of the file (channel, its source, the top-level source) is an
+    integrated_spline or has a pixel_integration other than 'box', else ZIP_VERSION"""
+    blocks = [meta.get('source')] + [b for c in meta['channels'] for b in (c, c.get('source'))]
+    for b in blocks:
+        if not b:
+            continue
+        m = b.get('model') or {}
+        if b.get('type') == 'integrated_spline' or m.get('pixel_integration', 'box') not in (None, 'box'):
+            return ZIP_VERSION_NEW
+    return ZIP_VERSION
+
+
 def _channel_models(psf):
     return list(psf) if isinstance(psf, (list, tuple)) else [psf]
 
@@ -802,6 +820,7 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     if _meta_hook is not None:
         _meta_hook(meta)
         optics = meta.get('optics')
+    meta['version'] = _zip_version(meta)
     # zstack, preview, report
     stack, zs = render_zstack(psf, zstack_planes, zstack_px)
     px = (optics or {}).get('pixel_um')
@@ -822,7 +841,7 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     est = psfreport.bundle(report, psf) if report is not None else None
     if est is not None:
         meta['report'].update(_report_json(est))
-    tif = zstack_tif_bytes(stack, zs, sample_um, info=dict(format=FORMAT, version=ZIP_VERSION, psf_type=meta['psf_type'],
+    tif = zstack_tif_bytes(stack, zs, sample_um, info=dict(format=FORMAT, version=meta['version'], psf_type=meta['psf_type'],
                                                           z_um=zinfo['z_um'], channels=names, sample_px=zinfo['sample_px']))
     def put(z, name, data, stored=False):
         zi = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
@@ -890,7 +909,7 @@ def _size(v):
 
 
 # ====================================================================================================== conversion
-def convert_calibration(json_path, out_path, roisize=None, device=None, provenance=None, **kw):
+def convert_calibration(json_path, out_path, roisize=None, device=None, provenance=None, integrated_spline=None, **kw):
     """A calibration json (SIMCODE calib_*.json or a torch-psf 0.1.0 PSF json with its .npz) -> psf.zip, losslessly:
     the PSF (PSF.load), the camera (io.load_camera, with its maps, when the json has a camera), every top-level key
     that is neither a PSF / optics / camera key goes to: provenance (source, psf_v2), patterns (a SIMCODE `pattern`
@@ -900,7 +919,11 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
     optics also when the model does not use them (Gaussian); PSF-model keys the model does not use go to
     provenance['unused_model_keys']. Values of the model / optics / camera blocks that equal a value of the json at
     float32 precision are written as in the json. Paths in the json (maps, arrays) resolve against the json's folder.
-    kw: passed to save_zip. Returns the psf.json dict."""
+    integrated_spline: None, or a dict of IntegratedSplinePSF.from_vectorial options (z_range required; roisize,
+    xy_limit, oversample, dz_um, zpad): channel 0 is then the integrated cubic B-spline of the calibration's vectorial
+    model (type 'integrated_spline', one coefficient set per pattern angle when the json has per-angle terms), with
+    the vectorial model as its source (the calibration keys are kept there). kw: passed to save_zip. Returns the
+    psf.json dict."""
     import os
     from torch_psf import io
     json_path = os.path.abspath(str(json_path))
@@ -956,8 +979,20 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
         meta['channels'] = [_prefer(c, ref) for c in meta['channels']]
         if isinstance(meta.get('camera'), dict) and ocam:
             meta['camera'] = _prefer(meta['camera'], ocam, top=True)
-    meta = save_zip(out_path, psf, camera=cam, provenance=prov, patterns=patterns, acquisition=rest or None,
-                    optics=optics, _meta_hook=hook, **kw)
+    model, source = psf, None
+    if integrated_spline is not None:
+        from torch_psf.pixint import IntegratedSplinePSF
+        opts = dict(integrated_spline)
+        n_ang = max((len(orig[k]) for k in ('psf_dipole_M_angle', 'psf_blur_angle_px2') if orig.get(k) is not None),
+                    default=0)
+        os.chdir(os.path.dirname(json_path))
+        try:
+            vecs = [io.load(json_path, roisize=roisize, device=device, angle=a) for a in range(n_ang)] if n_ang else psf
+        finally:
+            os.chdir(cwd)
+        model, source = IntegratedSplinePSF.from_vectorial(vecs, **opts), psf
+    meta = save_zip(out_path, model, camera=cam, provenance=prov, patterns=patterns, acquisition=rest or None,
+                    optics=optics, source=source, _meta_hook=hook, **kw)
     return meta
 
 
@@ -965,7 +1000,7 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
 MODEL_KEYS = ('zernike_noll', 'zernike_waves', 'apod', 'saf', 'focus_um', 'psf_blur_px2', 'psf_dipole_M', 'psf_dipole_w',
               'diattenuation', 'npupil', 'oversample', 'roisize', 'z_range_um', 'spline', 'gaussian', 'fourpi',
               'fourpi_spline', 'psf_gauss_sigma_um', 'psf_dipole_M_angle', 'psf_blur_angle_px2', 'pupil_phase',
-              'pupil_amp')
+              'pupil_amp', 'pixel_integration')
 
 
 def _agree32(a, b):

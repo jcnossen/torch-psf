@@ -6,7 +6,7 @@ per-sample NLL difference of two PSFs on the same samples."""
 import math
 import numpy as np
 import torch
-from torch_psf.fit import localize, at_limit, solve_linear, readnoise_variance
+from torch_psf.fit import localize, at_limit, solve_linear_grad, readnoise_variance
 
 
 def split_checkerboard(x, y, tile=16):
@@ -91,10 +91,10 @@ def paired_nll(nll_a, nll_b):
 
 
 def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngroups=1, refit_psfs=None,
-                   z_starts_um=(0.02, 0.08, 0.15), iters=300, lr=0.03, batch=3000):
+                   z_starts_um=(0.02, 0.08, 0.15), iters=300, lr=0.03, batch=3000, pixel_integration=None):
     """Held-out NLL of a frozen PSF on track samples (the model of estimation.fit_tracks): per sample x, y and z
     (through a sigmoid on [0, zmax_um]) are refitted by Adam (lr, iters) from every start z in z_starts_um, with the
-    per-frame intensities I [B, T] and the per-(sample, group) backgrounds solved in closed form (fit.solve_linear)
+    per-frame intensities I [B, T] and the per-(sample, group) backgrounds solved in closed form (fit.solve_linear_grad; the x, y, z gradient goes through it)
     at every step; per sample the start with the lowest NLL is kept.
 
     tracks: Tracks (rois [B, T, R, R] in photons, mask, xy_init). psfs: the PSF model, or one per group (a list; frames
@@ -104,7 +104,9 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
     PSF of each frame (as fit_tracks with group_psf_kwargs). refit_psfs: models used for the refit iterations (same layout as
     psfs, e.g. their to_spline() tables, much faster); the NLL is then evaluated with psfs. readnoise_e: read noise
     (e- rms): a scalar or per pixel of every sample [B, R, R] (as fit_tracks). NLL: Gaussian approximation of Poisson + read noise, 0.5 (d - mu)^2 / v + 0.5 log(2 pi v), v = mu + rn^2,
-    over the present frames.
+    over the present frames. pixel_integration: evaluate the NLL with copies of the VectorialPSF models in psfs with this
+    pixel integration (VectorialPSF.pixel_integration, e.g. 'exact'); None = as they are. refit_psfs are used as given
+    (build them from the models with the same setting, e.g. VectorialPSF.to_spline of the copies).
 
     Returns dict(nll [B], chi2 [B] (mean (d - mu)^2 / v per pixel of the sample's present frames), xy [B, 2] (px
     from the ROI centre), z [B] (um), I [B, T], bg [B, ngroups], nll_per_px (sum NLL / pixels), chi2_per_px (mean of
@@ -116,6 +118,9 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
     c = (R - 1) / 2
     as_list = lambda p: list(p) if isinstance(p, (list, tuple)) else [p]
     psfs = as_list(psfs)
+    if pixel_integration is not None:
+        psfs = [p.resized(p.roisize, pixel_integration=pixel_integration) if hasattr(p, 'pixel_integration') else p
+                for p in psfs]
     refit = psfs if refit_psfs is None else as_list(refit_psfs)
     assert len(refit) == len(psfs)
     ng = int(ngroups)
@@ -132,12 +137,12 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
         pos = torch.cat([xy[sl], zmax_um * torch.sigmoid(zr[sl])[:, None]], 1)
         if len(models) == 1:
             psf = models[0].render(pos)
-            I, bg = solve_linear(psf.reshape(b, -1).detach(), data.reshape(b, T, -1), m_, g_, r2, ng)
+            I, bg = solve_linear_grad(psf.reshape(b, -1), data.reshape(b, T, -1), m_, g_, r2, ng)
             mu = I[..., None, None] * psf[:, None]
         else:
             psf = torch.stack([m.render(pos) for m in models], 1)                       # [b, ng, R, R]
             psf = torch.gather(psf, 1, g_[..., None, None].expand(-1, -1, R, R))         # [b, T, R, R]
-            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), m_, g_, r2, ng)
+            I, bg = solve_linear_grad(psf.reshape(b, T, -1), data.reshape(b, T, -1), m_, g_, r2, ng)
             mu = I[..., None, None] * psf
         mu = (mu + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
         var = mu + (r2.reshape(b, 1, R, R) if pix else r2)

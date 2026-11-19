@@ -459,3 +459,28 @@ def test_fourpi_arm_terms_round_trip(tmp_path):
         assert torch.equal(q.render(POS, phi=phi), ref)
         assert torch.equal(r.render(POS, phi=phi), ref)
     assert z['source']['model']['fourpi']['arms']['bottom']['diattenuation'] == 0.05
+
+
+def test_per_angle_terms_round_trip_and_refusal(tmp_path):
+    """per-pattern-angle dipole / blur terms survive json -> psf.zip and PSF.load(angle=a) selects them; an angle
+    that the file has no per-angle terms for is refused (it used to render the average silently)"""
+    from torch_psf.psfzip import convert_calibration
+    M = [[[0.30, 0, 0], [0, 0.37, 0], [0, 0, 0.33]], [[0.37, 0, 0], [0, 0.30, 0], [0, 0, 0.33]]]
+    B = [[0.10, 0.02, 0.0], [0.02, 0.10, 0.0]]
+    cal = dict(pixelsize_um=0.108, wavelength_um=0.68, NA=1.49, n_imm=1.518, n_med=1.33, zernike_noll=[5, 6],
+               zernike_waves=[0.02, -0.01], focus_um=0.3, psf_dipole_M_angle=M, psf_blur_angle_px2=B)
+    js = tmp_path / 'calib.json'
+    js.write_text(json.dumps(cal))
+    convert_calibration(js, tmp_path / 'c.zip', roisize=11, device='cpu')
+    assert 'unused_model_keys' not in (read_zip(tmp_path / 'c.zip')[0].get('provenance') or {})
+    for path in (js, tmp_path / 'c.zip'):
+        for a in (0, 1):
+            p = PSF.load(path, angle=a, roisize=11, device='cpu', npupil=32, oversample=1)
+            assert np.allclose(p.dipM.cpu().numpy(), M[a]) and np.allclose(p.blur.cpu().numpy(), B[a])
+        p = PSF.load(path, roisize=11, device='cpu', npupil=32, oversample=1)
+        assert np.allclose(p.dipM.cpu().numpy(), np.mean(M, 0))
+        with pytest.raises(ValueError, match='angles 0..1'):
+            PSF.load(path, angle=2, roisize=11, device='cpu', npupil=32, oversample=1)
+    plain = dict(cal); del plain['psf_dipole_M_angle'], plain['psf_blur_angle_px2']
+    with pytest.raises(ValueError, match='no per-angle'):
+        PSF.load(plain, angle=0, roisize=11, device='cpu')
