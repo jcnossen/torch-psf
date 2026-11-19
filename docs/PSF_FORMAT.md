@@ -30,7 +30,7 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
 - `0.3.0` = `0.2.0` plus two things a `0.2` reader would read wrongly without noticing (it ignores unknown keys): a
   model with a `pixel_integration` other than `box` (a 0.2 reader renders `box`, up to ~0.6 % of the peak off) and the
   `integrated_spline` model type. A writer writes `0.3.0` exactly when a model block of the file (a channel, its
-  `source`, the top-level `source`) is an `integrated_spline` or has `pixel_integration` other than `box`, and
+  `source`, the top-level `source`) uses an `integrated_spline` grid or has `pixel_integration` other than `box`, and
   `0.2.0` otherwise, so every file a 0.2 reader can read correctly stays a 0.2.0 file (byte for byte as before), and
   the others are refused by 0.2 readers (the Python reader before this revision and the web app check the minor
   version).
@@ -164,6 +164,10 @@ blur_px2, depth [2] (asymmetric arms only), raw {parameter: value} (optional: th
 a_log, gamma_logit, logblur, ...; when present a reader takes them instead of the natural values, which makes the
 round trip bit-exact)}; see `torch_psf/fourpi.py` for the physics. No arrays.
 
+The optional `fourpi.meta.pixel_integration` is `spectral` for exact integration of each coherent channel intensity.
+The same Fourier filter applies the Gaussian blur and pixel aperture. An absent field selects the legacy midpoint
+average (`box`). A spectral 4Pi source requires zip version 0.3.0.
+
 **source_output**: channel `index` of the top-level source model. `model` is informative only: {pol, phi_rad, tau} of
 that output.
 
@@ -178,6 +182,16 @@ stored grid (a 4Pi spline is ~100 MB of knots otherwise). The channel image is
 
 with phi the emitter parameter named by `phase_param` (the channel phase phi_c is inside cr / ci). All phase_spline
 channels of a file share the grid.
+
+In version 0.3.0, a `phase_spline` channel can use `model.integrated_spline` as its grid. It has the same
+`basis`, `value`, knot origins and spacing as an independent integrated spline. Each of `inc`, `cr` and `ci`
+then holds prefiltered coefficients of the blurred point density. Integrate each component over the pixel before
+combining them with the phase formula above. The grid selects the component representation when rebuilding.
+
+A tiled field spline stores the reference-point model as a channel, its vectorial source, and the
+`zernike_poly` field block. For an integrated tile grid the channel type is `integrated_spline` (version 0.3.0).
+Each tile uses the stored reference grid and basis with the Zernikes evaluated at its centre. Tile size and extent
+use the existing `provenance.field_tiles` metadata.
 
 ### Mapping (`channels[c].mapping`)
 
