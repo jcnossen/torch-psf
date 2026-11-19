@@ -33,10 +33,11 @@ factor); a fixed dipole's detected total also depends on its orientation and hei
 import math
 import time
 import torch
+from torch_psf.psf import render_with_grad
 from torch_psf.vectorial import photosel_tensor
 from torch_psf.fit import lm_poisson, localize
 
-from torch_psf._dipole import IJ as _IJ                                   # (xx yy zz xy xz yz)
+from torch_psf._dipole import M_to_m6, m6_to_M
 
 BASIS = ('xx', 'yy', 'zz', 'xy', 'xz', 'yz')
 NPAR = 9      # x, y, z, I, bg, v_x, v_y, v_z, g
@@ -118,21 +119,6 @@ def dipole_M(v, g):
     return (1 - g)[..., None, None] * eye / 3 + g[..., None, None] * mu[..., :, None] * mu[..., None, :]
 
 
-def M_to_m6(M):
-    """[..., 3, 3] -> [..., 6] (xx, yy, zz, xy, xz, yz) of the symmetric part."""
-    S = (M + M.transpose(-1, -2)) / 2
-    return torch.stack([S[..., i, j] for i, j in _IJ], -1)
-
-
-def m6_to_M(m):
-    """[..., 6] -> symmetric [..., 3, 3]."""
-    M = m.new_zeros(*m.shape[:-1], 3, 3)
-    for k, (i, j) in enumerate(_IJ):
-        M[..., i, j] = m[..., k]
-        M[..., j, i] = m[..., k]
-    return M
-
-
 def project_M(M):
     """Nearest (mu, g) of an estimated M [..., 3, 3]: mu = top eigenvector (canonical, mu_z >= 0) of the
     trace-normalised symmetric part, g = l1 - (l2 + l3) / 2 (least-squares fit of the eigenvalues
@@ -200,16 +186,7 @@ def basis_images(psf, pos, focus=None, grad=False, zcoef_offset=None):
     d/dz (per um), each [N, 6, R, R] (forward-mode autodiff)."""
     f = psf.focus_um if focus is None else focus
     fn = lambda p: psf.dipole_basis(p, f, zcoef_offset)
-    if not grad:
-        return fn(pos)
-    out, val = [], None
-    for k in range(3):
-        t = torch.zeros_like(pos)
-        t[:, k] = 1
-        v, d = torch.func.jvp(fn, (pos,), (t,))
-        val = v if val is None else val
-        out.append(d)
-    return val, out[0], out[1], out[2]
+    return render_with_grad(fn, pos, grad)
 
 
 @torch.no_grad()
@@ -468,16 +445,7 @@ class FocusZ:
 
     def render(self, pos, grad=False, focus=None):
         fn = lambda p: self(p, focus)
-        if not grad:
-            return fn(pos)
-        out, val = [], None
-        for k in range(3):
-            t = torch.zeros_like(pos)
-            t[:, k] = 1
-            v, d = torch.func.jvp(fn, (pos,), (t,))
-            val = v if val is None else val
-            out.append(d)
-        return val, out[0], out[1], out[2]
+        return render_with_grad(fn, pos, grad)
 
 
 # ------------------------------------------------------------------ pipeline
@@ -642,13 +610,4 @@ class Polychromatic:
 
     def render(self, pos, grad=False, focus=None):
         fn = lambda p: self(p, focus)
-        if not grad:
-            return fn(pos)
-        out, val = [], None
-        for k in range(3):
-            t = torch.zeros_like(pos)
-            t[:, k] = 1
-            v, d = torch.func.jvp(fn, (pos,), (t,))
-            val = v if val is None else val
-            out.append(d)
-        return val, out[0], out[1], out[2]
+        return render_with_grad(fn, pos, grad)

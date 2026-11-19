@@ -1,9 +1,11 @@
+import math
+
 import pytest
 import torch
 
 from conftest import DEV
 from torch_psf import FourPiPSF, IntegratedSplinePSF, PSF, io, psfzip
-from torch_psf.vectorial import gauss_blur_os
+from torch_psf.integrate import PixelIntegrator
 
 
 @torch.no_grad()
@@ -13,7 +15,7 @@ def test_fourpi_midpoint_convergence(pixel_um):
               channel_offsets=[[0, 0], [.21, -.19], [0, 0], [-.1, .2]])
     pos = torch.tensor([[.13, -.34, -.12], [-.31, .25, .02], [.17, .04, .15]], device=DEV)
     phase = torch.tensor([.37, 1.6, 2.1], device=DEV)
-    exact = FourPiPSF(**kw, oversample=3 if pixel_um < .1 else 2, pixel_integration='exact')(pos, phi_extra=phase)
+    exact = FourPiPSF(**kw, oversample=3 if pixel_um < .1 else 2, pixel_integration='spectral')(pos, phi_extra=phase)
     high = FourPiPSF(**kw, oversample=16)(pos, phi_extra=phase)
     if pixel_um > .1:
         # Remove the O(1/os^2) midpoint error, still visible at os=16 for typical camera pixels.
@@ -23,28 +25,44 @@ def test_fourpi_midpoint_convergence(pixel_um):
     assert torch.all((exact - high).abs().amax((-2, -1)) / peak < 1e-5)
 
 
+def test_fourpi_stored_exact_and_scalar_phase():
+    model = FourPiPSF(7, npupil=16, device='cpu', pixel_integration='spectral')
+    state = model.state()
+    state['meta']['pixel_integration'] = 'exact'
+    loaded = FourPiPSF.from_state(state, device='cpu')
+    pos = torch.tensor([[.12, -.22, .07], [-.2, .3, .04]])
+    actual = loaded.render(pos, phi=.4, grad=True)
+    expected = model.render(pos, phi=torch.full((2,), .4), grad=True)
+    assert all(torch.equal(v, w) for v, w in zip(actual, expected))
+    with pytest.raises(ValueError, match='pixel_integration'):
+        model.pixel_integration = 'exact'
+
+
 @torch.no_grad()
 def test_fourpi_box_legacy_pixels(monkeypatch):
     model = FourPiPSF(9, npupil=24, device=DEV)
     pos = torch.tensor([[.32, -.15, .09]], device=DEV)
     expected = model(pos)
 
-    def legacy(intensity, energy, integrate):
+    def legacy(grid, intensity):
         b, c, n, _ = intensity.shape
         bv = model.blur_px2
-        cov = torch.stack([bv, bv, torch.zeros_like(bv)])
-        blurred = gauss_blur_os(intensity.reshape(b*c, n, n), cov, model.os, model.BLUR_PAD)
-        img = blurred.reshape(b, c, 9, model.os, 9, model.os).mean((3, 5)) * model.pixel_um ** 2 / energy
-        return img * model.tau[None, :, None, None] * 2
+        f = torch.fft.fftfreq(n, d=1 / model.os, device=intensity.device)
+        fr = torch.fft.rfftfreq(n, d=1 / model.os, device=intensity.device)
+        transfer = torch.exp(-2 * math.pi ** 2 * (bv * fr[None, :] ** 2 + bv * f[:, None] ** 2))
+        blurred = torch.fft.irfft2(torch.fft.rfft2(intensity) * transfer, s=(n, n))
+        border = 3 * model.os
+        blurred = blurred[:, :, border:-border, border:-border]
+        return blurred.reshape(b, c, 9, model.os, 9, model.os).mean((3, 5))
 
-    monkeypatch.setattr(model, '_pixels', legacy)
+    monkeypatch.setattr(PixelIntegrator, '__call__', legacy)
     assert torch.equal(model(pos), expected)
     assert 'pixel_integration' not in model.state()['meta']
 
 
 @torch.no_grad()
 def test_fourpi_integrated_round_trip(tmp_path, monkeypatch):
-    model = FourPiPSF(9, npupil=24, device=DEV, pixel_integration='exact', z_range=(-.025, .025),
+    model = FourPiPSF(9, npupil=24, device=DEV, pixel_integration='spectral', z_range=(-.025, .025),
                       channel_offsets=[[0, 0], [.21, -.19], [0, 0], [-.1, .2]])
     pos = torch.tensor([[.23, -.17, -.0023], [-.14, .38, .012]], device=DEV)
     phase = torch.tensor([.61, -1.51], device=DEV)

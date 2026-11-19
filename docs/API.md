@@ -40,7 +40,7 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
 ├── GaussianPSF(roisize, sigma_px)                                   2D
 ├── AstigmaticGaussianPSF(roisize, sigma_px, gamma_um, d_um, z_range)  3D
 ├── VectorialPSF(roisize, pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices, npupil, oversample,
-│                focus_um, z_range, pixel_integration='box' | 'spectral' (= 'exact') | 'gauss_legendre')  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
+│                focus_um, z_range, pixel_integration='box' | 'spectral' | 'gauss_legendre' | 'point')  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
 │                from_optics, optics, to_spline(..., pos_fn))
 ├── CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
 │                knots_from_model, knots_from_vectorial, vjp_vectorial, from_zstack
@@ -56,6 +56,15 @@ Estimator (torch_psf.estimators)             report (dict), history (list), data
                     detector=None, zstarts=5, field=None, ...)
       .estimate(movie, frames=None) -> VectorialPSF (or the refined CubicSplinePSF if it wins on held-out spots)
 ```
+
+VectorialPSF forms the emitter pupil, transforms its six fields onto the image grid, and contracts the
+dipole tensor or returns its six basis images. FourPiPSF uses the same arm transforms and combines their
+polarized fields coherently. Both use `torch_psf.integrate.PixelIntegrator` for the grid, blur, and pixel
+sampling. The `point` mode returns centre density per px^2 and supplies the knots for integrated splines.
+Like `spectral`, it requires at least two samples per pixel and a grid Nyquist frequency above the optical
+band limit. Both use a three-pixel border per side, doubled for coherent intensities. Blurred `box` uses
+three pixels per side, and `gauss_legendre` requires an unblurred image.
+
 ZStackEstimator conventions: plane k at focus `sign dz_um (k - (nk - 1) / 2)`; the vectorial result has `focus_um = 0`;
 the spline and astigmatic-Gaussian results have z = -focus (bead defocus in stage um). InSituEstimator steps:
 detection (`extract_spots`), checkerboard split (training / held-out), `fit_zernike_knots` (or `fit_pupil_knots`),

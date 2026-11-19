@@ -157,3 +157,10 @@ phase_spline, field) so old files and SIMCODE's models keep working.
   mu_z -> -mu_z), from the opposite supercritical-angle phase convention (cos theta_med = -i|.| there vs +i|.| here),
   possibly with an image-axis convention. Which is physical needs a sample of known tilt. The refactor keeps OUR
   convention unchanged; the composed reference pins it.
+- SIMCODE-side contract and migration checklist: SIMCODE docs/TORCH_PSF.md (SIMCODE master 31197be8; one import point
+  simcode/psf/__init__.py, the torch-psf pin, unchanged pixels for the final calibrations: file read + build from the
+  json with SIMCODE's SPLINE grid and kernel 'bspline'). The SIMCODE branch for psf-unify follows that checklist.
+- SIMCODE migration items found per stage (to add to SIMCODE docs/TORCH_PSF.md):
+  stage 1: torch_psf.vectorial.gauss_blur_os and VectorialPSF.BLUR_PAD are gone (now torch_psf.integrate
+  PixelIntegrator); SIMCODE uses them in simcode/psf/__init__.py (re-export) and simcode/fourpi/coherent_psf.py
+  (SIMCODE's own PSF4Pi blur). Replace with the PixelIntegrator 'box' mode, or replace PSF4Pi by torch_psf FourPiPSF.

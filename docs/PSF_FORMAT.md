@@ -115,7 +115,8 @@ blur covariance sxx, syy, sxy in px^2), `psf_dipole_M` [3, 3] or null (emission 
 `psf_dipole_w` [3], `diattenuation` or null, `npupil`, `oversample`, `roisize`, `z_range_um` [2] or null, optional
 `pixel_integration` (`box` = the mean of oversample x oversample point samples per pixel, the default when absent;
 `spectral` = the exact pixel integral of the band-limited image; `gauss_legendre` = oversample Gauss-Legendre nodes
-per axis; a reader must refuse a value it does not know instead of rendering `box`; readers written before the key
+per axis; `point` = the centre density per px^2; older files may spell `spectral` as `exact`;
+a reader must refuse a value it does not know instead of rendering `box`; readers written before the key
 existed ignore it and render `box`: off by up to ~0.6 % of the peak at oversample 3, 108 nm pixels); the SIMCODE
 calibration names `pixelsize_um`, `wavelength_um`, `NA`, `n_imm`, `n_med` (duplicates of `optics`, so SIMCODE reads the
 block as a calibration). Optional per-pattern-angle terms (SIMCODE): `psf_dipole_M_angle` [A, 3, 3],
@@ -166,7 +167,8 @@ a_log, gamma_logit, logblur, ...; when present a reader takes them instead of th
 round trip bit-exact)}; see `torch_psf/fourpi.py` for the physics. No arrays.
 
 The optional `fourpi.meta.pixel_integration` is `spectral` for exact integration of each coherent channel intensity.
-The same Fourier filter applies the Gaussian blur and pixel aperture. An absent field selects the legacy midpoint
+The same Fourier filter applies the Gaussian blur and pixel aperture. In `point` mode the filter applies only
+the blur and samples the density at the pixel centres. An absent field selects the legacy midpoint
 average (`box`). A spectral 4Pi source requires zip version 0.4.0.
 
 **source_output**: channel `index` of the top-level source model. `model` is informative only: {pol, phi_rad, tau} of

@@ -139,13 +139,13 @@ def test_fourpi_basis_evaluates_each_pupil_once(monkeypatch, offsets):
     if not offsets:
         model.set_channel_offsets(torch.zeros_like(model.channel_offsets))
     calls = []
-    original = model._arm_pupil
+    original = VectorialPSF._emitter_pupil
 
-    def count(arm, pos):
+    def count(arm, *args):
         calls.append(arm)
-        return original(arm, pos)
+        return original(arm, *args)
 
-    monkeypatch.setattr(model, '_arm_pupil', count)
+    monkeypatch.setattr(VectorialPSF, '_emitter_pupil', count)
     pos, M = emitters()
     basis = model.dipole_basis(pos, phi=.86)
     assert calls == [model.top, model.bot]

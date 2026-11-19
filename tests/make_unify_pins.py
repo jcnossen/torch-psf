@@ -27,7 +27,7 @@ from torch_psf import (AstigmaticGaussianPSF, ChannelsPSF, FourPiPSF, GaussianPS
 from torch_psf.field import FieldPSF, FieldZernikes
 from torch_psf.sofi.model import GridPSF
 from torch_psf.orientation import FocusZ, Polychromatic, dipole_M, fit_orientation, from_angles, model_and_jacobian
-from torch_psf.pixint import ExactVectorialPSF, build_pixel_spline
+from torch_psf.pixint import build_pixel_spline
 
 FILE = ROOT / 'tests/data/unify_pins.json'
 POS = torch.tensor([[.23, -.31, .012], [-.37, .18, .033]])
@@ -64,7 +64,7 @@ def models():
             yield 'spectral_angle_mean', VectorialPSF._from_file(spec, arrays, roisize=7, device='cpu'), {}
 
     v = vec()
-    yield 'exact_prototype', ExactVectorialPSF(v, 'spectral', os=3), {}
+    yield 'exact_prototype', vec('spectral'), {}
     yield 'focus_z', FocusZ(v, height=.017), {}
     yield 'polychromatic', Polychromatic(v, [.64, .72], [.3, .7]), {}
     yield 'gauss2d', GaussianPSF(7, (1.15, 1.4), pixel_um=.108, device='cpu'), {}

@@ -26,6 +26,30 @@ from torch_psf.dataset import Dataset, _plain
 FORMAT, VERSION = 'torch-psf', '0.1.0'
 
 
+def render_with_grad(fn, pos, grad=False, **extra):
+    """Render and optionally return JVPs in x, y, z and each named extra (in order).
+    For channel positions [N, C, 3], a position tangent shifts all channels together.
+    """
+    if not grad:
+        return fn(pos, **extra)
+
+    def evaluate(p, *values):
+        return fn(p, **dict(zip(extra, values)))
+
+    # Forward AD cannot attach tangents to expanded (overlapping) storage, e.g. a scalar 4Pi phase.
+    inputs = tuple(arg.contiguous() for arg in (pos, *extra.values()))
+    derivatives = []
+    for axis in range(3 + len(extra)):
+        tangents = tuple(torch.zeros_like(arg) for arg in inputs)
+        if axis < 3:
+            tangents[0][..., axis] = 1
+        else:
+            tangents[axis - 2].fill_(1)
+        value, derivative = torch.func.jvp(evaluate, inputs, tangents)
+        derivatives.append(derivative)
+    return (value, *derivatives)
+
+
 class PSF:
     """Abstract PSF model. Subclasses set self.roisize (odd, px), self.z_range ((lo, hi) um, or None for 2D),
     self.dev (torch.device) and implement render(pos, grad=False); they may override xy_limit, z_limits, resized and

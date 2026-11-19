@@ -119,7 +119,7 @@ def test_field_psf_render_fit_and_zip(tmp_path):
 def test_integrated_field_tiles_and_channels(tmp_path, monkeypatch):
     from torch_psf import ChannelsPSF, IntegratedSplinePSF, psfzip
 
-    fp = FieldPSF(vec(11, pixel_integration='exact'), field())
+    fp = FieldPSF(vec(11, pixel_integration='spectral'), field())
     tiles = fp.to_tiled(tile=128, z_range=(.2, .3), xy_limit=1)
     xy = torch.tensor(tiles.centers[[0, 3]], device=DEV, dtype=torch.float32)
     pos = torch.tensor([[.19, -.31, .241], [-.33, .12, .264]], device=DEV)

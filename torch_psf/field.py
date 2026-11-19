@@ -39,7 +39,7 @@ from the Zernikes at the tile centre (lazily, on first use); a spot uses the til
 import math
 import numpy as np
 import torch
-from torch_psf.psf import PSF
+from torch_psf.psf import PSF, render_with_grad
 from torch_psf.dataset import Dataset
 from torch_psf.spline import spline_kind
 
@@ -345,16 +345,7 @@ class FieldPSF(PSF):
         f = self.base.focus_um if focus is None else focus
         off = None if xy is None else self.offsets(xy)
         fn = lambda p: self.base(p, f, zcoef_offset=off, dipM=dipM)
-        if not grad:
-            return fn(pos)
-        out, val = [], None
-        for k in range(3):
-            t = torch.zeros_like(pos)
-            t[:, k] = 1
-            v, d = torch.func.jvp(fn, (pos,), (t,))
-            val = v if val is None else val
-            out.append(d)
-        return val, out[0], out[1], out[2]
+        return render_with_grad(fn, pos, grad)
 
     def bind(self, xy):
         """a PSF that renders exactly len(xy) emitters at the field positions xy [N, 2]"""

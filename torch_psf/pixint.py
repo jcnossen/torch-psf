@@ -1,25 +1,6 @@
-"""
-Exact pixel integration (prototype; not exported from torch_psf).
+"""Pixel spline evaluation and construction from the optical model in torch_psf.vectorial.
 
-VectorialPSF integrates over a pixel by averaging s x s point samples (midpoint rule, `oversample` s). Two exact
-alternatives and one spline representation are prototyped here:
-
-1. ExactVectorialPSF: the same vectorial model with an exact (or near-exact) pixel integral.
-   The image-plane intensity |E|^2 of a pupil-function model is strictly band-limited: E is a finite sum of plane waves
-   with |k| <= k0 NA, so |E|^2 has no spatial frequencies above fc = 2 NA / lambda (cycles / um), 0.46 cycles / px for
-   NA 1.49, 700 nm, 108 nm pixels. Two ways to use that:
-   - mode 'spectral': point samples on a uniform grid with os samples per px (os >= 2 is alias-free), padded by `pad`
-     px per side; one FFT; multiply by the exact transfer function of the pixel box, sinc(fx) sinc(fy), and by the
-     optional image-plane blur exp(-2 pi^2 f^T C f); inverse FFT, sampled at the pixel centres. Exact up to the
-     float32 round-off and the circular wrap at the padded border (a raised-cosine taper between fc and os / 2 keeps
-     the kernel compact). Free in the blur path, which pads and FFTs already.
-   - mode 'gauss': Gauss-Legendre quadrature with n nodes per axis instead of the midpoint rule (same cost as
-     oversample n, no padding; error ~ (pi fc)^(2n) (n!)^4 / ((2n + 1) ((2n)!)^3): 1e-3 of the top frequency
-     component for n = 2, 5e-6 for n = 3). No blur (a blur needs the uniform grid).
-   - mode 'box': the current midpoint rule (= VectorialPSF), mode 'point': the point density at the pixel centres
-     (per px^2; the samples for the integrated spline below).
-
-2. PixelSplinePSF: a tensor-product cubic spline (Catmull-Rom or interpolating cubic B-spline) in u, v, z on the
+PixelSplinePSF: a tensor-product cubic spline (Catmull-Rom or interpolating cubic B-spline) in u, v, z on the
    knot grid of CubicSplinePSF (spacing 1 / S px, hz um). Two uses:
    - integrate=True: the knots are point samples of the continuous PSF density f(u, v, z); the pixel value is the exact
      integral of the spline over the pixel. Separable: int_pixel f du dv = (1 / S^2) sum_kl c_kl Wk(x) Wl(y), with
@@ -30,14 +11,13 @@ alternatives and one spline representation are prototyped here:
    - integrate=False: the knots are pixel-integrated values at sub-pixel shifts, interpolated pointwise (= the
      current CubicSplinePSF for kernel 'catmull'; 'bspline' adds the B-spline prefilter).
 """
-import math
-import numpy as np
 import torch
 from torch_psf.optics import resolve_device
 from torch_psf.psf import PSF
 from torch_psf._dipole import DipoleSpline, combine_tables, default_weights, unit_tensors
 from torch_psf.spline import CubicSplinePSF
-from torch_psf.vectorial import dipole_tensor, spectral_min_oversample, check_spectral_oversample, _angle_index
+from torch_psf.integrate import PixelIntegrator, spectral_min_oversample
+from torch_psf.vectorial import _angle_index
 
 
 # ============================================================================================ cubic kernels
@@ -94,145 +74,6 @@ def bspline_prefilter(samples, dims=(0, 1, 2)):
         Mi = torch.linalg.inv(M)
         c = torch.movedim(torch.tensordot(Mi, torch.movedim(c, d, 0), dims=([1], [0])), 0, d)
     return c.to(samples.dtype).contiguous()          # contiguous: the knot-block reads of render are 1.5x slower otherwise
-
-
-# ============================================================================================ exact vectorial
-def _gauss_legendre(n):
-    x, w = np.polynomial.legendre.leggauss(n)
-    return x / 2, w / 2                                # nodes on [-1/2, 1/2], weights summing to 1
-
-
-class ExactVectorialPSF(PSF):
-    """Wraps a VectorialPSF `vec` (its parameters are used as they are) with another pixel integration (see the module
-    docstring): mode 'spectral' (os samples per px, `pad` px padding, raised-cosine taper above the band limit),
-    'gauss' (n = os Gauss-Legendre nodes per axis; no blur), 'box' (midpoint rule with os x os samples) or 'point' (the
-    density at the pixel centres, per px^2). render(pos, grad) as VectorialPSF.render; the blur / dipole terms of vec
-    apply."""
-
-    def __init__(self, vec, mode='spectral', os=2, pad=3):
-        self.vec, self.mode, self.os, self.pad = vec, mode, int(os), int(pad)
-        self.roisize, self.pixel_um, self.dev = vec.roisize, vec.pixel_um, vec.dev
-        self.z_range, self.focus_um = vec.z_range, vec.focus_um
-        if mode == 'gauss' and vec.blur is not None:
-            raise ValueError("mode 'gauss' does not support an image-plane blur; use 'spectral'")
-        if mode in ('spectral', 'point'):
-            assert self.os >= 2, 'the spectral modes need os >= 2 (alias-free sampling of |E|^2)'
-            check_spectral_oversample(self.band_limit(), self.os)
-
-    def resized(self, roisize):
-        return ExactVectorialPSF(self.vec.resized(roisize), self.mode, self.os, self.pad)
-
-    @property
-    def xy_limit(self):
-        return self.vec.xy_limit
-
-    def band_limit(self):
-        """Highest spatial frequency of |E|^2 in cycles / px: 2 NA / lambda * pixel size."""
-        return 2 * float(self.vec.NA) / self.vec.wavelength_um * self.pixel_um
-
-    def _grid(self):
-        """1D sample positions (px, relative to the ROI centre) and their weights per pixel."""
-        R, os_ = self.roisize, self.os
-        if self.mode == 'gauss':
-            x, w = _gauss_legendre(os_)
-            c = np.arange(R) - (R - 1) / 2
-            u = (c[:, None] + x[None]).reshape(-1)
-            return torch.tensor(u, dtype=torch.float32, device=self.dev), torch.tensor(w, dtype=torch.float32, device=self.dev), 0
-        pad = self.pad if self.mode in ('spectral', 'point') else (self.vec.BLUR_PAD if self.vec.blur is not None else 0)
-        ns = (R + 2 * pad) * os_
-        u = (torch.arange(ns, device=self.dev, dtype=torch.float32) - (ns - 1) / 2) / os_
-        return u, None, pad
-
-    def density(self, pos, focus, u, blur=None):
-        """|E|^2 on the grid u x u (px) as a density per px^2 (normalized as VectorialPSF), [B, n, n]. A copy of the
-        first part of VectorialPSF.forward with another image grid."""
-        vec = self.vec
-        B = pos.shape[0]
-        P, kz_med, kz_imm, kx, ky = vec.pupil_fields()
-        Mt = dipole_tensor(vec.dipM, vec.dipw, vec.dev)
-        zc = vec.zcoef[None].expand(B, -1)
-        W = (torch.einsum('bj,jnm->bnm', zc, vec.Z) + vec.pupil_phase[None]) * (2 * math.pi)
-        x = pos[:, 0, None, None] * vec.pixel_um
-        y = pos[:, 1, None, None] * vec.pixel_um
-        ze = pos[:, 2, None, None]
-        f = focus[:, None, None] if torch.is_tensor(focus) and focus.dim() > 0 else focus
-        ph = torch.exp(1j * (W - kx * x - ky * y - kz_imm * f)) * torch.exp(1j * kz_med * ze)
-        Pb = P[None] * ph[:, None]
-        kx1, ky1 = kx[0], ky[:, 0]
-        uu = u * vec.pixel_um
-        Fx = torch.exp(1j * uu[:, None] * kx1[None, :])
-        Fy = torch.exp(1j * uu[:, None] * ky1[None, :])
-        E = Fy @ Pb.to(torch.complex64) @ Fx.T
-        if Mt is None:
-            I = (E.real ** 2 + E.imag ** 2).sum(1) / 3
-        else:
-            Ed = E.reshape(B, 3, 2, *E.shape[-2:])
-            Mc = Mt.to(Ed.real.dtype)
-            F = torch.einsum('ij,bjcuv->bicuv', Mc, Ed.real) + 1j * torch.einsum('ij,bjcuv->bicuv', Mc, Ed.imag)
-            I = (Ed.real * F.real + Ed.imag * F.imag).sum((1, 2))
-        dk = (kx1[1] - kx1[0]) * (ky1[1] - ky1[0])
-        energy = (P.real ** 2 + P.imag ** 2).sum() / 3 * dk / (2 * math.pi) ** 2
-        return I * (dk / (2 * math.pi) ** 2) ** 2 * vec.pixel_um ** 2 / energy
-
-    def _spectral(self, D, box):
-        """Pixel integral (box) or point value (not box) at the pixel centres of the padded os-grid density D [B, n, n],
-        with the optional blur; cropped by pad."""
-        os_, pad, R = self.os, self.pad, self.roisize
-        n = D.shape[-1]
-        f = torch.fft.fftfreq(n, d=1.0 / os_, device=D.device)           # cycles / px
-        fr = torch.fft.rfftfreq(n, d=1.0 / os_, device=D.device)
-        check_spectral_oversample(self.band_limit(), os_)
-        fc = min(self.band_limit() * 1.02, 0.5 * os_ - 0.05)
-        fn = 0.5 * os_
-
-        def taper(q):
-            a = ((q.abs() - fc) / (fn - fc)).clamp(0, 1)
-            return 0.5 * (1 + torch.cos(math.pi * a))
-
-        d = (os_ - 1) / (2 * os_)                                          # sample p os -> pixel centre p
-        Ty = taper(f) * (torch.sinc(f) if box else 1.0) * torch.exp(2j * math.pi * f * d)
-        Tx = taper(fr) * (torch.sinc(fr) if box else 1.0) * torch.exp(2j * math.pi * fr * d)
-        H = Ty[:, None] * Tx[None, :]
-        bl = self.vec.blur
-        if bl is not None:
-            cov = torch.as_tensor(bl, device=D.device, dtype=torch.float32).reshape(-1, 3)
-            q = cov[:, 0, None, None] * fr[None, :] ** 2 + cov[:, 1, None, None] * f[:, None] ** 2 \
-                + 2 * cov[:, 2, None, None] * fr[None, :] * f[:, None]
-            H = H * torch.exp((-2 * math.pi ** 2 * q).clamp(max=3.0))
-        J = torch.fft.irfft2(torch.fft.rfft2(D) * H, s=(n, n))
-        J = J[:, ::os_, ::os_]
-        return J[:, pad:pad + R, pad:pad + R]
-
-    def forward(self, pos, focus=None):
-        f = self.focus_um if focus is None else focus
-        u, w, pad = self._grid()
-        R, os_ = self.roisize, self.os
-        D = self.density(pos, f, u)
-        if self.mode in ('spectral', 'point'):
-            return self._spectral(D, self.mode == 'spectral')
-        if self.mode == 'gauss':
-            B = D.shape[0]
-            D = D.reshape(B, R, os_, R, os_)
-            return torch.einsum('biajn,a,n->bij', D, w, w)
-        # 'box': as VectorialPSF.forward
-        if self.vec.blur is not None:
-            from torch_psf.vectorial import gauss_blur_os
-            D = gauss_blur_os(D, self.vec.blur, os_, pad)
-        B = D.shape[0]
-        return D.reshape(B, R, os_, R, os_).mean((2, 4))
-
-    def render(self, pos, grad=False, focus=None):
-        if not grad:
-            return self.forward(pos, focus)
-        fn = lambda p: self.forward(p, focus)
-        out, val = [], None
-        for k in range(3):
-            t = torch.zeros_like(pos)
-            t[:, k] = 1
-            v, d = torch.func.jvp(fn, (pos,), (t,))
-            val = v if val is None else val
-            out.append(d)
-        return val, out[0], out[1], out[2]
 
 
 # ============================================================================================ spline
@@ -349,20 +190,19 @@ class PixelSplinePSF(PSF):
 
 def build_pixel_spline(vec, roisize, z_range, S, dz_um=0.01, zpad=None, xy_limit=None, kernel='catmull',
                        integrate=True, sample_model=None, chunk=4, backend='sep'):
-    """PixelSplinePSF of the VectorialPSF `vec`: integrate=True samples the point density (ExactVectorialPSF 'point');
-    integrate=False samples pixel values of `sample_model(vec_resized)` (default ExactVectorialPSF 'spectral') at the
+    """PixelSplinePSF of the VectorialPSF `vec`: integrate=True samples the point density (VectorialPSF 'point');
+    integrate=False samples pixel values of `sample_model(vec_resized)` (default VectorialPSF 'spectral') at the
     S x S sub-pixel shifts. The knot grid is that of CubicSplinePSF(roisize, z_range, S, dz_um, zpad, xy_limit).
     zpad default: 3 planes (catmull), 6 (bspline: the mirror boundary of the prefilter perturbs the first ~4 planes)."""
     zpad = (6 if kernel == 'bspline' else 3) if zpad is None else zpad
     xy = roisize / 2 + 1 if xy_limit is None else xy_limit
     geo = CubicSplinePSF(roisize, z_range, oversample=S, dz_um=dz_um, zpad=zpad, xy_limit=xy + 1.0, device=vec.dev,
                          pixel_um=vec.pixel_um)
-    big = vec.resized(geo.Pl)
-    if integrate:
-        model = ExactVectorialPSF(big, 'point', os=spectral_min_oversample(big.band_limit()), pad=3)
+    if not integrate and sample_model is not None:
+        model = sample_model(vec.resized(geo.Pl))
     else:
-        model = sample_model(big) if sample_model is not None else \
-            ExactVectorialPSF(big, 'spectral', os=spectral_min_oversample(big.band_limit()), pad=3)
+        model = vec.resized(geo.Pl, oversample=spectral_min_oversample(vec.band_limit()),
+                            pixel_integration='point' if integrate else 'spectral')
     samples = geo.knots_from_model(model, chunk=chunk)
     spl = PixelSplinePSF(geo, samples, kernel=kernel, integrate=integrate, backend=backend)
     spl.xmax = min(spl.xmax, xy)
@@ -479,7 +319,7 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
         """The integrated spline of a VectorialPSF (its parameters, blur and dipole terms as they are), or of a list
         of per-angle VectorialPSFs (e.g. [PSF.load(calib, angle=a) for a in range(A)]: coefs_angle, one set per
         angle). dipole_components=True stores six density coefficient volumes per angle for per-emitter dipM.
-        Point-density knots of the exact band-limited image (ExactVectorialPSF 'point', point_knots),
+        Point-density knots of the exact band-limited image (VectorialPSF 'point', point_knots),
         interpolated by the cubic B-spline (bspline_prefilter), on the knot grid of
         CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit + 1) (roisize default vec.roisize). Knot
         z = emitter height at vec.focus_um. Accuracy (v4 in-situ PSFs, NA 1.49, 108 nm px, 0 - 0.4 um, offsets
@@ -644,24 +484,17 @@ def point_knots(big, geo, focus, blur=None, dipM=None, chunk=None):
     and dipM (the same layout as CubicSplinePSF.knots_from_model)."""
     S, Pl = geo.S, geo.Pl
     A, B = geo._vec_positions()
-    ob, od = big.blur, big.dipM
-    if blur is not None:
-        big.blur = blur
-    if dipM is not None:
-        big.dipM = dipM
-    try:
-        ex = ExactVectorialPSF(big, 'point', os=spectral_min_oversample(big.band_limit()), pad=3)
-        out = []
-        step = geo.nz if chunk is None else chunk
-        for z0 in range(0, geo.nz, step):
-            z = geo.zs[z0:min(z0 + step, geo.nz)].float()
-            n = len(z)
-            pos = torch.stack([A[None].expand(n, -1), B[None].expand(n, -1), z[:, None].expand(-1, S * S)], -1)
-            imgs = ex.forward(pos.reshape(-1, 3), focus).reshape(n, S, S, Pl, Pl)
-            out.append(imgs.flip(1).flip(2).permute(0, 3, 1, 4, 2).reshape(n, Pl * S, Pl * S))
-        return torch.cat(out)
-    finally:
-        big.blur, big.dipM = ob, od
+    pixels = PixelIntegrator(big, big.blur if blur is None else blur, mode='point',
+                             oversample=spectral_min_oversample(big.band_limit()))
+    out = []
+    step = geo.nz if chunk is None else chunk
+    for z0 in range(0, geo.nz, step):
+        z = geo.zs[z0:min(z0 + step, geo.nz)].float()
+        n = len(z)
+        pos = torch.stack([A[None].expand(n, -1), B[None].expand(n, -1), z[:, None].expand(-1, S * S)], -1)
+        imgs = big._image(pos.reshape(-1, 3), focus, pixels, dipM=dipM).reshape(n, S, S, Pl, Pl)
+        out.append(imgs.flip(1).flip(2).permute(0, 3, 1, 4, 2).reshape(n, Pl * S, Pl * S))
+    return torch.cat(out)
 
 
 def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0,
@@ -696,7 +529,8 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
         spl = build_pixel_spline(vectorial.resized(R), R, (0.0, zmax_um), S, dz_um=dz_um, xy_limit=xy_limit,
                                  kernel='bspline', integrate=True)
     geo = spl.geo
-    big = vectorial.resized(geo.Pl, pixel_integration='spectral')
+    knot_os = spectral_min_oversample(vectorial.band_limit())
+    big = vectorial.resized(geo.Pl, oversample=knot_os, pixel_integration='point')
     big.zcoef.requires_grad_(True)
     focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
     rn2, pix = readnoise_variance(readnoise_e, B, R, dev)
@@ -785,7 +619,7 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
         hist.append(dict(it=it, nll_per_px=tot, focus_um=float(focus.detach())))
         if log is not None:
             log(it, tot, time.time() - t0, big.zcoef.detach())
-    out = vectorial.resized(R, pixel_integration='spectral')
+    out = vectorial.resized(R, oversample=max(vectorial.os, knot_os), pixel_integration='spectral')
     with torch.no_grad():
         out.zcoef.copy_(big.zcoef)
     out.focus_um = float(focus.detach())

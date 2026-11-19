@@ -225,7 +225,6 @@ def test_channels_psf_uses_the_vectorial_dipole_basis():
     """ChannelsPSF of vectorial arms: its dipole_basis [N, C, 6, P, P] (VectorialPSF.dipole_basis per channel) combines
     with M_to_m6 to render(dipM); _dipole._m6 is orientation.M_to_m6."""
     from torch_psf import ChannelsPSF
-    from torch_psf._dipole import _m6
     kw = dict(roisize=7, npupil=16, oversample=2, device='cpu', z_range=(0.0, 0.3))
     offsets = [[0.11, -0.19], [-0.22, 0.16]]
     arms = [VectorialPSF(**kw) for _ in offsets]
@@ -234,7 +233,6 @@ def test_channels_psf_uses_the_vectorial_dipole_basis():
     m = ChannelsPSF(arms, channel_offsets=offsets, intensity_ratio=[0.8, 1.2])
     pos = torch.tensor([[0.17, -0.23, 0.05], [-0.32, 0.24, 0.12]])
     M = dipole_M(from_angles(torch.tensor([30.0, 70.0]), torch.tensor([20.0, 200.0])), torch.tensor([0.9, 0.6]))
-    assert torch.equal(_m6(M), M_to_m6(M))
     with torch.no_grad():
         B = m.dipole_basis(pos)
         ref = m.render(pos, dipM=M)
