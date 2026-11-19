@@ -1,5 +1,6 @@
 """Stage-0 output pins. Reference regeneration is a separate, explicit operation."""
 import json
+import os
 
 import numpy as np
 import pytest
@@ -9,7 +10,11 @@ import make_unify_pins as pins
 
 
 REF = json.loads(pins.FILE.read_text(encoding='utf-8'))
-TOL = 1e-6
+# The references were recorded in float32 on one platform (Windows laptop). Other platforms (BLAS, threads,
+# CUDA / CPU kernels) differ by up to ~1e-5 of the peak in gradients and moments, so the default tolerance is
+# 5e-5 of the peak. TORCH_PSF_PINS_STRICT=1 uses 1e-6 (the recording platform; refactor stages are also checked
+# there for bit identity against the previous commit).
+TOL = 1e-6 if os.environ.get('TORCH_PSF_PINS_STRICT') == '1' else 5e-5
 
 
 @pytest.fixture(scope='module')
