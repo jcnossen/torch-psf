@@ -36,8 +36,9 @@ import torch
 from torch_psf.vectorial import photosel_tensor
 from torch_psf.fit import lm_poisson, localize
 
+from torch_psf._dipole import IJ as _IJ                                   # (xx yy zz xy xz yz)
+
 BASIS = ('xx', 'yy', 'zz', 'xy', 'xz', 'yz')
-_IJ = ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))
 NPAR = 9      # x, y, z, I, bg, v_x, v_y, v_z, g
 PAR_NAMES = ('x', 'y', 'z', 'I', 'bg', 'vx', 'vy', 'vz', 'g')
 

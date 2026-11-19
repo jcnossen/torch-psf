@@ -219,3 +219,25 @@ def test_focus_z_wrapper_matches_defocus():
     assert torch.allclose(torch.einsum('nk,nkuv->nuv', M_to_m6(M), B), a, atol=1e-6)
     th = torch.tensor([[0.1, -0.2, 0.15, 2000.0, 10.0, *from_angles(40.0, 20.0).tolist(), 0.8]])
     assert torch.isfinite(crlb_orientation(w, th)['z']).all()
+
+
+def test_channels_psf_uses_the_vectorial_dipole_basis():
+    """ChannelsPSF of vectorial arms: its dipole_basis [N, C, 6, P, P] (VectorialPSF.dipole_basis per channel) combines
+    with M_to_m6 to render(dipM); _dipole._m6 is orientation.M_to_m6."""
+    from torch_psf import ChannelsPSF
+    from torch_psf._dipole import _m6
+    kw = dict(roisize=7, npupil=16, oversample=2, device='cpu', z_range=(0.0, 0.3))
+    offsets = [[0.11, -0.19], [-0.22, 0.16]]
+    arms = [VectorialPSF(**kw) for _ in offsets]
+    for v, diat in zip(arms, [-1.0, 1.0]):
+        v.diat = diat
+    m = ChannelsPSF(arms, channel_offsets=offsets, intensity_ratio=[0.8, 1.2])
+    pos = torch.tensor([[0.17, -0.23, 0.05], [-0.32, 0.24, 0.12]])
+    M = dipole_M(from_angles(torch.tensor([30.0, 70.0]), torch.tensor([20.0, 200.0])), torch.tensor([0.9, 0.6]))
+    assert torch.equal(_m6(M), M_to_m6(M))
+    with torch.no_grad():
+        B = m.dipole_basis(pos)
+        ref = m.render(pos, dipM=M)
+    assert B.shape == (2, 2, 6, 7, 7)
+    comb = torch.einsum('nk,nckuv->ncuv', M_to_m6(M), B)
+    assert float((comb - ref).abs().max()) <= 1e-5 * float(ref.abs().max())

@@ -6,9 +6,10 @@ IJ = ((0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2))
 
 
 def _m6(M):
-    """Equals orientation.M_to_m6. Replace with that function when the branches are merged."""
-    sym = (M + M.transpose(-1, -2)) / 2
-    return torch.stack([sym[..., i, j] for i, j in IJ], -1)
+    """[..., 3, 3] -> [..., 6] (xx, yy, zz, xy, xz, yz) of the symmetric part: orientation.M_to_m6 (imported lazily;
+    torch_psf.orientation imports this module for IJ)."""
+    from torch_psf.orientation import M_to_m6
+    return M_to_m6(M)
 
 
 def unit_tensors(device):
