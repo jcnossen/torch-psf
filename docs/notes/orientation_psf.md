@@ -336,3 +336,89 @@ in ~2 min.
 * `fig_iso_bias.png`: z and lateral bias of the isotropic-model fit of fixed dipoles vs theta.
 * `fig_corr_z.png`: |rho(theta, z)| and |rho(phi, x)| vs theta; sd_theta vs emitter height.
 * `fig_vortex_images.png`, `fig_vortex_crlb.png`: Vortex reproduction (Fig. 1b/c, 1e/f of Hulleman et al.).
+
+## 7. Vortex orientation pipeline: code, simulations, real data (Hulleman et al. 2021)
+
+**Code.**
+* `torch_psf/vortex.py`
+  * `vortex_psf`: a VectorialPSF with the spiral plate as a fixed `pupil_phase`. `vortex_phase` takes a plate
+    centre, the number of quantisation levels and the phase depth.
+  * `calibrate_beads`: the ZStackEstimator Zernike fit on top of the plate, one run per charge; the best NLL wins.
+    Optionally the plate centre is fitted, alternating with the Zernikes.
+  * `fit_dipole_stacks`: plate calibration in situ from z-stacks of fixed single molecules. Per molecule: x, y, a
+    focus offset, the axis and g. Per plane: photons, background and a shared drift. Global: the plate centre,
+    Zernikes, emitter height and medium index.
+* `torch_psf/orientation.py`
+  * `OrientationEstimator`: spot detection → `fit_orientation` → a `Dataset` with these columns:
+    `theta_deg`, `phi_deg`, `g`, `mu`, `crlb_theta_deg`, `crlb_phi_deg`, `crlb_inplane_deg`, `crlb_g`, `photons`
+    (in the ROI), `intensity`, `bg`, `chi2`, `loglik`.
+  * `FocusZ`: the model with z = the emitter's position relative to the focal plane, at a fixed emitter height. This
+    is needed whenever the emitters sit at an interface with n_med < NA: moving a supercritical emitter below the
+    interface is unphysical.
+  * `fit_orientation(zgrid=...)`: extra starts on a z grid, because for the Vortex PSF the isotropic fit is a poor
+    guide to z.
+* Tests: the estimator on a small movie, the charge choice of the bead calibration, and `FocusZ`.
+
+**Simulations** (`study/orientation/vortex_pipeline_sim.py`; their λ-DNA optics: NA 1.47, 597.5 nm, 65 nm pixels,
+camera offset 106 ADU and 0.33 e/ADU):
+* **Bead calibration** with the plate (charge −1, centre offset (0.03, −0.02), 64 levels, depth 593 / 597.5):
+  * Zernikes recovered within 1.2 mλ (rms error 2 mλ of 52 mλ).
+  * Charge chosen correctly, ΔNLL 0.84 per pixel.
+  * Centre after two rounds: (0.021, −0.016).
+* **PMMA z-stack** (11 planes, g = 0.9, 5e3–4e4 photons, bg 20), fitted with the calibrated model:
+  * Per-molecule spread over the |z| ≤ 300 nm planes: σ_θ 0.86° (CRLB 1.04°), σ_φ 1.51° (CRLB 1.69°).
+  * rms bias 0.5° / 0.9°, no outliers.
+  * z slope −0.94, 94 ± 6 nm per 100 nm step. Only 12 of 20 molecules passed detection at threshold 8.
+* **λ-DNA-like data** (2884 emitters on lines, dipoles perpendicular to the line with a ±25° tilt out of the plane,
+  g ~ 0.8, ~4600 photons, bg 10):
+
+  | quantity | estimated | truth |
+  |---|---|---|
+  | Δφ to the DNA axis, median / MAD | 90.4° / 6.2° | 90.1° / 5.5° |
+  | g, median | 0.815 | 0.813 |
+  | axis error, median / 90th percentile | 3.1° / 6.8° | — |
+
+  The lateral error is 7.8 nm rms against a CRLB of 3.4 nm, likely from the residual plate-centre error of the
+  calibration.
+
+**Real data** (4TU 10.4121/13031837, `study/orientation/vortex_real.py`; untrusted input, read with tifffile / h5py,
+run with `python -I`):
+* **Data details.** The bead z-stacks (51 planes, 100 nm) are taken **without** the vortex plate, as in their own
+  code (`set_parameters_zstack_bead.m`: doetype none). The plate therefore has to be calibrated in situ on the
+  single molecules. Camera settings from their code: beads offset 104.2 ADU, 0.52 e/ADU; single molecules 106 ADU,
+  0.33 e/ADU. Background noise gives 0.30 e/ADU for the PMMA stack, consistent. NA 1.47 as in their code.
+* **Beads.** Some of the brightest beads are saturated (65535 ADU), so I blanked them. The beads are in focus at
+  plane ~22 of 51, not at the stack centre, so I used the 31 planes around it, the central 1024 × 1024 field, the
+  bead size as a 40 nm Gaussian blur and drift. Variants were chosen by the held-out stack:
+  * Scan sign +1 with a fitted radial apodization wins: held-out NLL −9509, against −9482 without the apodization
+    and −9472 with NA fitted instead (NA fit → 1.30).
+  * The apodization amplitude at the pupil edge is 0.36 (exp(−0.58 ρ² − 0.29 ρ⁴ − 0.16 ρ⁶)). This is a strong
+    high-NA loss, possibly from the 4f relay.
+  * χ² stays at ~100 on these very bright beads (~15 000 photons / px at the peak) with constant aberrations. The
+    beads cover the whole field, and their aberration map (NAT) is field dependent.
+* **Plate (in situ).** 16 bright PMMA molecules × 17 planes, `fit_dipole_stacks`:
+  * **Charge +1** in our convention wins clearly. (Their code's `doevortexflip = 1` with x = first array index =
+    column, DIPimage convention, is also +1.) The stage sign is +1.
+  * The decisive finding: the molecules in the thin PMMA film behave as at a **glass / air interface**. n_med 1.0
+    instead of 1.49 lowers the NLL by 1.4 per pixel and the joint-fit χ² from 7.0 to 4.8, and g becomes consistent
+    (0.75–0.84 instead of 0.1–0.76). With n_med, the emitter height, the Zernikes and the centre all fitted:
+    n_med = 0.955, height 0, centre (−0.026, 0.013) pupil radii, χ² 2.06, g 0.85–0.94.
+    (Their simulations and λ-DNA settings use 1.333; their PMMA settings are not in the released code.)
+* **PMMA through-focus validation.** 34 molecules; every plane fitted independently with `FocusZ`, z = defocus:
+
+  | quantity | ours | paper |
+  |---|---|---|
+  | σ_θ / σ_φ per molecule over the \|z\| ≤ 300 nm planes, mean | 2.36° / 2.28° | 1.8° / 2.3° |
+  | σ_θ / σ_φ, median | 1.96° / 1.72° | — |
+  | CRLB θ / φ | 1.09° / 1.16° | 1.5° / 1.8° |
+  | spread / CRLB | ~2.0 | 1.2–1.3 |
+  | z vs stage slope | −0.88 ± 0.16 | −0.99 |
+  | step per 100 nm | 88 nm | 97 ± 11 nm |
+  | g, mean ± sd over molecules | 0.90 ± 0.05 | 0.86 ± 0.03 |
+  | Vortex axis vs standard-PSF axis (same molecules, standard stack fitted per defocused plane): Δθ / Δφ | −1.1 ± 5.9° / −1.2 ± 9.1° | −0.2 ± 1.2° / −0.4 ± 1.4° |
+
+  * 4 of 233 planes are outliers. Our molecules are brighter, hence the smaller CRLB.
+  * Our Vortex vs standard comparison is noisier because their standard-PSF reference is a full z-stack fit.
+  * The precision gap to the CRLB (2× vs their 1.2–1.3×) and the z scale (0.88) point at the remaining model error:
+    the joint χ² is 2. Candidates are the field dependence of the aberrations (constant here), the thin-film optics
+    (a single medium of n ≈ 1 approximates glass / PMMA film / air) and the emission spectrum (one wavelength).

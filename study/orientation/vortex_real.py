@@ -43,6 +43,8 @@ DATA = os.path.expanduser('~/data/vortex_hulleman2021')
 OUT = os.path.join(HERE, 'results')
 os.makedirs(OUT, exist_ok=True)
 DEV = 'cuda' if torch.cuda.is_available() else 'cpu'
+if DEV == 'cuda':
+    torch.cuda.set_per_process_memory_fraction(0.22)       # stay below ~5 GB on the shared GPU
 CAM_BEAD = Camera(gain_e_per_adu=0.52, offset_adu=104.2)
 CAM_SM = Camera(gain_e_per_adu=0.33, offset_adu=106.0)
 OPT = dict(NA=1.47, n_imm=1.518, pixel_um=0.065)
@@ -443,8 +445,8 @@ def run_reorient():
     mov = _movie_photons('reorientation_ATTO_565_tirf_qwp_vortex_900ms.tif')
     psf = sm_focusz(n_med=1.0, height=0.0)                 # molecules on glass in air
     f0 = None
-    est = OrientationEstimator(psf, threshold=8.0, iters=40, z_limits=(-0.9, 0.9), batch=400, isolation=8,
-                               zgrid=(-0.6, -0.3, 0.0, 0.3, 0.6))
+    est = OrientationEstimator(psf, threshold=8.0, iters=40, z_limits=(-0.9, 0.9), batch=200, isolation=8,
+                               zgrid=(-0.4, 0.0, 0.4), chunk=4)
     ds = est.estimate(mov.numpy())
     log(f'reorient: {len(ds)} spots ({time.time() - t0:.0f} s)')
     # link spots of the same molecule over frames (within 2 px of the molecule's first position)
@@ -533,8 +535,8 @@ def run_dna(crop_size=256, frames=(0, 600)):
     log(f'dna: crop {crop}, {mov.shape[0]} frames read ({time.time() - t0:.0f} s)')
     f0 = None
     psf = sm_focusz(n_med=1.333, height=0.0)               # lambda-DNA on the coverslip in water; z = defocus
-    est = OrientationEstimator(psf, threshold=6.0, iters=40, z_limits=(-0.6, 0.6), batch=500,
-                               zgrid=(-0.2, 0.2))
+    est = OrientationEstimator(psf, threshold=6.0, iters=40, z_limits=(-0.6, 0.6), batch=300,
+                               zgrid=(-0.2, 0.2), chunk=50)
     ds = est.estimate(mov.numpy())
     log(f'dna: {len(ds)} spots fitted ({time.time() - t0:.0f} s)')
     chi2 = ds['chi2'].numpy()
