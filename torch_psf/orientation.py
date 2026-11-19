@@ -345,7 +345,8 @@ def _track_dims(rois):
 
 @torch.no_grad()
 def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, theta0=None, z_limits=(0.0, 0.4),
-                    g_limits=(0.0, 1.0), batch=500, mirror=True, iso_iters=30, zstarts=4, zgrid=None):
+                    g_limits=(0.0, 1.0), batch=500, mirror=True, iso_iters=30, zstarts=4, zgrid=None,
+                    zcoef_offset=None):
     """Poisson MLE of theta = (x px, y px, z um, I, bg, v_x, v_y, v_z, g) per spot (rois [N, R, R]) or per track
     (rois [N, T, R, R]: frames sharing position, orientation, I and bg; per-frame known factors h [N, T] / [T] and
     optional excitation tensors K [T, 3, 3] or [N, T, 3, 3], see model_and_jacobian).
@@ -355,6 +356,8 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
     mirror=True also the mirror start (mu_z -> -mu_z, the other tilt sign); the best likelihood wins.
     zgrid: extra starts at these heights (um; x, y, I, bg from the isotropic fit, (mu, g) from the linear-M
     solution at each height, each with its mirror): for PSFs whose isotropic fit is a poor guide to z (Vortex).
+    zcoef_offset [N, nz]: per-ROI Zernike offsets (field-dependent aberrations, e.g. FieldZernikes.offsets at each
+    ROI's field position); the isotropic start ignores them.
     Returns dict: theta [N, 9] (v unit, canonical mu_z >= 0), nll [N], theta_deg / phi_deg [N] (angles(mu)), g [N],
     crlb (crlb_orientation at the estimate), M_lin [N, 3, 3] (the linear solution)."""
     d, single = _track_dims(rois)
@@ -367,6 +370,7 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
         db = d[s:s + batch]
         n = len(db)
         hb = None if hh is None else hh[s:s + batch]
+        zo = None if zcoef_offset is None else zcoef_offset[s:s + batch]
         Kb = None
         if K is not None:
             Kt = torch.as_tensor(K, dtype=d.dtype, device=dev)
@@ -383,7 +387,7 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
                 th_iso, _ = localize(psf, dsum, iters=iso_iters, zstarts=zstarts, batch=batch)
             finally:
                 psf.z_range = zr0
-            Bb = basis_images(psf, th_iso[:, :3], focus)
+            Bb = basis_images(psf, th_iso[:, :3], focus, zcoef_offset=zo)
             Ml, I0, bg0 = solve_M(Bb, db, h=hm)
             mu0, g0 = project_M(Ml)
             g0 = g0.clamp(0.1, 0.9)
@@ -394,7 +398,7 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
             starts = [base]
             for zg in (zgrid or ()):
                 pz = th_iso[:, :3].clone(); pz[:, 2] = float(zg)
-                Mz, _, _ = solve_M(basis_images(psf, pz, focus), db, h=hm)
+                Mz, _, _ = solve_M(basis_images(psf, pz, focus, zcoef_offset=zo), db, h=hm)
                 mz, gz = project_M(Mz)
                 st = base.clone(); st[:, 2] = float(zg); st[:, 5:8] = mz; st[:, 8] = gz.clamp(0.1, 0.9)
                 starts.append(st)
@@ -404,7 +408,7 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
                     starts.append(alt)
         best, bnll = None, None
         for st in starts:
-            th, nll = lm_poisson(lambda t: model_and_jacobian(psf, t, T, focus, hb, Kb), db, st, var=var,
+            th, nll = lm_poisson(lambda t: model_and_jacobian(psf, t, T, focus, hb, Kb, zo), db, st, var=var,
                                  clamp=lambda t: _clamp(t, psf, z_limits=zl, g_limits=g_limits), iters=iters)
             if best is None:
                 best, bnll = th, nll
@@ -415,7 +419,7 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
         out_th.append(best); out_nll.append(bnll); out_Ml.append(Ml)
     th = torch.cat(out_th)
     tdeg, pdeg = angles(th[:, 5:8])
-    cr = crlb_orientation(psf, th, T, focus, hh, K, var)
+    cr = crlb_orientation(psf, th, T, focus, hh, K, var, zcoef_offset=zcoef_offset)
     return dict(theta=th, nll=torch.cat(out_nll), theta_deg=tdeg, phi_deg=pdeg, g=th[:, 8], crlb=cr,
                 M_lin=torch.cat(out_Ml))
 
@@ -485,23 +489,27 @@ class OrientationEstimator:
     psf: VectorialPSF (its focus_um is the focal plane of the fits; z = emitter height in the model's coordinate).
     camera: Camera / calibration json / None (data in photons). z_limits (um): the fitted z range (default
     psf.z_range); g_limits; iters (LM iterations per start); mirror (also the mirrored-tilt start); batch (spots per
-    GPU batch); zgrid (extra z starts, see fit_orientation); threshold and detect_kw: detection (see PSF.localize). progress(done, total, n) / stop() hooks.
+    GPU batch); zgrid (extra z starts, see fit_orientation); field: torch_psf.field.FieldZernikes (field-dependent
+    Zernikes; each spot gets the offsets at its ROI centre in camera px, so pass the full-frame coordinates or
+    corners); threshold and detect_kw: detection (see PSF.localize). progress(done, total, n) / stop() hooks.
 
     estimate(data, frames=None) -> Dataset. data: a movie (path / array [T, H, W] / reader) or Spots;
     fit_rois(rois, corners=None, frame_ids=None) for ROIs [N, P, P] in photons (corners [N, 2] = (x0, y0)).
     Dataset fields (one row per spot): frame, pos [n, 3] px (image x, y; z = emitter height / lateral pixel size),
     crlb [n, 3] px, photons (signal photons in the ROI), bg, intensity (I: photons of an isotropic emitter at the
     coverslip, the model's scale), theta_deg (polar angle from the optical axis, 0..90), phi_deg (azimuth from +x
-    towards +y, 0..360, of the axis with mu_z >= 0), g (order parameter, g2 of Hulleman et al.), crlb_theta_deg,
+    towards +y, 0..360, of the axis with mu_z >= 0), g (order parameter, g2 of Hulleman et al.; within g_limits:
+    with g_limits wider than [0, 1], e.g. (-0.5, 1.5), g is the unconstrained estimate whose spread matches crlb_g
+    near the physical bounds), g_display (g clamped to [0, 1]), crlb_theta_deg,
     crlb_phi_deg, crlb_inplane_deg, crlb_g, crlb_photons, crlb_bg, mu [n, 3], loglik (-NLL), chi2 (mean
     (d - mu)^2 / mu per pixel), at_limit (x / y at the offset limit)."""
 
     def __init__(self, psf, camera=None, threshold=6.0, iters=40, z_limits=None, g_limits=(0.0, 1.0), mirror=True,
-                 batch=500, zstarts=4, zgrid=None, device=None, progress=None, stop=None, **detect_kw):
+                 batch=500, zstarts=4, zgrid=None, field=None, device=None, progress=None, stop=None, **detect_kw):
         from torch_psf.estimators import _camera
         self.psf, self.camera = psf, _camera(camera)
         self.threshold, self.iters, self.mirror, self.batch, self.zstarts = threshold, iters, mirror, batch, zstarts
-        self.zgrid = zgrid
+        self.zgrid, self.field = zgrid, field
         self.z_limits = tuple(z_limits) if z_limits is not None else tuple(psf.z_range)
         self.g_limits = tuple(g_limits)
         self.dev = psf.dev if device is None else torch.device(device)
@@ -517,12 +525,22 @@ class OrientationEstimator:
         rois = torch.as_tensor(rois, dtype=torch.float32, device=self.dev)
         N, P = len(rois), psf.roisize
         cols = {k: [] for k in ('th', 'nll', 'chi2', 'ph', 'cr')}
+        zo_all = None
+        if self.field is not None:
+            if corners is None:
+                raise ValueError('a field model needs the ROI corners (field positions)')
+            zidx = psf.psf.zidx if isinstance(psf, FocusZ) else psf.zidx
+            cxy = torch.as_tensor(corners, dtype=torch.float32, device=self.dev) + (P - 1) / 2
+            with torch.no_grad():
+                zo_all = self.field.to(self.dev).offsets(cxy, zidx)
         for s in range(0, N, self.batch):
             d = rois[s:s + self.batch]
+            zo = None if zo_all is None else zo_all[s:s + self.batch]
             r = fit_orientation(psf, d, iters=self.iters, z_limits=self.z_limits, g_limits=self.g_limits,
-                                batch=self.batch, mirror=self.mirror, zstarts=self.zstarts, zgrid=self.zgrid)
+                                batch=self.batch, mirror=self.mirror, zstarts=self.zstarts, zgrid=self.zgrid,
+                                zcoef_offset=zo)
             th = r['theta']
-            mu, _ = model_and_jacobian(psf, th)
+            mu, _ = model_and_jacobian(psf, th, zcoef_offset=zo)
             mu = mu[:, 0]
             cols['th'].append(th); cols['nll'].append(r['nll']); cols['cr'].append(r['crlb'])
             cols['chi2'].append(((d - mu) ** 2 / mu.clamp_min(1e-6)).flatten(1).mean(1))
@@ -553,7 +571,8 @@ class OrientationEstimator:
                       crlb=cpu(torch.stack([cr['x'], cr['y'], cr['z'] / px], 1).float()),
                       photons=cpu(ph), bg=cpu(th[:, 4]), intensity=cpu(I),
                       crlb_photons=cpu(cr['I'] * ph / I.clamp_min(1e-6)), crlb_bg=cpu(cr['bg']),
-                      theta_deg=cpu(tdeg), phi_deg=cpu(pdeg), g=cpu(th[:, 8]), mu=cpu(th[:, 5:8]),
+                      theta_deg=cpu(tdeg), phi_deg=cpu(pdeg), g=cpu(th[:, 8]), g_display=cpu(th[:, 8].clamp(0, 1)),
+                      mu=cpu(th[:, 5:8]),
                       crlb_theta_deg=cpu(cr['theta']), crlb_phi_deg=cpu(cr['phi']),
                       crlb_inplane_deg=cpu(cr['inplane']), crlb_g=cpu(cr['g']),
                       loglik=cpu(-nll), chi2=cpu(chi2), at_limit=cpu(at_limit(th, psf)))
@@ -577,3 +596,58 @@ class OrientationEstimator:
         ds.meta['n_spots'] = len(sp)
         self.report = dict(n=len(ds), seconds=time.time() - t0, chi2_median=ds.meta.get('chi2_median'))
         return ds
+
+
+# ------------------------------------------------------------------ polychromatic emission
+class Polychromatic:
+    """A VectorialPSF averaged over an emission spectrum: sum_i w_i psf(lambda_i), the pupil phase (Zernikes and the
+    free pupil_phase, e.g. a vortex plate: a fixed optical path) scaled by lambda_0 / lambda_i, lambda_0 =
+    psf.wavelength_um; each wavelength normalised as VectorialPSF (an aberration-free isotropic emitter at the
+    coverslip integrates to 1), weights normalised to sum 1. Usable wherever this module takes a model (also inside
+    FocusZ); n_med / n_imm dispersion is ignored."""
+
+    def __init__(self, psf, wavelengths_um, weights=None):
+        self.psf = psf
+        self.wl = [float(w) for w in wavelengths_um]
+        w = torch.ones(len(self.wl)) if weights is None else torch.as_tensor(weights, dtype=torch.float32)
+        self.w = (w / w.sum()).tolist()
+
+    def __getattr__(self, name):          # roisize, pixel_um, dev, focus_um, z_range, zidx, ... of the base model
+        if name in ('psf', 'wl', 'w'):
+            raise AttributeError(name)
+        return getattr(self.psf, name)
+
+    def _each(self, fn, zcoef_offset):
+        m, wl0, pp0 = self.psf, self.psf.wavelength_um, self.psf.pupil_phase
+        out = None
+        try:
+            for wl, w in zip(self.wl, self.w):
+                s = wl0 / wl
+                m.wavelength_um = wl
+                m.pupil_phase = pp0 * s
+                zo = m.zcoef[None] * (s - 1) + (0.0 if zcoef_offset is None else zcoef_offset * s)
+                v = fn(zo)
+                out = v * w if out is None else out + v * w
+        finally:
+            m.wavelength_um, m.pupil_phase = wl0, pp0
+        return out
+
+    def dipole_basis(self, pos, focus, zcoef_offset=None, blur=None):
+        return self._each(lambda zo: self.psf.dipole_basis(pos, focus, zo.expand(len(pos), -1), blur), zcoef_offset)
+
+    def __call__(self, pos, focus=None, zcoef_offset=None, **kw):
+        f = self.psf.focus_um if focus is None else focus
+        return self._each(lambda zo: self.psf(pos, f, zcoef_offset=zo.expand(len(pos), -1), **kw), zcoef_offset)
+
+    def render(self, pos, grad=False, focus=None):
+        fn = lambda p: self(p, focus)
+        if not grad:
+            return fn(pos)
+        out, val = [], None
+        for k in range(3):
+            t = torch.zeros_like(pos)
+            t[:, k] = 1
+            v, d = torch.func.jvp(fn, (pos,), (t,))
+            val = v if val is None else val
+            out.append(d)
+        return val, out[0], out[1], out[2]

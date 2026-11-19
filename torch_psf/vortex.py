@@ -107,7 +107,8 @@ def calibrate_beads(stacks, dz_um, start, camera=None, charges=(-1, 1), fit_cent
 
 def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=None, xy0=None, iters=400,
                       fit_center=True, fit_zernike=True, fit_offset=True, drift=True, height=0.0, fit_height=False,
-                      fit_nmed=False, fit_params=(), max_height=None, lr=3e-3, log=None):
+                      fit_nmed=False, fit_params=(), max_height=None, field=None, field_xy=None, spectrum=None,
+                      lr=3e-3, log=None):
     """Plate (and aberration) calibration from z-stacks of fixed single molecules, e.g. dye molecules in PMMA imaged
     through focus with the plate in place (the bead stacks of Hulleman et al. are without it).
 
@@ -119,11 +120,14 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
     (fit_center), the Zernikes (fit_zernike), the emitter height above the coverslip (height, fit_height; one for all
     molecules: e.g. a thin film; clamped to [0, max_height], max_height a number or the name of a model parameter
     such as 'film_um'), the medium index (fit_nmed) and any other parameters
-    of the model named in fit_params (e.g. 'film_um' of a torch_psf.layered.LayeredVectorialPSF), charge fixed. Adam on the Poisson NLL. mu0 [nm, 3], xy0 [nm, 2]:
+    of the model named in fit_params (e.g. 'film_um' of a torch_psf.layered.LayeredVectorialPSF), charge fixed.
+    field: torch_psf.field.FieldZernikes (fitted in place, with its ridge prior) and field_xy [nm, 2] the molecules'
+    field positions (camera px): the Zernikes of molecule m are psf.zcoef + field.offsets(field_xy[m]).
+    spectrum: (wavelengths_um, weights): polychromatic emission (orientation.Polychromatic). Adam on the Poisson NLL. mu0 [nm, 3], xy0 [nm, 2]:
     starting axis / position (e.g. from per-plane fit_orientation at the in-focus plane).
     Returns dict(psf (copy with the fitted Zernikes and plate), center, nll, nll_per_px, mu, g, xy, offset, I, bg,
     model)."""
-    from torch_psf.orientation import dipole_M, unit
+    from torch_psf.orientation import dipole_M, unit, Polychromatic
     nm, nk, P = d.shape[0], d.shape[1], d.shape[-1]
     dev = d.device
     psf = vortex_psf(start=psf, roisize=P, charge=charge, center=center, levels=0, depth=depth)
@@ -155,6 +159,11 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
     for name in fit_params:
         getattr(psf, name).requires_grad_(True)
         groups.append(dict(params=[getattr(psf, name)], lr=2e-3))
+    if field is not None:
+        field = field.to(dev)
+        field.coef.requires_grad_(True)
+        groups.append(dict(params=[field.coef], lr=lr))
+        fxy = torch.as_tensor(field_xy, dtype=torch.float32, device=dev)
     if fit_center:
         groups.append(dict(params=[c], lr=2e-3))
     if fit_zernike:
@@ -172,15 +181,21 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
             hh = torch.minimum(hh, mh)
         pos = torch.cat([pxy, hh.expand(nm, nk, 1)], -1).reshape(-1, 3)
         f = (off[:, None] + fk[None]).reshape(-1)
-        img = psf(pos, f, dipM=M[:, None].expand(-1, nk, -1, -1).reshape(-1, 3, 3))
+        zo = None
+        if field is not None:
+            zo = field.offsets(fxy, psf.zidx)[:, None].expand(-1, nk, -1).reshape(nm * nk, -1)
+        mdl = psf if spectrum is None else Polychromatic(psf, *spectrum)
+        img = mdl(pos, f, dipM=M[:, None].expand(-1, nk, -1, -1).reshape(-1, 3, 3), zcoef_offset=zo)
         return torch.exp(logI).reshape(-1, 1, 1) * img + bg.reshape(-1, 1, 1)
 
     l = None
     for it in range(iters):
         opt.zero_grad()
         l = poisson_nll(d.reshape(-1, P, P), model()).sum()
-        l.backward()
+        (l + (field.penalty() if field is not None else 0.0)).backward()
         opt.step()
+        if field is not None:
+            field.project_()
         if log is not None and it % 50 == 0:
             log(it, float(l))
     with torch.no_grad():
@@ -190,6 +205,8 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
     psf.n_med.requires_grad_(False)
     for name in fit_params:
         getattr(psf, name).requires_grad_(False)
+    if field is not None:
+        field.coef.requires_grad_(False)
     psf.pupil_phase = psf.pupil_phase.detach()
     out = vortex_psf(start=psf, roisize=P, charge=charge, center=c.detach().tolist(), levels=0, depth=depth)
     extra = {name: float(getattr(psf, name)) for name in fit_params}

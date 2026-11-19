@@ -37,7 +37,7 @@ from torch_psf.camera import Camera                                             
 from torch_psf.psf import PSF                                                          # noqa: E402
 from torch_psf.estimators import ZStackEstimator, find_beads                           # noqa: E402
 from torch_psf.vortex import vortex_psf                                                # noqa: E402
-from torch_psf.orientation import OrientationEstimator, fit_orientation, FocusZ       # noqa: E402
+from torch_psf.orientation import OrientationEstimator, fit_orientation, FocusZ, Polychromatic  # noqa: E402
 
 DATA = os.path.expanduser('~/data/vortex_hulleman2021')
 OUT = os.path.join(HERE, 'results')
@@ -154,6 +154,8 @@ def sm_focusz(n_med=None, vortex=True, z_range=(-0.9, 0.9), height=None, plate_f
         lay = layered
     v = sm_model(n, charge=pl['charge'], center=pl['center'], z_range=z_range, vortex=vortex, layered=lay,
                  plate_file=pf)
+    if pl.get('spectrum'):
+        v = Polychromatic(v, *pl['spectrum'])
     return FocusZ(v, height=h, z_range=z_range)
 
 
@@ -194,11 +196,13 @@ def pmma_molecules(nmax=40, roisize=15):
     return out
 
 
-def fit_stack(psf, rois, iters=40, z_limits=(-0.9, 0.9), mirror=True, zgrid=(-0.6, -0.3, 0.0, 0.3, 0.6)):
+def fit_stack(psf, rois, iters=40, z_limits=(-0.9, 0.9), mirror=True, zgrid=(-0.6, -0.3, 0.0, 0.3, 0.6),
+              zcoef_offset=None):
     """Orientation fits of every plane of every molecule: rois [n_mol, nk, P, P] -> dict of [n_mol, nk] arrays."""
     nm, nk, P = rois.shape[:3]
+    zo = None if zcoef_offset is None else zcoef_offset[:, None].expand(-1, nk, -1).reshape(nm * nk, -1)
     r = fit_orientation(psf, rois.reshape(-1, P, P), iters=iters, z_limits=z_limits, batch=400, mirror=mirror,
-                        zgrid=zgrid)
+                        zgrid=zgrid, zcoef_offset=zo)
     out = dict(theta=r['theta'].reshape(nm, nk, -1).cpu().numpy(), nll=r['nll'].reshape(nm, nk).cpu().numpy(),
                theta_deg=r['theta_deg'].reshape(nm, nk).cpu().numpy(), phi_deg=r['phi_deg'].reshape(nm, nk).cpu().numpy())
     for k in ('theta', 'phi', 'inplane', 'g', 'z', 'x', 'y', 'I'):
@@ -332,6 +336,101 @@ def run_layer(nmol=16, planes=range(4, 21), kc=12, iters=600):
     json.dump(E, open(os.path.join(OUT, 'real_plate_effective600.json'), 'w'), indent=1)
 
 
+FIELD_NOLL = (5, 6, 7, 8, 11)
+FIELD_ORDER = {5: 2, 6: 2, 7: 1, 8: 1, 11: 1}
+
+
+def field_model(pl, device=DEV):
+    """FieldZernikes of a plate file with a 'field' block (None without)."""
+    from torch_psf.field import FieldZernikes
+    fb = pl.get('field')
+    if not fb:
+        return None
+    return FieldZernikes(fb['noll'], {int(k): v for k, v in fb['orders'].items()}, norm=fb['norm'],
+                         prior_sd=fb['prior_sd'], coef=fb['coef'], device=device)
+
+
+def run_field(planes=range(4, 21), kc=12, iters=600, prior_sd=0.05):
+    """Field-dependent Zernikes (torch_psf.field.FieldZernikes, modes 5 6 7 8 11, orders 2 2 1 1 1) in the joint
+    PMMA stack fit, on the even-numbered molecules (the odd ones are held out for the per-plane validation), against
+    the constant-aberration fit on the same molecules. Starts from real_plate.json (effective medium).
+    -> results/real_plate_field.json and results/real_plate_const.json (same training molecules)"""
+    from torch_psf.vortex import fit_dipole_stacks
+    from torch_psf.field import FieldZernikes
+    t0 = time.time()
+    pl = plate('real_plate.json')
+    mols = pmma_molecules()
+    centers = np.array([m[0] for m in mols], np.float32)
+    rois, _ = stack_rois(PMMA_V, [m[0] for m in mols])
+    train = list(range(0, len(mols), 2))
+    d = rois[train][:, list(planes)].contiguous()
+    f = pl['stage_sign'] * 0.1 * (torch.tensor(list(planes), dtype=torch.float32) - kc)
+    base = sm_model(pl['n_med'], charge=pl['charge'], center=pl['center'], z_range=(-0.9, 0.9))
+    r0 = fit_orientation(FocusZ(base, height=pl['height_um'], z_range=(-0.3, 0.3)), rois[train][:, kc], iters=40,
+                         z_limits=(-0.3, 0.3))
+    out = {}
+    for name in ('const', 'field'):
+        fz = FieldZernikes.from_positions(FIELD_NOLL, FIELD_ORDER, centers, margin=20.0, prior_sd=prior_sd,
+                                          device=DEV) if name == 'field' else None
+        r = fit_dipole_stacks(base, d, f, pl['charge'], center=pl['center'], depth=DEPTH, mu0=r0['theta'][:, 5:8],
+                              xy0=r0['theta'][:, :2], iters=iters, fit_center=True, fit_zernike=True,
+                              height=pl['height_um'], fit_height=True, fit_nmed=True, field=fz,
+                              field_xy=centers[train] if fz is not None else None)
+        chi2 = ((d - r['model']) ** 2 / r['model'].clamp_min(1e-6)).flatten(2).mean(2)
+        P = dict(pl)
+        P.update(center=r['center'], zernike_waves=r['psf'].zcoef.tolist(), n_med=r['n_med'], height_um=r['height'],
+                 nll_per_px=r['nll_per_px'], chi2_median=float(chi2.median()), train_molecules=train,
+                 test_molecules=list(range(1, len(mols), 2)))
+        if fz is not None:
+            P['field'] = dict(noll=list(FIELD_NOLL), orders={str(k): v for k, v in FIELD_ORDER.items()},
+                              norm=list(fz.norm), prior_sd=prior_sd, coef=fz.coef.detach().cpu().tolist())
+            P['field_range_waves'] = {str(j): float(np.ptp(fz.maps(*np.meshgrid(np.linspace(fz.norm[0] - fz.norm[2], fz.norm[0] + fz.norm[2], 9),
+                                                                         np.linspace(fz.norm[1] - fz.norm[3], fz.norm[1] + fz.norm[3], 9)))[..., i]))
+                                      for i, j in enumerate(FIELD_NOLL)} if hasattr(fz, 'maps') else None
+        json.dump(P, open(os.path.join(OUT, f'real_plate_{name}.json'), 'w'), indent=1)
+        out[name] = dict(nll_per_px=r['nll_per_px'], chi2=float(chi2.median()), n_med=r['n_med'])
+        log(f"field {name}: nll/px {r['nll_per_px']:.4f} chi2 {float(chi2.median()):.3f} n_med {r['n_med']:.3f} "
+            f"({time.time() - t0:.0f} s)")
+    log(json.dumps(out))
+
+
+SPECTRUM = ([0.5725, 0.5975, 0.6225], [1.0, 2.0, 1.0])     # ~ATTO 565 emission band (assumed; filter unknown)
+
+
+def run_spectrum(planes=range(4, 21), kc=12, iters=600):
+    """Polychromatic emission (orientation.Polychromatic, SPECTRUM) on top of the field-dependent model: the joint
+    PMMA stack fit on the same training molecules, starting from real_plate_field.json.
+    -> results/real_plate_spectrum.json"""
+    from torch_psf.vortex import fit_dipole_stacks
+    t0 = time.time()
+    pl = plate('real_plate_field.json')
+    mols = pmma_molecules()
+    centers = np.array([m[0] for m in mols], np.float32)
+    rois, _ = stack_rois(PMMA_V, [m[0] for m in mols])
+    train = pl['train_molecules']
+    d = rois[train][:, list(planes)].contiguous()
+    f = pl['stage_sign'] * 0.1 * (torch.tensor(list(planes), dtype=torch.float32) - kc)
+    base = sm_model(pl['n_med'], charge=pl['charge'], center=pl['center'], z_range=(-0.9, 0.9),
+                    plate_file='real_plate_field.json')
+    fz = field_model(pl)
+    with torch.no_grad():
+        zo = fz.offsets(torch.as_tensor(centers[train], device=DEV), base.zidx)
+    r0 = fit_orientation(FocusZ(Polychromatic(base, *SPECTRUM), height=pl['height_um'], z_range=(-0.3, 0.3)),
+                         rois[train][:, kc], iters=40, z_limits=(-0.3, 0.3), zcoef_offset=zo)
+    r = fit_dipole_stacks(base, d, f, pl['charge'], center=pl['center'], depth=DEPTH, mu0=r0['theta'][:, 5:8],
+                          xy0=r0['theta'][:, :2], iters=iters, fit_center=True, fit_zernike=True,
+                          height=pl['height_um'], fit_height=True, fit_nmed=True, field=fz,
+                          field_xy=centers[train], spectrum=SPECTRUM)
+    chi2 = ((d - r['model']) ** 2 / r['model'].clamp_min(1e-6)).flatten(2).mean(2)
+    P = dict(pl)
+    P.update(center=r['center'], zernike_waves=r['psf'].zcoef.tolist(), n_med=r['n_med'], height_um=r['height'],
+             nll_per_px=r['nll_per_px'], chi2_median=float(chi2.median()), spectrum=list(SPECTRUM))
+    P['field'] = dict(pl['field'], coef=fz.coef.detach().cpu().tolist())
+    json.dump(P, open(os.path.join(OUT, 'real_plate_spectrum.json'), 'w'), indent=1)
+    log(f"spectrum: nll/px {r['nll_per_px']:.4f} chi2 {float(chi2.median()):.3f} n_med {r['n_med']:.3f} "
+        f"({time.time() - t0:.0f} s)")
+
+
 def _circ_mean_sd(a, period=360.0, w=None):
     z = np.exp(2j * np.pi * np.asarray(a) / period)
     m = np.average(z, weights=w)
@@ -435,7 +534,12 @@ def run_pmma():
     rs, cs = stack_rois(PMMA_S, [m[1] for m in mols])
     pv = sm_focusz()
     ps = sm_focusz(vortex=False)
-    fv = fit_stack(pv, rv)
+    fz = field_model(pl)
+    zo = None
+    if fz is not None:
+        with torch.no_grad():
+            zo = fz.offsets(torch.tensor([m[0] for m in mols], dtype=torch.float32, device=DEV), pv.psf.zidx)
+    fv = fit_stack(pv, rv, zcoef_offset=zo)
     fs = fit_stack(ps, rs)
     log(f'pmma: fitted {rv.shape[0]} molecules x {rv.shape[1]} planes, both stacks ({time.time() - t0:.0f} s)')
     nk = rv.shape[1]
@@ -467,7 +571,9 @@ def run_pmma():
                                   g_std=gs.tolist(), crlb_theta=fv['crlb_theta'][i].tolist(),
                                   crlb_phi=fv['crlb_phi'][i].tolist()))
         rows.append(row)
-    summ = summarize_pmma(rows)
+    test = set(pl.get('test_molecules', range(len(mols))))
+    summ = summarize_pmma([r for r in rows if r['mol'] in test])
+    summ['molecules_evaluated'] = 'held out (odd)' if 'test_molecules' in pl else 'all'
     summ.update(charge=pl['charge'], center=pl['center'], n_med=pl.get('n_med'), height_um=pl.get('height_um'))
     summ['seconds'] = time.time() - t0
     log(json.dumps(summ, indent=1))
@@ -716,6 +822,10 @@ if __name__ == '__main__':
         run_plate2()
     if 'layer' in what:
         run_layer()
+    if 'field' in what:
+        run_field()
+    if 'spectrum' in what:
+        run_spectrum()
     if 'pmma' in what:
         run_pmma()
     if 'pmma_summary' in what:
