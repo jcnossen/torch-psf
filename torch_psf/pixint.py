@@ -385,7 +385,7 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
                       blur='none', groups=None, ngroups=1, group_psf_kwargs=None, extra_params=(), batch=4000,
                       lr_xyz=0.03, lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False,
                       fix_focus=False, log=None, S=3, dz_um=0.01, xy_limit=None, final_exact=True, init_xy=None, init_z=None,
-                      init_blur=None, lr_final=1.0, vp_grad=False):
+                      init_blur=None, lr_final=1.0):
     """estimation.fit_tracks with the samples rendered by the integrated cubic B-spline (PixelSplinePSF, S knots / px,
     dz_um, point-density knots of the exact vectorial model, max error ~3e-5 of the peak at S = 3) instead of the
     vectorial model: per iteration the knots are built once per PSF group from the current Zernikes / focus / blur /
@@ -400,13 +400,11 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
     (0, zmax_um)) start every sample there instead of at xy_init / zmax_um / 2 (e.g. from a multi-start refit under the
     starting PSF, estimation.heldout_tracks); init_blur [sxx, syy, sxy] (px^2) starts the 'line' / 'cov' blur there (its
     Cholesky factor; default 0.05 px); lr_final: the learning rates of all parameters decay from their value at the end of
-    the warmup to lr_final x that value at the last iteration (cosine; 1 = constant, as before). vp_grad: the gradient
-    also through the closed-form I / bg (fit.solve_linear, differentiated through its reweighting iterations) instead
-    of with them held fixed: solve_linear is the Poisson-weighted least-squares solution, not the minimiser of the
-    Gaussian NLL, so with I / bg held fixed the gradient is not that of the NLL that is evaluated (here and in
-    heldout_tracks) and the fit settles away from its minimum."""
+    the warmup to lr_final x that value at the last iteration (cosine; 1 = constant, as before). As in fit_tracks, the
+    gradient goes through the closed-form I / bg (fit.solve_linear_grad): it is the Poisson-weighted IRLS estimate, not
+    the minimiser of the Gaussian NLL that is evaluated, so holding I / bg fixed would bias the fit."""
     import math, time
-    from torch_psf.fit import solve_linear, readnoise_variance
+    from torch_psf.fit import solve_linear_grad, readnoise_variance
     dev = tracks.rois.device
     B, T, R = tracks.rois.shape[0], tracks.rois.shape[1], tracks.rois.shape[-1]
     c = (R - 1) / 2
@@ -470,10 +468,7 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
         pos = torch.cat([xy[sl], zmax_um * torch.sigmoid(zr[sl])[:, None]], 1)
         psf = torch.stack([render(pos, g, K) for g in range(ng)], 1)                       # [b, ng, R, R]
         psf = torch.gather(psf, 1, (g_ if ng > 1 else torch.zeros_like(g_))[..., None, None].expand(-1, -1, R, R))
-        if vp_grad and torch.is_grad_enabled():
-            I, bg = solve_linear.__wrapped__(psf.reshape(b, T, -1), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
-        else:
-            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
+        I, bg = solve_linear_grad(psf.reshape(b, T, -1), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
         mu = (I[..., None, None] * psf + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
         var = mu + (r2.reshape(b, 1, R, R) if pix else r2)
         nll = 0.5 * (data - mu) ** 2 / var + 0.5 * torch.log(2 * math.pi * var)
