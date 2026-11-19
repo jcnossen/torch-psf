@@ -384,20 +384,23 @@ def point_knots(big, geo, focus, blur=None, dipM=None, chunk=None):
 def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0,
                       blur='none', groups=None, ngroups=1, group_psf_kwargs=None, extra_params=(), batch=4000,
                       lr_xyz=0.03, lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False,
-                      fix_focus=False, log=None, S=3, dz_um=0.01, xy_limit=2.0, final_exact=True):
+                      fix_focus=False, log=None, S=3, dz_um=0.01, xy_limit=None, final_exact=True):
     """estimation.fit_tracks with the samples rendered by the integrated cubic B-spline (PixelSplinePSF, S knots / px,
     dz_um, point-density knots of the exact vectorial model, max error ~3e-5 of the peak at S = 3) instead of the
     vectorial model: per iteration the knots are built once per PSF group from the current Zernikes / focus / blur /
     group terms (point_knots, with autograd), every chunk of samples is rendered by the spline with the knots detached
     (gradients to x, y, z and to the knots), then the knot gradient is pulled back to the PSF parameters (one backward
     through the knot build). Same arguments and result as fit_tracks (the model: the exact pixel integral of the
-    vectorial PSF, psf.pixel_integration = 'spectral'); xy_limit: the spline's offset limit (px). final_exact: the
+    vectorial PSF, psf.pixel_integration = 'spectral'); xy_limit: the spline's offset limit (px; default R / 2 - 0.5: a
+    sample that runs off to a neighbour must render as in fit_tracks, a clamp at 2 px left ~2 % of the real-data
+    samples stuck and cost 1e-3 nats / px). final_exact: the
     final NLL / residuals with the exact vectorial model (else with the spline)."""
     import math, time
     from torch_psf.fit import solve_linear, readnoise_variance
     dev = tracks.rois.device
     B, T, R = tracks.rois.shape[0], tracks.rois.shape[1], tracks.rois.shape[-1]
     c = (R - 1) / 2
+    xy_limit = R / 2 - 0.5 if xy_limit is None else xy_limit
     with torch.no_grad():
         spl = build_pixel_spline(vectorial.resized(R), R, (0.0, zmax_um), S, dz_um=dz_um, xy_limit=xy_limit,
                                  kernel='bspline', integrate=True)
