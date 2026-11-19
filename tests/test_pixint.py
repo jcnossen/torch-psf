@@ -323,3 +323,33 @@ def test_spectral_refuses_aliasing_oversample():
     assert float((a - ref).abs().max() / ref.max()) < 1e-5
     with pytest.raises(ValueError, match='alias'):
         ExactVectorialPSF(VectorialPSF(9, oversample=2, **kw), 'spectral', os=2)
+
+
+def test_fit_tracks_spline_gradient_through_solve(monkeypatch):
+    """fit_tracks_spline differentiates through the closed-form I / bg (fit.solve_linear_grad with the undetached
+    spline samples), as fit_tracks (tests/test_downstream_api.py::test_vp_gradient_through_solve): in the training
+    iterations I and bg carry gradient and the backward reaches the samples through them"""
+    import torch_psf.fit as fit
+    from torch_psf.pixint import fit_tracks_spline
+    vec, tr, z = _exact_tracks(R=9, B=6, T=3)
+    calls = []
+    orig = fit.solve_linear_grad
+
+    def spy(psf, *a, **k):
+        I, bg = orig(psf, *a, **k)
+        rec = dict(grad_mode=torch.is_grad_enabled(), psf=psf.requires_grad, I=I.requires_grad, bg=bg.requires_grad,
+                   gI=[])
+        if I.requires_grad:
+            I.register_hook(lambda g: rec['gI'].append(float(g.abs().sum())))
+        calls.append(rec)
+        return I, bg
+
+    monkeypatch.setattr(fit, 'solve_linear_grad', spy)
+    out = fit_tracks_spline(tr, vec, zmax_um=0.2, iters=3, warmup=1, focus_um=0.1, dz_um=0.02)
+    train = [c for c in calls if c['grad_mode']]
+    assert len(train) == 3 and all(c['psf'] and c['I'] and c['bg'] for c in train)
+    assert all(len(c['gI']) == 1 and c['gI'][0] > 0 for c in train)
+    assert not any(c['I'] for c in calls if not c['grad_mode'])          # the final evaluation: no graph
+    assert out['psf'].pixel_integration == 'spectral'
+    import inspect
+    assert 'vp_grad' not in inspect.signature(fit_tracks_spline).parameters
