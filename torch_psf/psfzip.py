@@ -965,7 +965,7 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
 MODEL_KEYS = ('zernike_noll', 'zernike_waves', 'apod', 'saf', 'focus_um', 'psf_blur_px2', 'psf_dipole_M', 'psf_dipole_w',
               'diattenuation', 'npupil', 'oversample', 'roisize', 'z_range_um', 'spline', 'gaussian', 'fourpi',
               'fourpi_spline', 'psf_gauss_sigma_um', 'psf_dipole_M_angle', 'psf_blur_angle_px2', 'pupil_phase',
-              'pupil_amp')
+              'pupil_amp', 'pixel_integration')
 
 
 def _agree32(a, b):

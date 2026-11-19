@@ -1,5 +1,6 @@
 """torch_psf.pixint (prototype): exact pixel integration of the vectorial PSF and of a cubic spline."""
 import math
+import numpy as np
 import pytest
 import torch
 from conftest import DEV, needs_gpu
@@ -138,3 +139,100 @@ def test_vectorial_integrated_spline_accuracy():
     with torch.no_grad():
         a, b = spl.render(pos), ref.render(pos)
     assert float((a - b).abs().max() / b.max()) < 2e-4
+
+
+# ============================================================================== VectorialPSF.pixel_integration
+@pytest.mark.parametrize('blur', [None, (0.4, 0.2, -0.2)])
+def test_vectorial_pixel_integration_modes(blur):
+    """VectorialPSF pixel_integration 'spectral' (= 'exact') and 'gauss_legendre' = the exact pixel integral (the
+    prototype ExactVectorialPSF and a finer spectral reference); 'box' (default) is the midpoint rule, unchanged"""
+    vec = _vec(blur=None if blur is None else torch.tensor(blur))
+    pos = torch.tensor([[0.1, -0.3, 0.05], [0.45, 0.2, 0.2]])
+    with torch.no_grad():
+        ref = ExactVectorialPSF(vec, 'spectral', os=4, pad=6).render(pos)
+        pk = ref.max()
+        ex = vec.resized(vec.roisize, pixel_integration='exact')
+        assert ex.pixel_integration == 'spectral' and vec.pixel_integration == 'box'
+        a = ex.render(pos)
+        assert float((a - ExactVectorialPSF(vec, 'spectral', os=2, pad=3).render(pos)).abs().max() / pk) < 1e-6
+        assert float((a - ref).abs().max() / pk) < 1e-5
+        box = vec.render(pos)
+        assert float((box - ExactVectorialPSF(vec, 'box', os=2).render(pos)).abs().max()) < 1e-7
+        assert 3e-3 < float((box - ref).abs().max() / pk) < 3e-2         # the midpoint error at oversample 2
+        if blur is None:
+            g = vec.resized(vec.roisize, oversample=3, pixel_integration='gauss_legendre').render(pos)
+            assert float((g - ref).abs().max() / pk) < 1e-5
+        else:
+            with pytest.raises(ValueError):
+                vec.resized(vec.roisize, oversample=3, pixel_integration='gauss_legendre').render(pos)
+    with pytest.raises(ValueError):
+        vec.resized(vec.roisize, pixel_integration='trapezoid')
+    with pytest.raises(ValueError):
+        vec.resized(vec.roisize, oversample=1, pixel_integration='spectral')
+
+
+def test_vectorial_pixel_integration_grad_and_file(tmp_path):
+    """the exact mode is differentiable (Zernike autograd, position jvp vs finite differences) and survives
+    resized / save / PSF.load / to_spline"""
+    from torch_psf import PSF
+    vec = _vec().resized(9, pixel_integration='exact')
+    pos = torch.tensor([[0.1, -0.3, 0.05], [0.45, 0.2, 0.2]])
+    val, dx, dy, dz = vec.render(pos, grad=True)
+    e = 1e-3
+    for k, d in enumerate((dx, dy, dz)):
+        p1, p2 = pos.clone(), pos.clone()
+        p1[:, k] += e; p2[:, k] -= e
+        with torch.no_grad():
+            fd = (vec.render(p1) - vec.render(p2)) / (2 * e)
+        d = d.detach()
+        assert float((fd - d).abs().max() / d.abs().max()) < 2e-3
+    vec.zcoef.requires_grad_(True)
+    vec(pos, 0.2).pow(2).sum().backward()
+    assert vec.zcoef.grad is not None and float(vec.zcoef.grad.abs().sum()) > 0
+    vec.save(tmp_path / 'v.json')
+    w = PSF.load(tmp_path / 'v.json', device='cpu')
+    assert w.pixel_integration == 'spectral' and 'pixel_integration' in repr(w)
+    assert 'pixel_integration' not in _vec()._file_dict()[0]            # 'box': files unchanged
+    with torch.no_grad():
+        assert float((w.render(pos) - vec.render(pos)).abs().max()) < 1e-7
+        spl = vec.to_spline(z_range=(0.0, 0.3), oversample=4, dz_um=0.01, zpad=3, xy_limit=1.0)
+        sb = _vec().resized(9).to_spline(z_range=(0.0, 0.3), oversample=4, dz_um=0.01, zpad=3, xy_limit=1.0)
+        r = vec.render(pos)
+        assert float((spl.render(pos) - r).abs().max() / r.max()) < float((sb.render(pos) - r).abs().max() / r.max())
+
+
+def _exact_tracks(R=11, B=80, T=6, photons=4000.0, seed=4):
+    from torch_psf.spots import Tracks
+    vec = VectorialPSF(R, npupil=32, oversample=2, device=DEV, wavelength_um=0.7).set_zernike({6: 0.04, 11: 0.02})
+    ex = vec.resized(R, pixel_integration='exact')
+    g = torch.Generator(device=DEV).manual_seed(seed)
+    xy = torch.rand(B, 2, generator=g, device=DEV) - 0.5
+    z = 0.02 + 0.12 * torch.rand(B, generator=g, device=DEV)
+    with torch.no_grad():
+        img = ex(torch.cat([xy, z[:, None]], 1), torch.full((B,), 0.1, device=DEV))
+        mu = photons * img[:, None].expand(-1, T, -1, -1) + 8.0
+    rois = torch.poisson(mu, generator=g)
+    tr = Tracks(rois, torch.ones(B, T, dtype=torch.bool, device=DEV), torch.arange(T, device=DEV)[None].expand(B, -1),
+                torch.zeros(B, 2, dtype=torch.long, device=DEV), xy + (R - 1) / 2)
+    return vec, tr, z
+
+
+@needs_gpu
+def test_fit_and_heldout_tracks_pixel_integration():
+    """fit_tracks / heldout_tracks pixel_integration='exact': on data rendered with the exact pixel integral the exact
+    model fits better than the midpoint rule (same frozen Zernikes / focus), and the fitted model keeps the setting"""
+    from torch_psf.estimation import fit_tracks, heldout_tracks, paired_nll
+    vec, tr, z = _exact_tracks()
+    vec.focus_um = 0.1
+    kw = dict(readnoise_e=1.0, zmax_um=0.2, iters=60, warmup=60, focus_um=0.1, fix_zernike=True, fix_focus=True)
+    fe = fit_tracks(tr, vec, pixel_integration='exact', **kw)
+    fb = fit_tracks(tr, vec, **kw)
+    assert fe['psf'].pixel_integration == 'spectral' and fb['psf'].pixel_integration == 'box'
+    assert fe['report']['nll_per_px'] < fb['report']['nll_per_px']
+    hk = dict(readnoise_e=1.0, zmax_um=0.2, z_starts_um=(0.03, 0.12), iters=80)
+    he = heldout_tracks(tr, vec, pixel_integration='exact', **hk)
+    hb = heldout_tracks(tr, vec, **hk)
+    p = paired_nll(he['nll'], hb['nll'])
+    assert p['mean'] > 0 and p['z'] > 3, p
+    assert vec.pixel_integration == 'box'                               # the caller's model is not changed
+    assert np.median(np.abs(he['z'] - z.cpu().numpy())) < np.median(np.abs(hb['z'] - z.cpu().numpy())) + 0.005

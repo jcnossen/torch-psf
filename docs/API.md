@@ -34,7 +34,7 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
 ├── GaussianPSF(roisize, sigma_px)                                   2D
 ├── AstigmaticGaussianPSF(roisize, sigma_px, gamma_um, d_um, z_range)  3D
 ├── VectorialPSF(roisize, pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices, npupil, oversample,
-│                focus_um, z_range)  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
+│                focus_um, z_range, pixel_integration='box' | 'spectral' (= 'exact') | 'gauss_legendre')  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
 │                from_optics, optics, to_spline(..., pos_fn))
 ├── CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
 │                knots_from_model, knots_from_vectorial, vjp_vectorial, from_zstack

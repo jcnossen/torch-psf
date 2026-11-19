@@ -25,7 +25,7 @@ from torch_psf.fit import solve_linear_grad, readnoise_variance
 def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0, blur='none',
                groups=None, ngroups=1, group_psf_kwargs=None, extra_params=(), batch=2000, lr_xyz=0.03,
                lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False, fix_focus=False,
-               log=None, stop=None):
+               log=None, stop=None, pixel_integration=None):
     """tracks: Tracks (rois [B, T, R, R] in photons, mask, xy_init). vectorial: starting VectorialPSF (copied;
     roisize = R). readnoise_e: read noise (e- rms): a scalar, or per pixel of every sample [B, R, R] (an sCMOS
     read-noise map cut at each sample's crop; the variance model is then mu + rn^2 per pixel). zmax_um: emitter heights 0..zmax_um. focus_um: starting
@@ -33,13 +33,16 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     covariance L L^T, px^2; the line blur plus an isotropic / second-axis part). groups [B, T] (long, values
     0..ngroups-1): background groups and PSF groups (default one group). group_psf_kwargs / extra_params: per-group
     PSF hook (module docstring). fix_zernike / fix_focus: hold the Zernikes / the focus at their starting values.
+    pixel_integration: the pixel integration of the fitted model (VectorialPSF.pixel_integration: 'box' = the midpoint
+    rule with the model's oversample, 'spectral' / 'exact' = the exact pixel integral, 'gauss_legendre'); None = that
+    of `vectorial`. The returned psf keeps it.
     Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
     (variance of the normalized residuals, 1 for a perfect model), nll_per_px, focus_um; data: xy [B, 2] px rel. to
     the ROI centre, z [B] um, I [B, T] photons, bg [B, ngroups]."""
     dev = tracks.rois.device
     B, T, R = tracks.rois.shape[0], tracks.rois.shape[1], tracks.rois.shape[-1]
     c = (R - 1) / 2
-    model = vectorial.resized(R)
+    model = vectorial.resized(R, pixel_integration=pixel_integration)
     model.zcoef.requires_grad_(True)
     focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
     rn2, pix = readnoise_variance(readnoise_e, B, R, dev)
