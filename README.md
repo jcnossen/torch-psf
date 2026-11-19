@@ -9,16 +9,6 @@ the main object: every model renders the PSF with its x / y / z derivatives, and
 them the Cramér-Rao bound, maximum-likelihood fitting of spots, localization of whole movies, files and conversion to
 a cubic spline.
 
-- **models**: `VectorialPSF` (vectorial pupil function with Zernike aberrations), `CubicSplinePSF` (a 3D cubic
-  spline evaluated with one strided, grouped `conv2d` per batch of spots), `GaussianPSF` (2D),
-  `AstigmaticGaussianPSF` (3D calibration curves) and `FourPiPSF` / `FourPiSplinePSF` (two-objective interference);
-- **fitting**: Poisson maximum likelihood (Levenberg-Marquardt, optional sCMOS read noise) and the Cramer-Rao bound;
-- **pipeline**: spot detection on movies, ROI extraction, and the localizations as a `Dataset` (filters, drift, rendering,
-  FRC, HDF5 / Picasso / ThunderSTORM files);
-- **PSF estimation**: from bead z-stacks and *in situ* from the blinking emitters themselves. The in-situ fit evaluates
-  every emitter on the spline and passes the likelihood gradient from the spline knots to the pupil parameters with one
-  vector-Jacobian product, so its cost does not grow with the number of emitters.
-
 ![overview](docs/overview.png)
 
 *Overview (made by [examples/make_overview_figure.py](examples/make_overview_figure.py) from generated data).
@@ -43,6 +33,59 @@ img, dx, dy, dz = spline.render(pos, grad=True)                                 
 psf.save('insitu.json')
 ```
 
+## Features
+
+**PSF models**
+
+- Model Zernike aberrations, pupil maps and per-pattern-angle dipole emission and blur with `tp.VectorialPSF`.
+- Render pixel-integrated 2D and astigmatic 3D Gaussians with `tp.GaussianPSF` and `tp.AstigmaticGaussianPSF`.
+- Build a 3D cubic spline from a model with `psf.to_spline` or from measured planes with `tp.CubicSplinePSF.from_zstack`.
+- Integrate a cubic B-spline over each pixel with `tp.IntegratedSplinePSF`, optionally using coefficients per angle.
+- Fit multiple channels jointly with `tp.ChannelsPSF`.
+- Model two-objective interference with `tp.FourPiPSF` or its spline form, `tp.FourPiSplinePSF`.
+- Vary Zernikes across the field with `tp.FieldPSF` or use a spline per tile with `tp.TiledSplinePSF`.
+
+**PSF estimation and calibration**
+
+- Fit vectorial, spline or astigmatic Gaussian models to isolated bead z-stacks with `tp.ZStackEstimator`.
+- Fit overlapping beads jointly with `tp.DenseBeadEstimator`.
+- Estimate channel PSFs and their coordinate mappings from shared beads with `tp.MultiChannelBeadEstimator`.
+- Fit a pupil from a focus series of a thin object by phase diversity with `tp.PhaseDiversityEstimator`.
+- Estimate Zernikes or a free pupil from SMLM spots and check the fit on held-out spots with `tp.InSituEstimator`.
+- Estimate a PSF from second-order cross-cumulants of dense blinking movies with `tp.SOFIEstimator`.
+
+**Localization and fitting**
+
+- Detect spots and extract ROIs with `tp.extract_spots`, or detect engineered PSFs with `tp.MatchedFilterDetector`.
+- Fit ROIs by Poisson maximum likelihood with `psf.fit` and compute Cramér-Rao bounds with `psf.crlb`.
+- Localize a movie with `psf.localize`, including optional correction for per-pixel sCMOS read noise.
+- Fit a PSF to tracks using one position per emitter and one intensity per frame with `tp.estimation.fit_tracks`.
+
+**Camera and noise**
+
+- Convert ADU to photons using scalar or per-pixel calibration and account for EMCCD excess noise with `tp.Camera`.
+- Estimate gain and offset from movie backgrounds with `tp.photon_transfer`.
+- Estimate gain from noise beyond the optical band limit with `tp.camera.white_photon_transfer`.
+- Estimate per-pixel offset and read-noise maps from a sparse movie with `tp.camera.maps_from_movie`.
+
+**Movie analysis**
+
+- Estimate the optical band limit and classify the movie in one call with `torch_psf.auto.analyze_movie`.
+- Identify the applicable PSF estimator and the inputs it still needs with `torch_psf.auto.plan_route`.
+
+**Data and file formats**
+
+- Read multipart TIFF movies and NumPy stacks with `tp.open_movie`.
+- Read and write psf.zip 0.2.x and 0.3.x calibrations with `tp.PSF.load` and `tp.io.save_zip`.
+- Filter, drift-correct and render localizations with `tp.Dataset`. Read and write HDF5, Picasso and ThunderSTORM CSV.
+- Read frames and camera metadata from a PSF grab recording with `torch_psf.auto.read_psfgrab`.
+
+**Browser apps**
+
+- Fit bead stacks and SMLM movies, or localize spots, with WebGPU in the [web viewer](https://jcnossen.github.io/torch-psf/).
+- Import channel 0 of supported psf.zip 0.2.x / 0.3.x files. Preview integrated splines and non-box vectorial PSFs on CPU.
+- Record phone-camera frames and settings as a TIFF and JSON in a zip with [PSF grab](https://psfgrab.jcnossen.nl/).
+
 ## Install
 
 ```bash
@@ -66,7 +109,7 @@ A GPU is optional: every function takes `device=` and defaults to `cuda` when av
 
 ## Entry points
 
-Each has a Python form and a command (`python -m torch_psf <command> -h`). The worked examples run on generated
+The commands below have help at `python -m torch_psf <command> -h`. The worked examples run on generated
 data in seconds on a GPU.
 
 **Bead z-stacks -> PSF** ([examples/bead_fit.py](examples/bead_fit.py); `--epfl` runs it on a one-bead crop of the
@@ -136,7 +179,9 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `zernike.py` | Zernike polynomials (Noll index and normalization). |
 | `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`; `solve_linear` (variable projection: closed-form per-frame intensities and backgrounds of a track). |
 | `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `Tracks`. |
-| `estimators.py` | `ZStackEstimator`, `InSituEstimator`. |
+| `pixint.py`, `multichannel.py`, `field.py` | Pixel-integrated splines, joint channel fits and field-dependent PSFs. |
+| `estimators.py`, `multichannel_estimator.py`, `sofi/` | PSF estimation from isolated, dense or multichannel beads, phase diversity, SMLM spots and SOFI cumulants. |
+| `auto/` | Movie band limit, mode classification, estimator selection and the PSF grab reader. |
 | `estimation/` | the PSF estimation steps (`beads`: bead fit; `knots`: knot-route fits, free knots; `tracks`: variable projection on tracks; `heldout`: held-out checks; `zscale`). |
 | `dataset.py` | `Dataset`: the localizations (dict of tensors; format in [docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)). |
 | `optics.py` | `Optics` (pixel size, NA, wavelength, refractive indices). |
