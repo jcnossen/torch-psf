@@ -104,19 +104,12 @@ def run_beads(stacks=(1, 2, 3, 4, 5, 6), planes=(7, 38), nbeads=8, roisize=25, s
 
 
 def sm_model(n_med, roisize=15, charge=-1, center=(0.0, 0.0), focus=0.0, z_range=(-0.6, 0.6), vortex=True,
-             layered=None, plate_file='real_plate.json'):
+             plate_file='real_plate.json'):
     """Calibrated Zernikes (beads, or the in-situ ones of plate_file) with the vortex plate (or without), for single
-    molecules in a medium n_med; layered = dict(n_top, film_um): a film of index n_med on the coverslip under n_top
-    (torch_psf.layered)."""
+    molecules in a medium n_med."""
     b = PSF.load(os.path.join(OUT, 'real_beads_psf.json'), device=DEV)
     o = Optics(n_med=n_med, wavelength_um=0.5975, **OPT)
-    if layered is not None:
-        from torch_psf.layered import LayeredVectorialPSF
-        base = LayeredVectorialPSF(roisize, n_top=layered['n_top'], film_um=layered['film_um'], npupil=64,
-                                   oversample=2, device=DEV, focus_um=focus, z_range=z_range, **o.vectorial_kwargs())
-        v = vortex_psf(start=base, roisize=roisize, charge=charge, center=center, levels=0, depth=DEPTH) if vortex \
-            else base
-    elif vortex:
+    if vortex:
         v = vortex_psf(o, roisize=roisize, charge=charge, center=center, levels=0, depth=DEPTH, device=DEV,
                        oversample=2, focus_um=focus, z_range=z_range)
     else:
@@ -139,21 +132,14 @@ def plate(plate_file='real_plate.json'):
     return json.load(open(os.path.join(OUT, plate_file)))
 
 
-def sm_focusz(n_med=None, vortex=True, z_range=(-0.9, 0.9), height=None, plate_file=None, layered=None):
+def sm_focusz(n_med=None, vortex=True, z_range=(-0.9, 0.9), height=None, plate_file=None):
     """The calibrated single-molecule model with z = position relative to the focal plane (FocusZ): plate charge /
-    centre / Zernikes from the plate file (PLATE_FILE by default); n_med, the emitter height and (for a layered plate
-    file) the film from it unless given. layered=False forces the single-medium model."""
+    centre / Zernikes from the plate file (PLATE_FILE by default); n_med and the emitter height from it unless given."""
     pf = plate_file or PLATE_FILE
     pl = plate(pf)
     n = pl.get('n_med', 1.0) if n_med is None else n_med
     h = pl.get('height_um', 0.0) if height is None else height
-    lay = None
-    if layered is None and 'film_um' in pl:
-        lay = dict(n_top=pl.get('n_top', 1.0), film_um=pl['film_um'])
-    elif isinstance(layered, dict):
-        lay = layered
-    v = sm_model(n, charge=pl['charge'], center=pl['center'], z_range=z_range, vortex=vortex, layered=lay,
-                 plate_file=pf)
+    v = sm_model(n, charge=pl['charge'], center=pl['center'], z_range=z_range, vortex=vortex, plate_file=pf)
     if pl.get('spectrum'):
         v = Polychromatic(v, *pl['spectrum'])
     return FocusZ(v, height=h, z_range=z_range)
@@ -287,53 +273,6 @@ def run_plate2(nmol=16, planes=range(4, 21), kc=12, iters=300, n_med=1.0):
                seconds=time.time() - t0)
     json.dump(res, open(os.path.join(OUT, 'real_plate.json'), 'w'), indent=1)
     log(json.dumps({k: v for k, v in res.items() if k not in ('runs',)}, indent=1))
-
-
-def run_layer(nmol=16, planes=range(4, 21), kc=12, iters=600):
-    """The PMMA stacks with a layered sample (torch_psf.layered: coverslip | PMMA film n 1.49, thickness fitted |
-    air), the emitter height in the film fitted, the plate centre and Zernikes refined from the effective-medium
-    calibration (real_plate.json); and the effective-medium model refitted with the same iterations for comparison.
-    -> results/real_plate_layered.json"""
-    from torch_psf.vortex import fit_dipole_stacks
-    t0 = time.time()
-    pl = plate('real_plate.json')
-    mols = pmma_molecules()
-    rois, _ = stack_rois(PMMA_V, [m[0] for m in mols])
-    idx = torch.tensor(pl['molecules'], device=DEV)
-    d = rois[idx][:, list(planes)].contiguous()
-    f = pl['stage_sign'] * 0.1 * (torch.tensor(list(planes), dtype=torch.float32) - kc)
-    res = dict(molecules=pl['molecules'], planes=list(planes), kc=kc, charge=pl['charge'], stage_sign=pl['stage_sign'])
-    out = {}
-    runs = [('effective', dict(n_med=pl['n_med'], layered=None, height=pl['height_um']))]
-    runs += [(f'layered_d{d0:g}', dict(n_med=1.49, layered=dict(n_top=1.0, film_um=d0), height=min(0.01, d0 / 2)))
-             for d0 in (0.01, 0.03, 0.06, 0.12)]
-    for name, kw in runs:
-        base = sm_model(kw['n_med'], charge=pl['charge'], center=pl['center'], z_range=(-0.9, 0.9),
-                        layered=kw['layered'])
-        r0 = fit_orientation(FocusZ(base, height=kw['height'], z_range=(-0.3, 0.3)), rois[idx][:, kc], iters=40,
-                             z_limits=(-0.3, 0.3))
-        extra = dict(fit_params=('film_um',), max_height='film_um') if kw['layered'] else dict(fit_nmed=True)
-        r = fit_dipole_stacks(base, d, f, pl['charge'], center=pl['center'], depth=DEPTH, mu0=r0['theta'][:, 5:8],
-                              xy0=r0['theta'][:, :2], iters=iters, fit_center=True, fit_zernike=True,
-                              height=kw['height'], fit_height=True, **extra)
-        chi2 = ((d - r['model']) ** 2 / r['model'].clamp_min(1e-6)).flatten(2).mean(2)
-        out[name] = dict(nll_per_px=r['nll_per_px'], chi2_median=float(chi2.median()), center=r['center'],
-                         height_um=r['height'], n_med=r['n_med'], params=r['params'],
-                         zernike_waves=r['psf'].zcoef.tolist(), g=r['g'].tolist())
-        log(f"layer {name}: nll/px {r['nll_per_px']:.4f} chi2 {float(chi2.median()):.3f} height {r['height']:.4f} "
-            f"n_med {r['n_med']:.3f} {r['params']} centre {r['center']} ({time.time() - t0:.0f} s)")
-    res['fits'] = out
-    lname = min((k for k in out if k.startswith('layered')), key=lambda k: out[k]['nll_per_px'])
-    L = out[lname]
-    res.update(best_layered=lname, center=L['center'], zernike_waves=L['zernike_waves'], n_med=1.49, n_top=1.0,
-               film_um=max(L['params']['film_um'], 0.0), height_um=min(L['height_um'], max(L['params']['film_um'], 0.0)),
-               nll_per_px=L['nll_per_px'],
-               chi2_median=L['chi2_median'], seconds=time.time() - t0)
-    json.dump(res, open(os.path.join(OUT, 'real_plate_layered.json'), 'w'), indent=1)
-    E = dict(pl); E.update(center=out['effective']['center'], zernike_waves=out['effective']['zernike_waves'],
-                           n_med=out['effective']['n_med'], height_um=out['effective']['height_um'],
-                           nll_per_px=out['effective']['nll_per_px'], chi2_median=out['effective']['chi2_median'])
-    json.dump(E, open(os.path.join(OUT, 'real_plate_effective600.json'), 'w'), indent=1)
 
 
 FIELD_NOLL = (5, 6, 7, 8, 11)
@@ -820,8 +759,6 @@ if __name__ == '__main__':
         run_plate()
     if 'plate2' in what:
         run_plate2()
-    if 'layer' in what:
-        run_layer()
     if 'field' in what:
         run_field()
     if 'spectrum' in what:

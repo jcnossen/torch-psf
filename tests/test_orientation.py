@@ -241,3 +241,53 @@ def test_channels_psf_uses_the_vectorial_dipole_basis():
     assert B.shape == (2, 2, 6, 7, 7)
     comb = torch.einsum('nk,nckuv->ncuv', M_to_m6(M), B)
     assert float((comb - ref).abs().max()) <= 1e-5 * float(ref.abs().max())
+
+
+def test_dipole_basis_focus_defaults_to_focus_um_in_channels_psf():
+    """VectorialPSF.dipole_basis(pos) uses focus_um (as render), so a VectorialPSF subclass channel whose type_name is
+    not 'vectorial' works in ChannelsPSF (which passes focus= only for type_name 'vectorial')"""
+    from torch_psf import ChannelsPSF
+
+    class OtherVectorial(VectorialPSF):
+        type_name = None
+
+    kw = dict(roisize=7, npupil=16, oversample=2, device='cpu', z_range=(0.0, 0.3), focus_um=0.05)
+    arms = [OtherVectorial(**kw), VectorialPSF(**kw)]
+    m = ChannelsPSF(arms, channel_offsets=[[0.1, -0.2], [-0.2, 0.1]])
+    pos = torch.tensor([[0.17, -0.23, 0.01], [-0.32, 0.24, 0.02]])
+    M = dipole_M(from_angles(torch.tensor([30.0, 70.0]), torch.tensor([20.0, 200.0])), torch.tensor([0.9, 0.6]))
+    with torch.no_grad():
+        assert torch.equal(arms[0].dipole_basis(pos), arms[0].dipole_basis(pos, arms[0].focus_um))
+        B = m.dipole_basis(pos)
+        ref = m.render(pos, dipM=M)
+    comb = torch.einsum('nk,nckuv->ncuv', M_to_m6(M), B)
+    assert float((comb - ref).abs().max()) <= 1e-5 * float(ref.abs().max())
+
+
+def test_composed_vortex_reference():
+    """the composed Vortex PSF (plate + Polychromatic + field Zernikes + FocusZ; study/orientation/composed_reference.py)
+    reproduces tests/data/orientation_composed_ref.json: images, dipole bases and orientation fits (the reference for
+    the psf-unify refactor; image_hash is informative)"""
+    import json
+    import os
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(root, 'study', 'orientation'))
+    import composed_reference as CR
+    ref = json.load(open(CR.REF_PATH))
+    got = CR.compute()
+    for e, r in zip(got['emitters'], ref['emitters']):
+        assert abs(e['image_sum'] - r['image_sum']) <= 1e-4 * r['image_sum']
+        assert abs(e['image_peak'] - r['image_peak']) <= 1e-4 * r['image_peak']
+        for k, v in r['pixels'].items():
+            assert abs(e['pixels'][k] - v) <= 1e-4 * r['image_peak']
+        assert e['render_vs_basis_max_abs'] <= 1e-3
+        for a, b in zip(e['dipole_basis_sums'], r['dipole_basis_sums']):
+            assert abs(a - b) <= 1e-4 * max(abs(b), 1e-3)
+        for name, tol in (('fit_noise_free', (0.2, 0.01, 0.002)), ('fit_noisy_seed1234', (0.5, 0.02, 0.005))):
+            fe, fr = e[name], r[name]
+            assert abs(fe['g'] - fr['g']) <= tol[1]
+            assert abs(fe['z_um'] - fr['z_um']) <= tol[2]
+            if r['emitter']['g'] > 0:
+                assert abs(fe['theta_deg'] - fr['theta_deg']) <= tol[0]
+                assert abs((fe['phi_deg'] - fr['phi_deg'] + 180) % 360 - 180) <= tol[0]

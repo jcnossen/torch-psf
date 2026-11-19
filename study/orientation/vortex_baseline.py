@@ -1,4 +1,9 @@
-"""Baseline reproduction of Hulleman et al. (Nat. Commun. 12, 5934, 2021) on their data (4TU 10.4121/13031837), with
+"""SUPERSEDED by vortex_exact.py, which reproduces their model exactly (checked against simcode2's port of their code).
+Two settings here are wrong: the NAT field axes (their xfov is the image COLUMN, not the row) and the sign of their
+pupil phase in our convention (their pupil is the complex conjugate of ours: plate, Zernikes and W_mis enter with
+the opposite sign, and their image is our image rotated by 180 deg). Kept for the record of the first attempt.
+
+Baseline reproduction of Hulleman et al. (Nat. Commun. 12, 5934, 2021) on their data (4TU 10.4121/13031837), with
 their processing settings taken from their MATLAB code (vecfitcpu_vortex, 4TU 10.4121/15175494):
 
   optics      NA 1.47, n_imm 1.518, wavelength 597.5 nm, pixel 65 nm, ROI 15 x 15, the PSF point-sampled at the pixel
@@ -28,7 +33,8 @@ their processing settings taken from their MATLAB code (vecfitcpu_vortex, 4TU 10
               reported g2 differs. N (their photons, whole image plane) = I ((1 - g) n_free + g n_fix) / n_free.
 
 Stages: pmma (the PMMA through-focus validation), dna (lambda-DNA, first movie, frames 0-600, the densest 256 px crop),
-both with variants (argv[2:]: 'refnom1.5209', 'nonat', 'nowmis', 'nmed1.0', 'zgrid': starts on a z grid).
+both with variants (argv[2:]: 'refnom1.5209', 'nonat', 'nowmis', 'nmed1.0', 'zgrid': starts on a z grid, 'insitu':
+our in-situ calibrated model from vortex_real.py with their initial values / start / filters).
 usage: CUDA_VISIBLE_DEVICES=2 python -I study/orientation/vortex_baseline.py pmma|dna [variant ...]
 """
 import json
@@ -230,7 +236,7 @@ def their_fit(psf, rois, zo, z_limits=(-1.1, 1.1), iters=50, zgrid=None):
 
 
 def variant(argv):
-    v = dict(refnom=1.523, nat=True, wmis=True, n_med=None, zgrid=None)
+    v = dict(refnom=1.523, nat=True, wmis=True, n_med=None, zgrid=None, insitu=False)
     for a in argv:
         if a.startswith('refnom'):
             v['refnom'] = float(a[6:])
@@ -240,6 +246,8 @@ def variant(argv):
             v['wmis'] = False
         elif a.startswith('nmed'):
             v['n_med'] = float(a[4:])
+        elif a == 'insitu':
+            v['insitu'] = True
         elif a == 'zgrid':
             v['zgrid'] = (-0.8, -0.4, 0.0, 0.4, 0.8)
     return v
@@ -252,10 +260,15 @@ def run_pmma(var, tag):
     mols = VR.pmma_molecules()
     rv, _ = VR.stack_rois(VR.PMMA_V, [m[0] for m in mols])
     nm, nk, P = rv.shape[:3]
-    v = their_model(n_med, refnom=var['refnom'], wmis=var['wmis'])
-    psf = FocusZ(v, height=0.0, z_range=(-1.1, 1.1))
     cent = np.array([m[0] for m in mols])                      # (x = column, y = row) of the molecule
-    zo = nat_offsets(cent[:, 1], cent[:, 0], 2048) if var['nat'] else None
+    if var['insitu']:      # our in-situ calibrated model (vortex_real.py plate2: plate centre, Zernikes, n_med, apod)
+        psf = VR.sm_focusz(z_range=(-1.1, 1.1))
+        v = psf.psf
+        zo = None
+    else:
+        v = their_model(n_med, refnom=var['refnom'], wmis=var['wmis'])
+        psf = FocusZ(v, height=0.0, z_range=(-1.1, 1.1))
+        zo = nat_offsets(cent[:, 1], cent[:, 0], 2048) if var['nat'] else None
     zz = None if zo is None else zo[:, None].expand(-1, nk, -1).reshape(nm * nk, -1)
     r = their_fit(psf, rv.reshape(-1, P, P), zz, zgrid=var['zgrid'])
     g2, _ = to_their_g2(v, r['theta'][:, 5:8], r['theta'][:, 8])

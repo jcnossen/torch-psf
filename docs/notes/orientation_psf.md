@@ -425,8 +425,8 @@ run with `python -I`):
   * 4 of 233 planes are outliers. Our molecules are brighter, hence the smaller CRLB.
   * Our Vortex vs standard comparison is noisier because their standard-PSF reference is a full z-stack fit.
   * The precision gap to the CRLB (2× vs their 1.2–1.3×) and the z scale (0.88) point at the remaining model error:
-    the joint χ² is 2. Candidates are the field dependence of the aberrations (constant here), the thin-film optics
-    (a single medium of n ≈ 1 approximates glass / PMMA film / air) and the emission spectrum (one wavelength).
+    the joint χ² is 2. Candidates are the field dependence of the aberrations (constant here) and the emission
+    spectrum (one wavelength).
 * **Re-orientation movie** (ATTO 565 on glass in air, 900 ms frames, TIRF, central 1024 × 1024 field, bright spots
   only (threshold 20): 4935 spots, 225 molecules tracked over ≥ 10 of the 23 frames). `FocusZ` model with n_med 1.0,
   emitter at the glass and the in-situ plate:
@@ -461,8 +461,7 @@ run with `python -I`):
   and the z tracking is linear.
 * **Open:**
   1. Precision is 1.4–2 × the CRLB, and the z scale is 0.88 against their 0.99. Next steps: field-dependent Zernikes
-     (FieldPSF; their NAT map), a two-layer glass / PMMA / air model instead of n_med ≈ 1, and polychromatic
-     emission.
+     (FieldPSF; their NAT map) and polychromatic emission.
   2. The pile-up at g = 1: a soft bound, or report g as is with its CRLB.
   3. The frame mapping to their λ-DNA hdf5 for a per-localisation comparison.
   4. Throughput: about 17 spots / s on the shared GPU with 6 starts per spot. The full movie (~0.5 M spots) needs
@@ -476,29 +475,18 @@ run with `python -I`):
 * Checked against master: `render`, `render(grad=True)`, `forward(dipM=...)` and the `to_spline` knots differ by
   exactly 0, for 'box', 'spectral' and 'gauss_legendre', with and without blur.
 * `dipole_basis()` works in every pixel_integration mode (tested).
-* Full suite on CPU: 191 passed, 32 skipped (master 177 + 14 orientation tests); `tests/test_layered.py` adds 3 more.
+* Full suite on CPU: 191 passed, 32 skipped (master 177 + 14 orientation tests).
 
-**PMMA precision gap: layered sample, field-dependent Zernikes** (`vortex_real.py` stages `layer` and `field`).
-* **(a) Layered sample.** `torch_psf/layered.py` models a coverslip / film / top-medium stack, checked in two limits:
-  * without a top interface it reproduces the plain model;
-  * as the film thickness goes to 0 it equals an emitter in the top medium, with the z dipole weaker by (n_film / n_top)⁴.
-
-  On the PMMA stacks a glass / PMMA (1.49) / air model drives the fitted film thickness to its lower bound 0 from
-  any start (10–120 nm). It is slightly worse than the single effective medium:
-
-  | model (joint fit) | NLL / px | χ² | per-plane σθ / σφ | z slope |
-  |---|---|---|---|---|
-  | effective medium n 0.94 | −269.12 | 2.05 | 2.35° / 2.27° | −0.875 |
-  | layered | −269.06 | 2.11 | 4.38° / 2.38° | −0.84 |
-
-  The effective medium index is kept as a parameter.
-* **(b) Field-dependent Zernikes.** `FieldZernikes` (modes 5, 6, 7, 8, 11; orders 2, 2, 1, 1, 1; ridge prior 0.05 λ)
+**PMMA precision gap: field-dependent Zernikes** (`vortex_real.py` stage `field`).
+* A layered glass / film / air model was tried; it gave film thickness → 0 and no gain. n_med ≈ 1 is used, as in
+  the authors' code.
+* **Field-dependent Zernikes.** `FieldZernikes` (modes 5, 6, 7, 8, 11; orders 2, 2, 1, 1, 1; ridge prior 0.05 λ)
   is used inside `fit_dipole_stacks`, and spots get per-spot `zcoef_offset`. `field.py` was not edited.
   * Training is on the even-numbered molecules; validation is on the odd ones, which were held out.
   * Joint-fit χ² falls from 1.72 to 1.64. The fitted field variation is 30–58 mλ over the field.
   * Held-out per-plane σθ falls from 2.08° to 1.66° and σφ from 2.26° to 1.89°, against a CRLB of 1.06° / 1.12°:
     the ratio to the CRLB goes from 1.9–2.0 to 1.6–1.7. The z slope moves from −0.913 to −0.924.
-  * (c) Polychromatic emission: implemented (`orientation.Polychromatic`) but not run, per the change of priority.
+  * Polychromatic emission: implemented (`orientation.Polychromatic`) but not run, per the change of priority.
 * **g at the bound.** The Dataset now has `g` from a fit whose bounds (`g_limits`) can be widened, e.g. (−0.5, 1.5), and
   `g_display`, clamped to [0, 1].
   * Simulation (Vortex PSF, 4000 photons, bg 10, true g = 1): clamped fit bias −0.018 and sd 0.028 against a CRLB of
@@ -527,9 +515,12 @@ run with `python -I`):
 | + n_med 1.0, z grid | −0.29 | 3.4° / 1.1° | 8.3° / 1.8° | 0.80 | 2.31 |
 | + n_med 1.0, z grid, without W_mis | −0.79 | 4.7° / 1.2° | 4.9° / 1.4° | 0.84 ± 0.09 | 2.05 |
 | ours: in-situ plate (centre, Zernikes, n_med, apodization), z grid | −0.88 | 2.35° / 1.10° | 2.27° / 1.16° | (g 0.90) | 2.05 |
+| ours: in-situ model, their initial values, one start at z = 0 | +0.07 (z not tracked) | 6.2° / 2.6° | 8.8° / 2.2° | 0.76 | 1.75 |
+| ours: in-situ model, their initial values, z grid | −0.85 | 3.1° / 1.2° | 3.5° / 1.3° | 0.89 ± 0.05 | 1.52 |
 
 Causes of the gaps, as far as isolated:
-1. **The single z = 0 start** of their initial values does not follow the defocus. Their published slope implies
+1. **The single z = 0 start** of their initial values does not follow the defocus, even with our in-situ calibrated
+   model (slope +0.07, against -0.85 with a z grid of starts). Their published slope implies
    their per-slice fits were started differently, or fitted the stack jointly (their code has a 'zstack' mode).
 2. **n_med 1.49 vs ≈ 1** (thin film under air).
 3. **The immersion-mismatch phase as I implement it from their code** (rms 0.22 λ, mostly Z11 −0.18, Z22 −0.11;
@@ -553,3 +544,140 @@ and frames):
 * The g2 pile-up at 0 in the baseline, where their hdf5 peaks at 0.83, is the clearest remaining discrepancy. It goes
   with the baseline model's larger χ² (1.8–1.9 against 1.55 for our in-situ calibrated model).
 * The strand width (40–68 nm) is without drift correction or a spline fit, so it is not comparable yet.
+
+### 8b. Their model reproduced exactly (`vortex_exact.py`, checked against simcode2's port of their code)
+
+**The mapping** (found with `vortex_crosscheck.py`):
+
+    their image(x, y, z, mu, W) = rot180[ our image(-x', -y', z, mu', -W) ]
+
+* **Arrays and phase sign.** Their pupil and image x run along the first array index (the image row), y along the
+  column. So their pupil maps are our pupil maps array by array, with the phase sign flipped: their convention,
+  exp(+i W) with cos_med = −i|.| beyond the critical angle, is the complex conjugate of ours.
+* **Positions and dipole.** Their x and y are our y and x, and the dipole components swap likewise. z is the same
+  (their stage z).
+* **NAT field coordinates.** Their xfov is the image column; my `vortex_baseline.py` had it from the row.
+* **Fit accuracy.** The images agree within 0.2–1.5 % of the peak, including the plate, the per-spot NAT Zernikes
+  (projected onto our Noll basis; projection residual 5e-6 nm) and their W_mis + nominal-focus phase. The rest is their
+  two-interface Fresnel through the 1.523 coverslip.
+
+`vortex_baseline.py` had both the NAT axes and the W sign wrong, which explains why W_mis "made things worse" there.
+
+**λ-DNA, the same ROIs as their Octave table** (first 3000 spots; 2775 not flagged as outliers):
+
+| our fit of their model | axis angle to theirs, median / p90 | spots within 2° | dxy | dz median / MAD | g2 ours / theirs | N ratio |
+|---|---|---|---|---|---|---|
+| from their initial values, one start | 0.22° / 73° | 76 % | 0.30 nm | 0.2 / 1.5 nm | 0.68 / 0.757 | 0.998 |
+| + 4 z starts, best likelihood | 0.15° / 1.7° | 91 % | 0.24 nm | 0.1 / 1.1 nm | 0.757 / 0.757 | 0.998 |
+
+What remains is local minima of the single-start fit; their LM and ours take different paths. With a z grid of
+starts, the per-spot results agree to fractions of a degree and a nanometre.
+
+**PMMA, their ROIs and initial values** (their `pmma_summary.py`: the 40 brightest molecules, 11 slices around focus,
+their outlier rule):
+
+| setting | ours: slope, σφ / σθ (CRLB), g2 | their code: slope, σφ / σθ (CRLB), g2 |
+|---|---|---|
+| n_med 1.49, z0 = 0 | −0.14, 41° / 22° (6.8° / 4.2°), 0.72 | −0.44, 30° / 20°, 0.74 |
+| n_med 1.49, z grid | −1.04, 22.7° / 11.2° (7.3° / 4.1°), 0.82 | −0.95, 23° / 14°, 0.83 |
+| n_med 1.0, z0 = 0 | −0.90, 16.0° / 4.7° (3.0° / 2.6°), 0.80 | −0.91, 5.7° / 3.3° (2.9° / 2.6°), 0.84 |
+| n_med 1.0, z grid | −0.98, 3.48° / 2.84° (2.60° / 2.20°), 0.84 ± 0.08 | −0.99, 3.1° / 2.8° (2.6° / 2.2°), 0.86 ± 0.05 |
+
+The paper reports −0.99, g2 0.86 ± 0.03, and σ 2.3° / 1.8° against a CRLB of 1.8° / 1.5°. Their code and ours both
+reproduce it only with n_med ≈ 1 and a grid of z starts. Remaining differences between our fit and their code:
+* single-start local minima (the n_med 1.0, z0 = 0 azimuth);
+* the paper's own molecule selection (21 molecules) and statistic (a mean), against the 40-brightest median here.
+
+### 8c. Baseline completed; acceptance test; Vortex work frozen
+
+**λ-DNA, full crop, per spot** (all 15 065 ROIs of their Octave table, frames 0–600, crop (400, 16, 256, 256);
+14 007 not flagged as outliers). Our exact model, best of their start and four z starts, against their fits:
+
+| quantity | value |
+|---|---|
+| axis angle, median / p90 | 0.14° / 1.28° |
+| spots within 2° | 91.5 % |
+| dxy, median | 0.23 nm |
+| dz | 0.14 ± 1.08 nm |
+| g2 median, ours / theirs | 0.7503 / 0.7506 |
+| N ratio | 0.998 |
+
+From their initial values alone, 77.7 % of the spots fall within 2°. The rest end in other local minima: our LM steps
+differ from theirs.
+
+**PMMA with the paper's statistic** (`pmma_paper_stat.py`): the per-molecule sd over the 11 slices, the MEAN over
+21 molecules.
+
+| table (n_med 1.0, z grid) | 21 brightest: σφ / σθ (CRLB) | ratio | slope | g2 | N (their convention) |
+|---|---|---|---|---|---|
+| their port | 4.00° / 3.21° (2.55° / 2.09°) | 1.57 / 1.54 | −0.91 | 0.84 ± 0.04 | 5.9e3–16e3 |
+| ours (exact model) | 5.47° / 3.57° (2.56° / 2.03°) | 2.14 / 1.76 | −0.87 | 0.82 ± 0.04 | 5.9e3–16e3 |
+| paper | 2.3° / 1.8° (1.8° / 1.5°) | 1.28 / 1.2 | −0.99 | 0.86 ± 0.03 | 4.4e3–45e3, mean 17e3 |
+
+* **The selection cannot be reconstructed.** The brightest molecules in the released stack (`..._YESvortex_YESqwp_3`,
+  the only one on 4TU) reach 16e3 photons, against 45e3 in the paper. The paper's 21 molecules are brighter, hence
+  its smaller CRLBs, and are probably from another stack.
+* **Medians against means.** On the top-40 medians, ours and their port agree within 10 % (3.48° / 2.84° against
+  3.15° / 2.76°). The means are pulled up by a few molecules whose single-start fits land in other minima: our LM steps
+  differ from theirs.
+
+**One drift-corrected strand with a spline axis** (`vortex_strand.py`):
+* **Data and steps.** The strand runs from (450, 124) to (650, 226) px and is 14.6 µm long, in stk_0001 frames
+  0–1980. The pipeline: their detection, our exact fits with a z grid, DME drift via `Dataset.estimate_drift` /
+  `drift_corrected`, then a smoothing-spline axis. Their hdf5 gets the same analysis.
+
+| localisations on the strand | n | Δφ median / MAD | g2 peak / median | FWHM across |
+|---|---|---|---|---|
+| ours, drift corrected | 4865 | 75° / 50° | 0.83 / 0.76 | 22 nm |
+| ours, no drift correction | 4951 | 70° / 47° | 0.83 / 0.76 | 40 nm |
+| theirs (hdf5, drift corrected) | 4240 | 76° / 49° | 0.83 / 0.76 | 38 nm |
+
+* **What matches the paper:** the FWHM across the strand after drift correction (22 nm against their 20 nm) and the
+  g2 peak (0.83 against 0.8).
+* **What does not:** Δφ on this strand is broad in their own localisations as in ours. With the image angle taken as
+  −azimuth, theirs gives 97° / 33–36°. The paper's 82° / 17° is a different, hand-picked strand, and their analysis
+  script and angle convention are not in the release. Crop-wide (PCA axis) the two agree as well: 99.9° / 29.5° for
+  ours against 95.7° / 35.7° for theirs.
+
+**Our in-situ model against their NAT model on the same ROIs** (`vortex_exact.py insitu_dna`):
+* **Agreement after a tilt flip.** Our in-situ calibrated model (in our own pupil convention, with the plate centre,
+  Zernikes and apodization fitted on the PMMA stack, n_med 1.333) agrees with their model within 3.6° per spot
+  (median), but only after flipping the tilt sign (μ_z → −μ_z, i.e. θ ↔ 180° − θ at the same azimuth). As is, the
+  median is 57°.
+* **What does not change:** the in-plane azimuth relative to the DNA (Δφ 99.4° / 28.0° against 99.9° / 29.5°) and the
+  polar angle |θ| (2.2° median difference).
+* **Cause.** The two pupil conventions differ in the phase of the supercritical (SAF) light: their cos θ_med = −i|.|
+  against our +i|.|. That phase sets which way an out-of-plane dipole tilts.
+* **Other differences:** z by −95 nm (the in-situ model has no immersion-mismatch / nominal-focus phase); N ratio 0.58
+  (normalisation and apodization).
+* **Open:** which tilt sign is physical needs a sample of known tilt. This matters for any 3D orientation result and
+  should be settled in the PSF refactor's test.
+
+**Acceptance test (one command; the refactor must keep these values):**
+
+    CUDA_VISIBLE_DEVICES=2 python -I study/orientation/vortex_exact.py acceptance
+
+It needs ~/vortex_ref (simcode2's port and tables) and ~/data/vortex_hulleman2021, and writes
+results/acceptance.json. Last run (commit after 82d06ef): all 13 values PASS, in 529 s on GPU 2 of qnano1.
+
+| value | expected | tolerance |
+|---|---|---|
+| image max relative difference vs their port (6 spots, n_med 1.333 and 1.0) | ≤ 0.02 | — |
+| λ-DNA crop: axis angle median | 0.145° | ± 0.06 |
+| λ-DNA crop: fraction within 2° | 0.915 | ± 0.02 |
+| λ-DNA crop: dxy median | 0.235 nm | ± 0.1 |
+| λ-DNA crop: dz median | 0.14 nm | ± 0.3 |
+| λ-DNA crop: dg2 median | 0.0003 | ± 0.002 |
+| λ-DNA crop: N ratio median | 0.998 | ± 0.003 |
+| PMMA (n_med 1.0, z grid, top 40): z slope median | −0.984 | ± 0.02 |
+| PMMA: sd azimuth / polar median | 3.48° / 2.84° | ± 0.4 / 0.3 |
+| PMMA: CRLB azimuth / polar median | 2.60° / 2.20° | ± 0.1 |
+| PMMA: g2 median | 0.839 | ± 0.02 |
+
+**Composed reference for the refactor.** `study/orientation/composed_reference.py` and
+`tests/data/orientation_composed_ref.json` hold a small deterministic reference of the whole composition in the current
+API: VectorialPSF + plate → Polychromatic → field Zernikes → FocusZ, with per-emitter dipM. It covers images, dipole
+bases and fits, and is checked by `tests/test_orientation.py::test_composed_vortex_reference` (CPU, ~20 s).
+
+**Frozen.** The Vortex work stops here until the PSF refactor. The spectral, polychromatic and other model
+improvements come after the refactor, as its test case.

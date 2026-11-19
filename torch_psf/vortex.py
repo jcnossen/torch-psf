@@ -118,9 +118,8 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
     stack: the molecule is assumed not to reorient), per plane photons and background. Global: a lateral drift per
     plane (drift; shared by the molecules, mean zero over the planes), the plate centre
     (fit_center), the Zernikes (fit_zernike), the emitter height above the coverslip (height, fit_height; one for all
-    molecules: e.g. a thin film; clamped to [0, max_height], max_height a number or the name of a model parameter
-    such as 'film_um'), the medium index (fit_nmed) and any other parameters
-    of the model named in fit_params (e.g. 'film_um' of a torch_psf.layered.LayeredVectorialPSF), charge fixed.
+    molecules; clamped to [0, max_height], max_height a number or the name of a model parameter), the medium index
+    (fit_nmed) and any other parameters of the model named in fit_params, charge fixed.
     field: torch_psf.field.FieldZernikes (fitted in place, with its ridge prior) and field_xy [nm, 2] the molecules'
     field positions (camera px): the Zernikes of molecule m are psf.zcoef + field.offsets(field_xy[m]).
     spectrum: (wavelengths_um, weights): polychromatic emission (orientation.Polychromatic). Adam on the Poisson NLL. mu0 [nm, 3], xy0 [nm, 2]:

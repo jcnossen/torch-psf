@@ -320,7 +320,7 @@ class VectorialPSF(torch.nn.Module, PSF):
     def _emitter_pupil(self, P, ph, kz_med, ze):
         """Pupil fields [B, 6, N, N] of emitters at heights ze [B, 1, 1] with the lateral / focus / aberration phase ph
         [B, N, N]: P exp(i kz_med z_e) (kz_med complex -> evanescent decay for z_e > 0). Subclasses with another sample
-        geometry (torch_psf.layered) replace it."""
+        geometry replace it."""
         return P[None] * (ph * torch.exp(1j * kz_med * ze))[:, None]
 
     def _fields(self, pos, focus, zcoef_offset=None, blur=None):
