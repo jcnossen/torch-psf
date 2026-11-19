@@ -527,9 +527,12 @@ run with `python -I`):
 | + n_med 1.0, z grid | −0.29 | 3.4° / 1.1° | 8.3° / 1.8° | 0.80 | 2.31 |
 | + n_med 1.0, z grid, without W_mis | −0.79 | 4.7° / 1.2° | 4.9° / 1.4° | 0.84 ± 0.09 | 2.05 |
 | ours: in-situ plate (centre, Zernikes, n_med, apodization), z grid | −0.88 | 2.35° / 1.10° | 2.27° / 1.16° | (g 0.90) | 2.05 |
+| ours: in-situ model, their initial values, one start at z = 0 | +0.07 (z not tracked) | 6.2° / 2.6° | 8.8° / 2.2° | 0.76 | 1.75 |
+| ours: in-situ model, their initial values, z grid | −0.85 | 3.1° / 1.2° | 3.5° / 1.3° | 0.89 ± 0.05 | 1.52 |
 
 Causes of the gaps, as far as isolated:
-1. **The single z = 0 start** of their initial values does not follow the defocus. Their published slope implies
+1. **The single z = 0 start** of their initial values does not follow the defocus, even with our in-situ calibrated
+   model (slope +0.07, against -0.85 with a z grid of starts). Their published slope implies
    their per-slice fits were started differently, or fitted the stack jointly (their code has a 'zstack' mode).
 2. **n_med 1.49 vs ≈ 1** (thin film under air).
 3. **The immersion-mismatch phase as I implement it from their code** (rms 0.22 λ, mostly Z11 −0.18, Z22 −0.11;
