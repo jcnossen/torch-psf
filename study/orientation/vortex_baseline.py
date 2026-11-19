@@ -1,4 +1,9 @@
-"""Baseline reproduction of Hulleman et al. (Nat. Commun. 12, 5934, 2021) on their data (4TU 10.4121/13031837), with
+"""SUPERSEDED by vortex_exact.py, which reproduces their model exactly (checked against simcode2's port of their code).
+Two settings here are wrong: the NAT field axes (their xfov is the image COLUMN, not the row) and the sign of their
+pupil phase in our convention (their pupil is the complex conjugate of ours: plate, Zernikes and W_mis enter with
+the opposite sign, and their image is our image rotated by 180 deg). Kept for the record of the first attempt.
+
+Baseline reproduction of Hulleman et al. (Nat. Commun. 12, 5934, 2021) on their data (4TU 10.4121/13031837), with
 their processing settings taken from their MATLAB code (vecfitcpu_vortex, 4TU 10.4121/15175494):
 
   optics      NA 1.47, n_imm 1.518, wavelength 597.5 nm, pixel 65 nm, ROI 15 x 15, the PSF point-sampled at the pixel
