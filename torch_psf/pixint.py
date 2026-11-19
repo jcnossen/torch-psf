@@ -384,7 +384,8 @@ def point_knots(big, geo, focus, blur=None, dipM=None, chunk=None):
 def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0,
                       blur='none', groups=None, ngroups=1, group_psf_kwargs=None, extra_params=(), batch=4000,
                       lr_xyz=0.03, lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False,
-                      fix_focus=False, log=None, S=3, dz_um=0.01, xy_limit=None, final_exact=True):
+                      fix_focus=False, log=None, S=3, dz_um=0.01, xy_limit=None, final_exact=True, init_xy=None, init_z=None,
+                      init_blur=None, lr_final=1.0, vp_grad=False):
     """estimation.fit_tracks with the samples rendered by the integrated cubic B-spline (PixelSplinePSF, S knots / px,
     dz_um, point-density knots of the exact vectorial model, max error ~3e-5 of the peak at S = 3) instead of the
     vectorial model: per iteration the knots are built once per PSF group from the current Zernikes / focus / blur /
@@ -394,7 +395,16 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
     vectorial PSF, psf.pixel_integration = 'spectral'); xy_limit: the spline's offset limit (px; default R / 2 - 0.5: a
     sample that runs off to a neighbour must render as in fit_tracks, a clamp at 2 px left ~2 % of the real-data
     samples stuck and cost 1e-3 nats / px). final_exact: the
-    final NLL / residuals with the exact vectorial model (else with the spline)."""
+    final NLL / residuals with the exact vectorial model (else with the spline).
+    Warm start / refinement (2026-11-19): init_xy [B, 2] (px from the ROI centre) / init_z [B] (um, clamped into
+    (0, zmax_um)) start every sample there instead of at xy_init / zmax_um / 2 (e.g. from a multi-start refit under the
+    starting PSF, estimation.heldout_tracks); init_blur [sxx, syy, sxy] (px^2) starts the 'line' / 'cov' blur there (its
+    Cholesky factor; default 0.05 px); lr_final: the learning rates of all parameters decay from their value at the end of
+    the warmup to lr_final x that value at the last iteration (cosine; 1 = constant, as before). vp_grad: the gradient
+    also through the closed-form I / bg (fit.solve_linear, differentiated through its reweighting iterations) instead
+    of with them held fixed: solve_linear is the Poisson-weighted least-squares solution, not the minimiser of the
+    Gaussian NLL, so with I / bg held fixed the gradient is not that of the NLL that is evaluated (here and in
+    heldout_tracks) and the fit settles away from its minimum."""
     import math, time
     from torch_psf.fit import solve_linear, readnoise_variance
     dev = tracks.rois.device
@@ -409,10 +419,18 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
     big.zcoef.requires_grad_(True)
     focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
     rn2, pix = readnoise_variance(readnoise_e, B, R, dev)
-    xy = (tracks.xy_init.float() - c).clone().requires_grad_(True)
-    zr = torch.zeros(B, device=dev, requires_grad=True)
+    xy = ((tracks.xy_init.float() - c) if init_xy is None else torch.as_tensor(init_xy, device=dev).float()).clone().requires_grad_(True)
+    if init_z is None:
+        zr = torch.zeros(B, device=dev, requires_grad=True)
+    else:
+        zf = (torch.as_tensor(init_z, device=dev).float() / zmax_um).clamp(1e-4, 1 - 1e-4)
+        zr = torch.log(zf / (1 - zf)).clone().requires_grad_(True)
     BL = None
-    if blur == 'line':
+    if blur in ('line', 'cov') and init_blur is not None:
+        sxx, syy, sxy = [float(v) for v in init_blur]
+        a_ = math.sqrt(max(sxx, 1e-6)); b_ = sxy / a_
+        BL = torch.tensor([a_, b_] if blur == 'line' else [a_, b_, math.sqrt(max(syy - b_ * b_, 1e-6))], device=dev, requires_grad=True)
+    elif blur == 'line':
         BL = torch.tensor([0.05, 0.0], device=dev, requires_grad=True)
     elif blur == 'cov':
         BL = torch.tensor([0.05, 0.0, 0.05], device=dev, requires_grad=True)
@@ -425,6 +443,9 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
                             {'params': [big.zcoef], 'lr': lr_zernike}]
                            + ([{'params': [BL], 'lr': lr_blur}] if BL is not None else [])
                            + ([{'params': extra, 'lr': lr_extra}] if extra else []))
+    lr0 = [g['lr'] for g in opt.param_groups]
+    decay = lambda it: 1.0 if (lr_final == 1.0 or it < warmup) else \
+        lr_final + (1 - lr_final) * 0.5 * (1 + math.cos(math.pi * (it - warmup) / max(iters - 1 - warmup, 1)))
     npx = float(mask.sum()) * R * R
     ng = ngroups if group_psf_kwargs is not None else 1
 
@@ -449,7 +470,10 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
         pos = torch.cat([xy[sl], zmax_um * torch.sigmoid(zr[sl])[:, None]], 1)
         psf = torch.stack([render(pos, g, K) for g in range(ng)], 1)                       # [b, ng, R, R]
         psf = torch.gather(psf, 1, (g_ if ng > 1 else torch.zeros_like(g_))[..., None, None].expand(-1, -1, R, R))
-        I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
+        if vp_grad and torch.is_grad_enabled():
+            I, bg = solve_linear.__wrapped__(psf.reshape(b, T, -1), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
+        else:
+            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
         mu = (I[..., None, None] * psf + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
         var = mu + (r2.reshape(b, 1, R, R) if pix else r2)
         nll = 0.5 * (data - mu) ** 2 / var + 0.5 * torch.log(2 * math.pi * var)
@@ -461,6 +485,8 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
     hist, t0, tot = [], time.time(), float('nan')
     params = [focus, big.zcoef] + ([BL] if BL is not None else []) + extra
     for it in range(iters):
+        for g_, l0 in zip(opt.param_groups, lr0):
+            g_['lr'] = l0 * decay(it)
         opt.zero_grad()
         train_psf = it >= warmup
         with torch.set_grad_enabled(train_psf):
