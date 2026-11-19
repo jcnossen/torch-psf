@@ -351,3 +351,158 @@ def build_pixel_spline(vec, roisize, z_range, S, dz_um=0.01, zpad=None, xy_limit
     spl = PixelSplinePSF(geo, samples, kernel=kernel, integrate=integrate, backend=backend)
     spl.xmax = min(spl.xmax, xy)
     return spl
+
+
+# ============================================================================================ spline-rendered track fit
+def point_knots(big, geo, focus, blur=None, dipM=None, chunk=None):
+    """Differentiable knot samples [nz, nv, nu] of the integrated spline (PixelSplinePSF integrate=True): the point
+    density of the VectorialPSF `big` (roisize geo.Pl) at every knot, emitter height = knot z, at `focus` (tensor or
+    float), with this blur / dipole tensor (None = big's attributes). Autograd flows to big's parameters, focus, blur
+    and dipM (the same layout as CubicSplinePSF.knots_from_model)."""
+    S, Pl = geo.S, geo.Pl
+    A, B = geo._vec_positions()
+    ob, od = big.blur, big.dipM
+    if blur is not None:
+        big.blur = blur
+    if dipM is not None:
+        big.dipM = dipM
+    try:
+        ex = ExactVectorialPSF(big, 'point', os=2, pad=3)
+        out = []
+        step = geo.nz if chunk is None else chunk
+        for z0 in range(0, geo.nz, step):
+            z = geo.zs[z0:min(z0 + step, geo.nz)].float()
+            n = len(z)
+            pos = torch.stack([A[None].expand(n, -1), B[None].expand(n, -1), z[:, None].expand(-1, S * S)], -1)
+            imgs = ex.forward(pos.reshape(-1, 3), focus).reshape(n, S, S, Pl, Pl)
+            out.append(imgs.flip(1).flip(2).permute(0, 3, 1, 4, 2).reshape(n, Pl * S, Pl * S))
+        return torch.cat(out)
+    finally:
+        big.blur, big.dipM = ob, od
+
+
+def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0,
+                      blur='none', groups=None, ngroups=1, group_psf_kwargs=None, extra_params=(), batch=4000,
+                      lr_xyz=0.03, lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False,
+                      fix_focus=False, log=None, S=3, dz_um=0.01, xy_limit=2.0, final_exact=True):
+    """estimation.fit_tracks with the samples rendered by the integrated cubic B-spline (PixelSplinePSF, S knots / px,
+    dz_um, point-density knots of the exact vectorial model, max error ~3e-5 of the peak at S = 3) instead of the
+    vectorial model: per iteration the knots are built once per PSF group from the current Zernikes / focus / blur /
+    group terms (point_knots, with autograd), every chunk of samples is rendered by the spline with the knots detached
+    (gradients to x, y, z and to the knots), then the knot gradient is pulled back to the PSF parameters (one backward
+    through the knot build). Same arguments and result as fit_tracks (the model: the exact pixel integral of the
+    vectorial PSF, psf.pixel_integration = 'spectral'); xy_limit: the spline's offset limit (px). final_exact: the
+    final NLL / residuals with the exact vectorial model (else with the spline)."""
+    import math, time
+    from torch_psf.fit import solve_linear, readnoise_variance
+    dev = tracks.rois.device
+    B, T, R = tracks.rois.shape[0], tracks.rois.shape[1], tracks.rois.shape[-1]
+    c = (R - 1) / 2
+    with torch.no_grad():
+        spl = build_pixel_spline(vectorial.resized(R), R, (0.0, zmax_um), S, dz_um=dz_um, xy_limit=xy_limit,
+                                 kernel='bspline', integrate=True)
+    geo = spl.geo
+    big = vectorial.resized(geo.Pl, pixel_integration='spectral')
+    big.zcoef.requires_grad_(True)
+    focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
+    rn2, pix = readnoise_variance(readnoise_e, B, R, dev)
+    xy = (tracks.xy_init.float() - c).clone().requires_grad_(True)
+    zr = torch.zeros(B, device=dev, requires_grad=True)
+    BL = None
+    if blur == 'line':
+        BL = torch.tensor([0.05, 0.0], device=dev, requires_grad=True)
+    elif blur == 'cov':
+        BL = torch.tensor([0.05, 0.0, 0.05], device=dev, requires_grad=True)
+    elif blur != 'none':
+        raise ValueError(f"blur: 'none' | 'line' | 'cov', not {blur!r}")
+    grp = torch.zeros(B, T, dtype=torch.long, device=dev) if groups is None else groups.to(dev)
+    mask = tracks.mask
+    extra = list(extra_params)
+    opt = torch.optim.Adam([{'params': [xy, zr], 'lr': lr_xyz}, {'params': [focus], 'lr': lr_focus},
+                            {'params': [big.zcoef], 'lr': lr_zernike}]
+                           + ([{'params': [BL], 'lr': lr_blur}] if BL is not None else [])
+                           + ([{'params': extra, 'lr': lr_extra}] if extra else []))
+    npx = float(mask.sum()) * R * R
+    ng = ngroups if group_psf_kwargs is not None else 1
+
+    def blur_cov():
+        if BL is None: return None
+        if len(BL) == 2: return torch.stack([BL[0] ** 2, BL[1] ** 2, BL[0] * BL[1]])
+        return torch.stack([BL[0] ** 2, BL[1] ** 2 + BL[2] ** 2, BL[0] * BL[1]])
+
+    def group_kw(g):
+        kw = dict(group_psf_kwargs(g)) if group_psf_kwargs is not None else {}
+        if BL is not None: kw.setdefault('blur', blur_cov())
+        return kw
+
+    def knots():
+        return [bspline_prefilter(point_knots(big, geo, focus, **group_kw(g))) for g in range(ng)]
+
+    def loss(sl, K, render):
+        data = tracks.rois[sl]
+        b = data.shape[0]
+        g_ = grp[sl]
+        r2 = rn2[sl] if pix else rn2
+        pos = torch.cat([xy[sl], zmax_um * torch.sigmoid(zr[sl])[:, None]], 1)
+        psf = torch.stack([render(pos, g, K) for g in range(ng)], 1)                       # [b, ng, R, R]
+        psf = torch.gather(psf, 1, (g_ if ng > 1 else torch.zeros_like(g_))[..., None, None].expand(-1, -1, R, R))
+        I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
+        mu = (I[..., None, None] * psf + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
+        var = mu + (r2.reshape(b, 1, R, R) if pix else r2)
+        nll = 0.5 * (data - mu) ** 2 / var + 0.5 * torch.log(2 * math.pi * var)
+        nll = torch.where(mask[sl][..., None, None], nll, torch.zeros_like(nll)).sum()
+        return nll, I, bg, mu, var, data
+
+    spl_render = lambda pos, g, K: spl.render(pos, knots=K[g])
+    chunks = torch.arange(B, device=dev).split(batch)
+    hist, t0, tot = [], time.time(), float('nan')
+    params = [focus, big.zcoef] + ([BL] if BL is not None else []) + extra
+    for it in range(iters):
+        opt.zero_grad()
+        train_psf = it >= warmup
+        with torch.set_grad_enabled(train_psf):
+            Kg = knots()
+        Kd = [k.detach().requires_grad_(train_psf) for k in Kg]
+        tot = 0.0
+        for ch in chunks:
+            l = loss(ch, Kd, spl_render)[0] / npx
+            l.backward()
+            tot += float(l.detach())
+        if train_psf:
+            torch.autograd.backward(Kg, [k.grad for k in Kd])
+        if fix_zernike:
+            big.zcoef.grad = None
+        if fix_focus:
+            focus.grad = None
+        opt.step()
+        hist.append(dict(it=it, nll_per_px=tot, focus_um=float(focus.detach())))
+        if log is not None:
+            log(it, tot, time.time() - t0, big.zcoef.detach())
+    out = vectorial.resized(R, pixel_integration='spectral')
+    with torch.no_grad():
+        out.zcoef.copy_(big.zcoef)
+    out.focus_um = float(focus.detach())
+    if BL is not None:
+        out.blur = blur_cov().detach()
+    with torch.no_grad():
+        if final_exact:
+            def ex_render(pos, g, K):
+                kw = group_kw(g)
+                return out(pos, focus.expand(pos.shape[0]), **kw)
+            rend = ex_render
+        else:
+            rend = spl_render
+        K = [k.detach() for k in knots()]
+        Is, bgs, rs, final = [], [], [], 0.0
+        for ch in chunks:
+            l_, I, bg, mu, var, data = loss(ch, K, rend)
+            final += float(l_) / npx
+            Is.append(I); bgs.append(bg)
+            rs.append(((data - mu) / var.sqrt())[mask[ch]])
+        rs = torch.cat(rs)
+    rep = dict(method='tracks_spline', n_samples=B, iterations=len(hist), resid_var=float(rs.var()), nll_per_px=final,
+               nll_per_px_before_last_step=tot, focus_um=float(focus.detach()), seconds=time.time() - t0,
+               spline=dict(S=S, dz_um=dz_um, xy_limit=xy_limit, kernel='bspline', integrate=True),
+               at_limit=float((xy.detach().abs().max(1).values >= spl.xmax - 1e-3).float().mean()))
+    return dict(psf=out, report=rep, history=hist, xy=xy.detach(), z=(zmax_um * torch.sigmoid(zr)).detach(),
+                I=torch.cat(Is), bg=torch.cat(bgs), extra=[e.detach() for e in extra])

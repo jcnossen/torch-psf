@@ -236,3 +236,22 @@ def test_fit_and_heldout_tracks_pixel_integration():
     assert p['mean'] > 0 and p['z'] > 3, p
     assert vec.pixel_integration == 'box'                               # the caller's model is not changed
     assert np.median(np.abs(he['z'] - z.cpu().numpy())) < np.median(np.abs(hb['z'] - z.cpu().numpy())) + 0.005
+
+
+@needs_gpu
+def test_fit_tracks_spline_matches_exact_fit():
+    """fit_tracks_spline (samples rendered by the integrated B-spline, knot gradient pulled back to the vectorial
+    parameters) follows fit_tracks(pixel_integration='exact'): the same Zernikes, focus, blur and NLL"""
+    from torch_psf.estimation import fit_tracks
+    from torch_psf.pixint import fit_tracks_spline
+    torch.backends.cudnn.allow_tf32 = False
+    vec, tr, z = _exact_tracks(B=300)
+    kw = dict(readnoise_e=1.0, zmax_um=0.2, iters=80, warmup=20, focus_um=0.1, blur='cov')
+    fe = fit_tracks(tr, vec, pixel_integration='exact', **kw)
+    fs = fit_tracks_spline(tr, vec, **kw)
+    assert fs['psf'].pixel_integration == 'spectral'
+    assert float((fs['psf'].zcoef - fe['psf'].zcoef).abs().max()) < 3e-4
+    assert abs(fs['report']['focus_um'] - fe['report']['focus_um']) < 1e-3
+    assert float((fs['psf'].blur - fe['psf'].blur).abs().max()) < 2e-3
+    assert abs(fs['report']['nll_per_px'] - fe['report']['nll_per_px']) < 1e-5
+    assert float((fs['z'] - fe['z']).abs().median()) < 1e-3
