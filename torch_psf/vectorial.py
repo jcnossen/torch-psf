@@ -317,6 +317,12 @@ class VectorialPSF(torch.nn.Module, PSF):
         ky = k0 * NA * self.py
         return P, k0 * self.n_med * c_med, k0 * self.n_imm * c_imm, kx, ky
 
+    def _emitter_pupil(self, P, ph, kz_med, ze):
+        """Pupil fields [B, 6, N, N] of emitters at heights ze [B, 1, 1] with the lateral / focus / aberration phase ph
+        [B, N, N]: P exp(i kz_med z_e) (kz_med complex -> evanescent decay for z_e > 0). Subclasses with another sample
+        geometry (torch_psf.layered) replace it."""
+        return P[None] * (ph * torch.exp(1j * kz_med * ze))[:, None]
+
     def _fields(self, pos, focus, zcoef_offset=None, blur=None):
         """Image-plane fields of the three dipoles on the sample grid of the pixel integration: E [B, 6, ns, ns]
         (channels Ex, Ey of the x, y, z dipoles), plus what _image needs (blur, padding, Gauss-Legendre weights,
@@ -331,9 +337,7 @@ class VectorialPSF(torch.nn.Module, PSF):
         y = pos[:, 1, None, None] * self.pixel_um
         ze = pos[:, 2, None, None]
         f = focus[:, None, None] if torch.is_tensor(focus) and focus.dim() > 0 else focus
-        # complex phase; kz_med complex -> evanescent decay for z_e > 0
-        ph = torch.exp(1j * (W - kx * x - ky * y - kz_imm * f)) * torch.exp(1j * kz_med * ze)
-        Pb = P[None] * ph[:, None]  # [B, 6, N, N]
+        Pb = self._emitter_pupil(P, torch.exp(1j * (W - kx * x - ky * y - kz_imm * f)), kz_med, ze)  # [B, 6, N, N]
         # matrix Fourier transform: E(u, v) = sum_k P(kx, ky) exp(i (kx u + ky v))
         kx1 = kx[0]  # [N]
         ky1 = ky[:, 0]

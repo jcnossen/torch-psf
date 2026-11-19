@@ -107,7 +107,7 @@ def calibrate_beads(stacks, dz_um, start, camera=None, charges=(-1, 1), fit_cent
 
 def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=None, xy0=None, iters=400,
                       fit_center=True, fit_zernike=True, fit_offset=True, drift=True, height=0.0, fit_height=False,
-                      fit_nmed=False, lr=3e-3, log=None):
+                      fit_nmed=False, fit_params=(), max_height=None, lr=3e-3, log=None):
     """Plate (and aberration) calibration from z-stacks of fixed single molecules, e.g. dye molecules in PMMA imaged
     through focus with the plate in place (the bead stacks of Hulleman et al. are without it).
 
@@ -117,7 +117,9 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
     stack: the molecule is assumed not to reorient), per plane photons and background. Global: a lateral drift per
     plane (drift; shared by the molecules, mean zero over the planes), the plate centre
     (fit_center), the Zernikes (fit_zernike), the emitter height above the coverslip (height, fit_height; one for all
-    molecules: e.g. a thin film) and the medium index (fit_nmed), charge fixed. Adam on the Poisson NLL. mu0 [nm, 3], xy0 [nm, 2]:
+    molecules: e.g. a thin film; clamped to [0, max_height], max_height a number or the name of a model parameter
+    such as 'film_um'), the medium index (fit_nmed) and any other parameters
+    of the model named in fit_params (e.g. 'film_um' of a torch_psf.layered.LayeredVectorialPSF), charge fixed. Adam on the Poisson NLL. mu0 [nm, 3], xy0 [nm, 2]:
     starting axis / position (e.g. from per-plane fit_orientation at the in-focus plane).
     Returns dict(psf (copy with the fitted Zernikes and plate), center, nll, nll_per_px, mu, g, xy, offset, I, bg,
     model)."""
@@ -150,6 +152,9 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
         groups.append(dict(params=[hz], lr=2e-3))
     if fit_nmed:
         groups.append(dict(params=[psf.n_med], lr=2e-3))
+    for name in fit_params:
+        getattr(psf, name).requires_grad_(True)
+        groups.append(dict(params=[getattr(psf, name)], lr=2e-3))
     if fit_center:
         groups.append(dict(params=[c], lr=2e-3))
     if fit_zernike:
@@ -161,7 +166,11 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
         psf.pupil_phase = vortex_phase(psf, charge, center=c, levels=0, depth=depth, apply=False)
         M = dipole_M(v, torch.sigmoid(gl))                                        # [nm, 3, 3]
         pxy = xy[:, None] + (dr - dr.mean(0))[None]
-        pos = torch.cat([pxy, hz.clamp_min(0).expand(nm, nk, 1)], -1).reshape(-1, 3)
+        hh = hz.clamp_min(0)
+        if max_height is not None:
+            mh = getattr(psf, max_height) if isinstance(max_height, str) else torch.as_tensor(max_height, device=dev)
+            hh = torch.minimum(hh, mh)
+        pos = torch.cat([pxy, hh.expand(nm, nk, 1)], -1).reshape(-1, 3)
         f = (off[:, None] + fk[None]).reshape(-1)
         img = psf(pos, f, dipM=M[:, None].expand(-1, nk, -1, -1).reshape(-1, 3, 3))
         return torch.exp(logI).reshape(-1, 1, 1) * img + bg.reshape(-1, 1, 1)
@@ -179,9 +188,13 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
         nll_m = poisson_nll(d.reshape(-1, P, P), mu.reshape(-1, P, P)).reshape(nm, nk)
     psf.zcoef.requires_grad_(False)
     psf.n_med.requires_grad_(False)
+    for name in fit_params:
+        getattr(psf, name).requires_grad_(False)
     psf.pupil_phase = psf.pupil_phase.detach()
     out = vortex_psf(start=psf, roisize=P, charge=charge, center=c.detach().tolist(), levels=0, depth=depth)
-    return dict(psf=out, center=c.detach().tolist(), height=float(hz.detach().clamp_min(0)), n_med=float(psf.n_med), nll=float(l.detach()), nll_per_molecule=nll_m.sum(1),
+    extra = {name: float(getattr(psf, name)) for name in fit_params}
+    return dict(psf=out, center=c.detach().tolist(), height=float(hz.detach().clamp_min(0)), n_med=float(psf.n_med),
+                params=extra, nll=float(l.detach()), nll_per_molecule=nll_m.sum(1),
                 nll_per_px=float(l.detach()) / d.numel(), mu=unit(v.detach()), g=torch.sigmoid(gl.detach()),
                 xy=xy.detach(), offset=off.detach(), drift=(dr - dr.mean(0)).detach(), I=torch.exp(logI.detach()),
                 bg=bg.detach(), model=mu)
