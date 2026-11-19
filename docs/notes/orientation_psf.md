@@ -231,10 +231,11 @@ CRLBs do not depend on how the intensity is parametrised.
 
 **(i) Fig. 1b/c images.** Reproduced: a ring for theta = 10 deg and a compact spot for 80 deg with the standard PSF.
 With the Vortex PSF: a central spot with a ring at 10 deg, an off-centre lobe at 45 deg, and a ring with a dark
-centre whose brightness varies with azimuth at 80 deg. Handedness: their images match **charge -1** in our pupil
+centre whose brightness varies with azimuth at 80 deg. Handedness: their figure images match **charge -1** in our pupil
 coordinates (p_x along columns, p_y along rows) when shown with row 0 at the top (MATLAB `imagesc`). Equivalently,
-charge +1 with the image y axis mirrored. The CRLBs are the same for both signs (mirror symmetry). On real data the
-sign has to be fixed once, by the likelihood of both signs on a few bright spots or from the PSF of an in-plane dipole.
+charge +1 with the image y axis mirrored. The CRLBs are the same for both signs (mirror symmetry). Their real data
+prefer **charge +1** by a large likelihood margin (section 7), consistent with their code read in the DIPimage
+convention, so the figure's display axes differ from the camera axes.
 The Vortex peaks are 0.41-0.45 of the standard theta = 80 peak. Their colour scale ends at 0.35 and their theta = 80
 Vortex image is saturated, which is consistent. With the standard PSF our ROI holds 64-78 % of N. They quote 44-46 %;
 see the photon-scale discrepancy below.
@@ -336,6 +337,10 @@ in ~2 min.
 * `fig_iso_bias.png`: z and lateral bias of the isotropic-model fit of fixed dipoles vs theta.
 * `fig_corr_z.png`: |rho(theta, z)| and |rho(phi, x)| vs theta; sd_theta vs emitter height.
 * `fig_vortex_images.png`, `fig_vortex_crlb.png`: Vortex reproduction (Fig. 1b/c, 1e/f of Hulleman et al.).
+* `fig_pipeline_sim.png`: the pipeline on simulations: z vs focus and the per-slice theta error of the PMMA z-stack,
+  and the lambda-DNA Delta phi and g histograms against the truth.
+* `fig_real_pmma.png`: real PMMA z-stack, per-plane z / theta / phi / g of six molecules.
+* `fig_real_dna.png`: real lambda-DNA, Delta phi to the local axis and g: ours vs their localisations.
 
 ## 7. Vortex orientation pipeline: code, simulations, real data (Hulleman et al. 2021)
 
@@ -422,3 +427,43 @@ run with `python -I`):
   * The precision gap to the CRLB (2× vs their 1.2–1.3×) and the z scale (0.88) point at the remaining model error:
     the joint χ² is 2. Candidates are the field dependence of the aberrations (constant here), the thin-film optics
     (a single medium of n ≈ 1 approximates glass / PMMA film / air) and the emission spectrum (one wavelength).
+* **Re-orientation movie** (ATTO 565 on glass in air, 900 ms frames, TIRF, central 1024 × 1024 field, bright spots
+  only (threshold 20): 4935 spots, 225 molecules tracked over ≥ 10 of the 23 frames). `FocusZ` model with n_med 1.0,
+  emitter at the glass and the in-situ plate:
+  * χ² median 1.14: the model fits well.
+  * g median 0.88 (paper's three molecules 0.75–0.85).
+  * Photons median 13.7k, background 60 / px (paper 3–6 × 10⁴ and 80–91 for their three bright molecules).
+  * 80 molecules show at least one axis jump > 20° between frames.
+  * On the stationary stretches the frame-to-frame axis change is median 2.3°, rms 5.2°. Two independent estimates
+    with the CRLB would give rms √2 × 2.7° = 3.8°, so the single-frame axis precision is ~1.4 × the CRLB, close to the
+    paper's "within 30 % of the CRLB".
+* **λ-DNA** (`stk_0001`, frames 0–600, the 256 × 256 px crop densest in their localisations, water n 1.333, `FocusZ`
+  with the emitter at the coverslip, the in-situ plate): 17 763 spots fitted, 15 899 kept by their χ² filter
+  (0.75–3); χ² median 1.55. Δφ is measured to the local DNA axis, taken from the PCA of the localisations within
+  3 px, on the 6370 spots where it is defined. Against their localisations (4TU hdf5, same crop, frames 0–600;
+  `fig_real_dna.png`):
+
+  | quantity | ours | theirs | paper |
+  |---|---|---|---|
+  | Δφ to the DNA axis, median / MAD | 97.6° / 29.8° | 89.1° / 33.5° | 82 ± 17° (one strand) |
+  | g, median | 0.78 (a pile-up at the g = 1 bound) | 0.75 | peak 0.8 |
+  | CRLB median: xy / in-plane / θ / g | 6.0 nm / 3.9° / 3.6° / 0.072 | — | — |
+
+  * Per-localisation matching with their table failed. The spatial densities agree (correlation 0.85 for the same
+    600 frames, no flip or transpose), but no frame offset pairs the localisations. Their frame numbering does not
+    map onto stk_0001 as I read it; this is open.
+  * Their 'photons' is the whole-field N (median 4620). Ours is the signal in the 15 × 15 ROI (median 1780).
+  * z is defocus relative to our model focus (median −32 nm). Theirs is a stage-type z (median +58 nm).
+
+**Status of the real-data pipeline.**
+* **Works:** bead Zernikes, then the in-situ plate (charge, centre, Zernikes, n_med, height), then per-spot
+  orientation with CRLBs on the PMMA stack, the re-orientation movie and λ-DNA. g and Δφ are in the paper's range,
+  and the z tracking is linear.
+* **Open:**
+  1. Precision is 1.4–2 × the CRLB, and the z scale is 0.88 against their 0.99. Next steps: field-dependent Zernikes
+     (FieldPSF; their NAT map), a two-layer glass / PMMA / air model instead of n_med ≈ 1, and polychromatic
+     emission.
+  2. The pile-up at g = 1: a soft bound, or report g as is with its CRLB.
+  3. The frame mapping to their λ-DNA hdf5 for a per-localisation comparison.
+  4. Throughput: about 17 spots / s on the shared GPU with 6 starts per spot. The full movie (~0.5 M spots) needs
+     fewer starts or a spline / lookup model.

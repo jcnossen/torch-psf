@@ -442,10 +442,10 @@ def _bright_spots(mov, n=200, roisize=15):
 # ------------------------------------------------------------------ re-orientation (ATTO 565 in air)
 def run_reorient():
     t0 = time.time()
-    mov = _movie_photons('reorientation_ATTO_565_tirf_qwp_vortex_900ms.tif')
+    mov = _movie_photons('reorientation_ATTO_565_tirf_qwp_vortex_900ms.tif', crop=(512, 512, 1024, 1024))
     psf = sm_focusz(n_med=1.0, height=0.0)                 # molecules on glass in air
     f0 = None
-    est = OrientationEstimator(psf, threshold=8.0, iters=40, z_limits=(-0.9, 0.9), batch=200, isolation=8,
+    est = OrientationEstimator(psf, threshold=20.0, iters=40, z_limits=(-0.9, 0.9), batch=200, isolation=8,
                                zgrid=(-0.4, 0.0, 0.4), chunk=4)
     ds = est.estimate(mov.numpy())
     log(f'reorient: {len(ds)} spots ({time.time() - t0:.0f} s)')
@@ -597,6 +597,47 @@ def run_dna(crop_size=256, frames=(0, 600)):
     ds.save(os.path.join(OUT, 'real_dna_locs.hdf5'))
 
 
+def figures():
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    from common import style, COLORS, INK2
+    style(plt)
+    fig, ax = plt.subplots(1, 4, figsize=(13, 3.0))
+    p = os.path.join(OUT, 'real_pmma.json')
+    if os.path.exists(p):
+        d = json.load(open(p))
+        pm = {q['mol']: q for q in d['summary'].get('per_molecule', [])}
+        for i, r in enumerate([r for r in d['molecules'] if r['mol'] in pm][:6]):
+            pp = r['per_plane']
+            k = np.arange(len(pp['z_vortex'])) * 0.1 - 1.2
+            sel = (np.arange(len(k)) >= 3) & (np.arange(len(k)) <= 20)
+            c = COLORS[i % len(COLORS)]
+            ax[0].plot(k[sel] * 1e3, np.array(pp['z_vortex'])[sel] * 1e3, '-o', ms=2.5, color=c, lw=1)
+            ax[1].plot(k[sel] * 1e3, np.array(pp['theta_vortex'])[sel], '-o', ms=2.5, color=c, lw=1)
+            ax[2].plot(k[sel] * 1e3, np.array(pp['phi_vortex'])[sel] % 180, '-o', ms=2.5, color=c, lw=1)
+            ax[3].plot(k[sel] * 1e3, np.array(pp['g_vortex'])[sel], '-o', ms=2.5, color=c, lw=1)
+        for a_, lab in zip(ax, ('fitted z (nm)', 'theta (deg)', 'phi mod 180 (deg)', 'g')):
+            a_.set_xlabel('stage position (nm)'); a_.set_ylabel(lab)
+        ax[0].set_ylim(-900, 900); ax[3].set_ylim(0, 1.05)
+        fig.suptitle('Real PMMA z-stack, Vortex PSF, 6 molecules: per-plane fits (in-situ calibrated plate, '
+                     'n_med 0.955)', fontsize=9, color=INK2)
+    fig.tight_layout(); fig.savefig(os.path.join(HERE, 'fig_real_pmma.png')); plt.close(fig)
+    p = os.path.join(OUT, 'real_dna.json')
+    if os.path.exists(p):
+        d = json.load(open(p))
+        fig, ax = plt.subplots(1, 2, figsize=(7.5, 3.0))
+        ax[0].hist(d['dphi'], bins=36, range=(0, 180), color=COLORS[2], alpha=0.85, density=True, label='ours')
+        ax[0].hist(d['dphi_theirs'], bins=36, range=(0, 180), histtype='step', color=INK2, density=True,
+                   label='theirs (4TU hdf5)')
+        ax[0].set_xlabel('Delta phi to the local DNA axis (deg)'); ax[0].legend(fontsize=7)
+        ax[1].hist(d['g'], bins=20, range=(0, 1), color=COLORS[3], alpha=0.85, density=True, label='ours')
+        ax[1].hist(d['g_theirs'], bins=20, range=(0, 1), histtype='step', color=INK2, density=True, label='theirs')
+        ax[1].set_xlabel('g (g2)'); ax[1].legend(fontsize=7)
+        fig.suptitle('Real lambda-DNA (stk_0001, 256 x 256 px crop, frames 0-600)', fontsize=9, color=INK2)
+        fig.tight_layout(); fig.savefig(os.path.join(HERE, 'fig_real_dna.png')); plt.close(fig)
+
+
 if __name__ == '__main__':
     what = sys.argv[1:]
     if 'beads' in what:
@@ -617,3 +658,5 @@ if __name__ == '__main__':
         run_reorient()
     if 'dna' in what:
         run_dna()
+    if 'figures' in what:
+        figures()
