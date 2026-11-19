@@ -19,7 +19,9 @@ their two-interface Fresnel through the 1.523 coverslip vs our index-matched cov
 Stages: check (the image identity on random spots), dna (their Octave lambda-DNA table: the same ROIs, our fit from
 their initial values and from z-grid starts; per-spot differences), pmma (PMMA per slice with their model, n_med 1.0,
 z grid / z0 = 0).
-usage: CUDA_VISIBLE_DEVICES=2 python -I study/orientation/vortex_exact.py check|dna|pmma [refmed=1.0] [zgrid]
+usage: CUDA_VISIBLE_DEVICES=2 python -I study/orientation/vortex_exact.py check|dna|pmma|insitu_dna [refmed=1.0] [zgrid]
+       CUDA_VISIBLE_DEVICES=2 python -I study/orientation/vortex_exact.py acceptance     (the reference numbers, ~12 min;
+       needs ~/vortex_ref (simcode2's port and tables) and ~/data/vortex_hulleman2021)
 """
 import json
 import math
@@ -131,10 +133,13 @@ def axis_angle(u, w):
 
 
 def run_check():
+    out = {}
     for refmed in (1.333, 1.0):
         E = Exact(refmed=refmed)
+        out[refmed] = E.check()
         log(f'refmed {refmed}: Zernike projection residual {E.proj_residual:.2e} nm; image max rel diff vs their '
-            f'port: {np.round(E.check(), 4).tolist()}')
+            f'port: {np.round(out[refmed], 4).tolist()}')
+    return out
 
 
 def run_dna(zgrid=None, nmax=None):
@@ -292,6 +297,7 @@ def run_pmma(refmed=1.0, zgrid=False, tag=None):
     log(tag, json.dumps({k: {q: round(v, 3) if isinstance(v, float) else v for q, v in (s_ or {}).items()}
                          if isinstance(s_, dict) else s_ for k, s_ in res.items()}))
     json.dump(res, open(os.path.join(OUT, f'exact_pmma_{tag}.json'), 'w'), indent=1)
+    return res
 
 
 def run_insitu_dna():
@@ -342,9 +348,55 @@ def run_insitu_dna():
     json.dump(res, open(os.path.join(OUT, 'insitu_dna.json'), 'w'), indent=1)
 
 
+# acceptance test (the PSF refactor must keep these): expected values and tolerances
+EXPECTED = dict(
+    image_max_rel_diff=(0.0, 0.02),                       # vs their port, 6 random spots, n_med 1.333 and 1.0
+    dna_axis_angle_median_deg=(0.145, 0.06),              # lambda-DNA crop, 15065 spots, our fit (z grid) vs theirs
+    dna_frac_axis_lt_2deg=(0.915, 0.02),
+    dna_dxy_median_nm=(0.235, 0.1),
+    dna_dz_median_nm=(0.14, 0.3),
+    dna_dg2_median=(0.0003, 0.002),
+    dna_N_ratio_median=(0.998, 0.003),
+    pmma_z_slope_median=(-0.984, 0.02),                   # PMMA, n_med 1.0, z grid, their summary (top 40)
+    pmma_sd_azim_deg_median=(3.48, 0.4),
+    pmma_sd_pola_deg_median=(2.84, 0.3),
+    pmma_crlb_azim_deg_median=(2.60, 0.1),
+    pmma_crlb_pola_deg_median=(2.20, 0.1),
+    pmma_g2_mean_median=(0.839, 0.02))
+
+
+def run_acceptance():
+    """one command for the reference numbers: image identity with their port, the lambda-DNA per-spot match on the
+    whole crop, the PMMA table (n_med 1.0, z grid); writes results/acceptance.json with PASS / FAIL per value"""
+    t0 = time.time()
+    got = {}
+    chk = run_check()
+    got['image_max_rel_diff'] = float(max(max(v) for v in chk.values()))
+    d = run_dna(zgrid=True)['zgrid']
+    got.update(dna_axis_angle_median_deg=d['axis_angle_median'], dna_frac_axis_lt_2deg=d['frac_axis_lt_2deg'],
+               dna_dxy_median_nm=d['dxy_median_nm'], dna_dz_median_nm=d['dz_median_nm'], dna_dg2_median=d['dg2_median'],
+               dna_N_ratio_median=d['N_ratio_median'])
+    pm = run_pmma(1.0, zgrid=True)['their_outliers']
+    got.update(pmma_z_slope_median=pm['z_slope_median'], pmma_sd_azim_deg_median=pm['sd_azim_deg_median'],
+               pmma_sd_pola_deg_median=pm['sd_pola_deg_median'], pmma_crlb_azim_deg_median=pm['crlb_azim_deg_median'],
+               pmma_crlb_pola_deg_median=pm['crlb_pola_deg_median'], pmma_g2_mean_median=pm['g2_mean_median'])
+    rep = {}
+    for k, (ref, tol) in EXPECTED.items():
+        v = got[k]
+        ok = (v <= tol) if k == 'image_max_rel_diff' else abs(v - ref) <= tol
+        rep[k] = dict(value=v, expected=ref, tol=tol, ok=bool(ok))
+        log(f"{'PASS' if ok else 'FAIL'} {k}: {v:.4f} (expected {ref} +- {tol})")
+    rep['all_pass'] = all(r['ok'] for r in rep.values() if isinstance(r, dict))
+    rep['seconds'] = time.time() - t0
+    log('ACCEPTANCE', 'PASS' if rep['all_pass'] else 'FAIL', f"({rep['seconds']:.0f} s)")
+    json.dump(rep, open(os.path.join(OUT, 'acceptance.json'), 'w'), indent=1)
+
+
 if __name__ == '__main__':
     stage = sys.argv[1]
-    if stage == 'check':
+    if stage == 'acceptance':
+        run_acceptance()
+    elif stage == 'check':
         run_check()
     elif stage == 'insitu_dna':
         run_insitu_dna()
