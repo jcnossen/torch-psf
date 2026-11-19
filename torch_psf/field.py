@@ -338,12 +338,12 @@ class FieldPSF(PSF):
         m.provenance = self.provenance
         return m
 
-    def render(self, pos, grad=False, xy=None, focus=None):
+    def render(self, pos, grad=False, xy=None, focus=None, dipM=None):
         """pos [N, 3] (x, y px from the ROI centre, z um) -> [N, P, P] at the base focus (or `focus`); xy [N, 2]:
         field positions (None = the reference point). grad: also d/dx, d/dy, d/dz (forward-mode AD)."""
         f = self.base.focus_um if focus is None else focus
         off = None if xy is None else self.offsets(xy)
-        fn = lambda p: self.base(p, f, zcoef_offset=off)
+        fn = lambda p: self.base(p, f, zcoef_offset=off, dipM=dipM)
         if not grad:
             return fn(pos)
         out, val = [], None
@@ -397,8 +397,8 @@ class FieldPSF(PSF):
 
     def to_tiled(self, tile=128, extent=None, roisize=None, z_range=None, lazy=True, **grid):
         """TiledSplinePSF: tiles of `tile` px over extent (x0, y0, x1, y1) px (default the field box
-        cx -+ sx, cy -+ sy), each a CubicSplinePSF of the model at the tile centre (grid: oversample, dz_um, zpad,
-        xy_limit of to_spline; default the stored spline grid of a file, else the to_spline defaults)."""
+        cx -+ sx, cy -+ sy). kind='cubic' tabulates pixel values, kind='integrated' integrates the density spline.
+        Defaults to integrated for a non-box base. Grid options include oversample, dz_um, zpad and xy_limit."""
         g = dict(self.spline_grid or {})
         g.update(grid)
         r0, z0 = g.pop('roisize', None), g.pop('z_range', None)
@@ -422,8 +422,13 @@ class TiledSplinePSF(PSF):
     render(pos, grad=False, xy=None) (xy None: the reference-point spline), tile_index(xy), spline(t), fit(rois,
     corners=..., xy=None): every ROI fitted with its tile's spline (input order kept)."""
 
-    def __init__(self, field_psf, tile=128, extent=None, roisize=None, z_range=None, lazy=True, **grid):
+    def __init__(self, field_psf, tile=128, extent=None, roisize=None, z_range=None, lazy=True, kind=None, **grid):
         self.source = field_psf
+        if kind is None:
+            kind = 'integrated' if field_psf.base.pixel_integration != 'box' else 'cubic'
+        if kind not in ('cubic', 'integrated'):
+            raise ValueError("kind must be 'cubic' or 'integrated'")
+        self.kind = kind
         f = field_psf.field
         if extent is None:
             cx, cy, sx, sy = f.norm
@@ -468,10 +473,13 @@ class TiledSplinePSF(PSF):
         return iy * self.nx + ix
 
     def _build(self, vec):
+        if self.kind == 'integrated':
+            from torch_psf.pixint import IntegratedSplinePSF
+            return IntegratedSplinePSF.from_vectorial(vec, self._zr, roisize=self.roisize, **self.grid)
         return vec.to_spline(self.roisize, self._zr, **self.grid)
 
     def spline(self, t):
-        """the CubicSplinePSF of tile t"""
+        """The spline at the centre of tile t."""
         if t not in self._splines:
             c = self.centers[t]
             self._splines[t] = self._build(self.source.at(c[0], c[1]))
@@ -499,21 +507,24 @@ class TiledSplinePSF(PSF):
         return (f'TiledSplinePSF({self.nx} x {self.ny} tiles of {self.tile:g} px over {self.extent}, roisize '
                 f'{self.roisize}, {len(self._splines)} built)')
 
-    def render(self, pos, grad=False, xy=None):
+    def render(self, pos, grad=False, xy=None, dipM=None):
         if xy is None:
-            return self.reference_spline().render(pos, grad)
+            return self.reference_spline().render(pos, grad, dipM=dipM)
         ti = self.tile_index(xy).to(pos.device)
+        if dipM is not None:
+            dipM = torch.as_tensor(dipM, device=pos.device)
         res = None
         for t in torch.unique(ti).tolist():
             m = ti == t
-            r = self.spline(t).render(pos[m], grad)
+            tensor = dipM[m] if dipM is not None and dipM.ndim == 3 else dipM
+            r = self.spline(t).render(pos[m], grad, dipM=tensor)
             r = r if grad else (r,)
             if res is None:
                 res = [torch.zeros((len(pos),) + v.shape[1:], device=v.device, dtype=v.dtype) for v in r]
             for a, v in zip(res, r):
                 a[m] = v
         if res is None:
-            return self.reference_spline().render(pos, grad)
+            return self.reference_spline().render(pos, grad, dipM=dipM)
         return tuple(res) if grad else res[0]
 
     def bind(self, xy):
@@ -539,7 +550,7 @@ class TiledSplinePSF(PSF):
         return ds
 
     def resized(self, roisize):
-        t = TiledSplinePSF(self.source, self.tile, self.extent, roisize, self._zr, True, **self.grid)
+        t = TiledSplinePSF(self.source, self.tile, self.extent, roisize, self._zr, True, kind=self.kind, **self.grid)
         t._splines = {k: s.resized(roisize) for k, s in self._splines.items()}
         return t
 
@@ -605,9 +616,12 @@ def field_psf_from_file(model, source, block, arrays=None, crop=None, tiles=None
     if hasattr(model, 'zidx'):
         return fp
     g = model.to_dict()
-    fp.spline_grid = dict(oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
+    fp.spline_grid = dict(kind='integrated' if model.type_name == 'integrated_spline' else 'cubic',
+                          oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
                           roisize=g['roisize'], z_range=tuple(g['z_range']))
     t = dict(tiles or {})
+    if g.get('dipole_components'):
+        fp.spline_grid['dipole_components'] = True
     tp = fp.to_tiled(tile=t.get('tile_px', 128), extent=t.get('extent'))
     tp._ref = model
     return tp

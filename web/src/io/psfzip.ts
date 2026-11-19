@@ -178,6 +178,8 @@ export function psfFromMeta(meta: Record<string, any>, arrays: Record<string, Nd
   if ([...types].every((t) => t === 'source_output' || t === 'phase_spline')) throw new Error('a coupled (4Pi) model: not supported by the web app');
   if (chans.length > 1) notes.push(`${chans.length} channels: channel 0 (${chans[0].name}) is used`);
   const ch = chans[0];
+  if (ch.model?.spline?.dipole_components || ch.model?.integrated_spline?.dipole_components)
+    throw new Error('dipole-component spline (dipole_components): not supported by the web app');
   const common = { channelType: ch.type, camera: meta.camera ?? null, meta, arrays, notes };
   for (const block of [meta.source, ...chans.flatMap(c => [c, c.source])]) integrationMode(block?.model?.pixel_integration);
   let spline: SplineModel | null = null;

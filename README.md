@@ -43,6 +43,8 @@ psf.save('insitu.json')
 - Integrate a cubic B-spline over each pixel with `tp.IntegratedSplinePSF`, optionally using coefficients per angle.
 - Fit multiple channels jointly with `tp.ChannelsPSF`.
 - Model two-objective interference with `tp.FourPiPSF` or its spline form, `tp.FourPiSplinePSF`.
+- Integrate exactly over each pixel (spectral or Gauss-Legendre) in vectorial, 4Pi and field-dependent models.
+- Give 4Pi and multichannel PSFs a per-emitter dipole orientation through dipole tensors and dipole bases.
 - Vary Zernikes across the field with `tp.FieldPSF` or use a spline per tile with `tp.TiledSplinePSF`.
 
 **PSF estimation and calibration**
@@ -177,7 +179,7 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `psf.py` | `PSF`: the base class (statistics, fitting, localization, files, to_spline). |
 | `spline.py` | `CubicSplinePSF`: Catmull-Rom (cubic) knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_zstack`. |
 | `gaussian.py` | `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D), pixel-integrated; `fit_gaussian_free_sigma`: spot fit with a free width (x, y, photons, bg, sigma; CRLB, chi2) for spot finding and width / chi2 filters. |
-| `fourpi.py` | `FourPiPSF`: coherent two-objective (4Pi) PSF with C interference channels; `FourPiSplinePSF`: its spline table with the 4Pi phase as an analytic dependence. |
+| `fourpi.py` | `FourPiPSF` renders coherent two-objective interference channels with midpoint or exact spectral pixel integration. `FourPiSplinePSF` preserves analytic phase dependence with cubic pixel-value tables or integrated density splines. |
 | `zernike.py` | Zernike polynomials (Noll index and normalization). |
 | `fit.py` | `lm_poisson`, `localize`, `fisher`, `crlb`, `poisson_nll`; `solve_linear` (variable projection: closed-form per-frame intensities and backgrounds of a track). |
 | `detect.py`, `spots.py` | band-pass + local-maximum detection; `Spots` / `extract_spots` (streams over a movie), `Tracks`. |

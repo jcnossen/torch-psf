@@ -28,7 +28,7 @@ from torch_psf.dataset import _plain
 
 ZIP_VERSION = '0.2.0'
 # 0.3.0: written only for files that a 0.2 reader would render wrongly without noticing (it ignores unknown keys): a
-# model with pixel_integration other than 'box', or an 'integrated_spline' channel (docs/PSF_FORMAT.md, Versioning);
+# non-box pixel integration, an 'integrated_spline' grid or dipole component tables (docs/PSF_FORMAT.md, Versioning);
 # every 0.2 / 0.3 reader checks the minor version and refuses a newer one. Other files stay 0.2.0, byte for byte.
 ZIP_VERSION_NEW = '0.3.0'
 READ_VERSIONS = ((0, 2), (0, 3))
@@ -260,15 +260,19 @@ def legacy(meta, arrays, channel=None):
     types = {c['type'] for c in chans}
     src = meta.get('source')
     if types == {'phase_spline'}:
-        g = dict(chans[0]['model']['spline'], n_channels=len(chans), tau=[c['model'].get('tau') for c in chans])
+        model = chans[0]['model']
+        grid = model['integrated_spline'] if 'integrated_spline' in model else model['spline']
+        g = dict(grid, n_channels=len(chans), tau=[c['model'].get('tau') for c in chans])
         if any(t is None for t in g['tau']):
             g['tau'] = None
         if all(c.get('arrays') for c in chans):
-            knots = np.stack([np.stack([arrays[c['arrays'][k]] for c in chans]) for k in ('inc', 'cr', 'ci')])
+            keys = _phase_arrays(g)
+            knots = np.stack([np.stack([arrays[c['arrays'][k]] for c in chans]) for k in keys])
             knots = knots.astype(np.float32)
         else:
             knots = _rebuild_knots(meta, g)
-        d, arr, typ = dict(fourpi_spline=g), dict(knots=knots), 'fourpi_spline'
+        key = 'dipole_knots' if g.get('dipole_components') else 'knots'
+        d, arr, typ = dict(fourpi_spline=g), {key: knots}, 'fourpi_spline'
         if src and src.get('type') == 'fourpi':
             d.update({k: v for k, v in src['model'].items() if k == 'fourpi'})
     elif types == {'source_output'}:
@@ -299,6 +303,10 @@ def legacy(meta, arrays, channel=None):
     return d, (arr or None), typ
 
 
+def _phase_arrays(grid):
+    return ('dipole_inc', 'dipole_cr', 'dipole_ci') if grid.get('dipole_components') else ('inc', 'cr', 'ci')
+
+
 def _rebuild_knots(meta, g, device=None):
     """knots [3, C, nz, n, n] of phase_spline channels written with spline_knots='rebuild': tabulated from the
     source FourPiPSF on the grid of the channels (FourPiPSF.to_spline; on the GPU when there is one)."""
@@ -307,10 +315,11 @@ def _rebuild_knots(meta, g, device=None):
     if src.get('type') != 'fourpi' or not (src.get('model') or {}).get('fourpi'):
         raise ValueError('phase_spline channels without knots need the FourPiPSF source to rebuild them')
     reb = meta['channels'][0].get('rebuild') or {}
-    src_psf = FourPiPSF.from_state(src['model']['fourpi'], device=device or reb.get('device'))
+    src_psf = FourPiPSF._from_file(src['model'], {}, device=device or reb.get('device'))
     sp = src_psf.to_spline(roisize=g['roisize'], z_range=tuple(g['z_range']), oversample=g['oversample'],
-                           dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'])
-    return sp.knots.detach().cpu().numpy().astype(np.float32)
+                           dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
+                           kind='integrated' if 'basis' in g else 'cubic', dipole_components=g.get('dipole_components', False))
+    return sp._stored_tables().detach().cpu().numpy().astype(np.float32)
 
 
 def camera_from_meta(meta, arrays):
@@ -461,13 +470,17 @@ class PSFZip:
 # ====================================================================================================== rendering
 def _zip_version(meta):
     """ZIP_VERSION_NEW when a model block of the file (channel, its source, the top-level source) is an
-    integrated_spline or has a pixel_integration other than 'box', else ZIP_VERSION"""
+    integrated_spline, stores dipole components or has pixel_integration other than 'box', else ZIP_VERSION"""
     blocks = [meta.get('source')] + [b for c in meta['channels'] for b in (c, c.get('source'))]
     for b in blocks:
         if not b:
             continue
         m = b.get('model') or {}
-        if b.get('type') == 'integrated_spline' or m.get('pixel_integration', 'box') not in (None, 'box'):
+        if m.get('spline', {}).get('dipole_components'):
+            return ZIP_VERSION_NEW
+        if (m.get('fourpi') or {}).get('meta', {}).get('pixel_integration', 'box') != 'box':
+            return ZIP_VERSION_NEW
+        if 'integrated_spline' in m or m.get('pixel_integration', 'box') not in (None, 'box'):
             return ZIP_VERSION_NEW
     return ZIP_VERSION
 
@@ -636,16 +649,21 @@ def _channel_blocks(psf, source, names, spline_knots='float32'):
         chans = []
         for c in range(psf.n_channels):
             g = dict(psf.luts[0][c].to_dict(), pixel_um=psf.pixel_um)
-            ch = dict(name=names(c), type='phase_spline', model=_plain(dict(spline=g, tau=float(psf.tau[c].detach()))),
+            if psf.default_dipM is not None:
+                g['default_dipM'] = psf.default_dipM
+            grid_key = 'integrated_spline' if 'basis' in g else 'spline'
+            ch = dict(name=names(c), type='phase_spline', model=_plain({grid_key: g, 'tau': float(psf.tau[c].detach())}),
                       phase_param='phi')
             if spline_knots == 'rebuild':
                 ch['rebuild'] = dict(method='FourPiPSF.to_spline', note='knots not stored: tabulate the source on '
                                      'this grid (torch_psf.psfzip._rebuild_knots)')
             else:
-                members = {k: f'{names(c)}/{k}.npy' for k in ('inc', 'cr', 'ci')}
+                members = {k: f'{names(c)}/{k}.npy' for k in _phase_arrays(g)}
                 dt = np.float16 if spline_knots == 'float16' else np.float32
-                for comp, k in enumerate(('inc', 'cr', 'ci')):
-                    arrays[members[k]] = psf.luts[comp][c].knots.detach().cpu().numpy().astype(dt)
+                for comp, k in enumerate(members):
+                    lut = psf.luts[comp][c]
+                    table = lut.dipole_knots if psf.dipole_components else lut.knots
+                    arrays[members[k]] = table.detach().cpu().numpy().astype(dt)
                 ch['arrays'] = members
             chans.append(ch)
         return chans, sb, arrays

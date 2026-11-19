@@ -101,13 +101,13 @@ def check_spectral_oversample(fc, os_):
                          f"{spectral_min_oversample(fc)}")
 
 
-def pixel_box_spectral(I, os_, pad, R, fc, cov=None):
+def pixel_box_spectral(I, os_, pad, R, fc, cov=None, *, integrate=True):
     """Exact pixel means of a band-limited density from its point samples I [B, n, n] on the uniform grid with os_
     samples per px, n = (R + 2 pad) os_ (sample j at (j - (n - 1) / 2) / os_ px from the ROI centre): FFT, times the
     pixel-box transfer function sinc(fx) sinc(fy), the optional Gaussian blur exp(-2 pi^2 f^T C f) (cov = [sxx, syy, sxy]
     px^2, [3] or [B, 3]; gain capped as gauss_blur_os) and a raised-cosine taper from the band limit fc (cycles / px)
     to the Nyquist frequency os_ / 2, shifted onto the pixel centres; inverse FFT, every os_-th sample, cropped by pad
-    -> [B, R, R] (the density averaged over each pixel). ValueError when fc >= os_ / 2 (the samples alias)."""
+    -> [B, R, R] (pixel means, or centre densities when integrate=False). ValueError when fc >= os_ / 2."""
     check_spectral_oversample(fc, os_)
     n = I.shape[-1]
     f = torch.fft.fftfreq(n, d=1.0 / os_, device=I.device)            # cycles / px
@@ -120,8 +120,8 @@ def pixel_box_spectral(I, os_, pad, R, fc, cov=None):
         return 0.5 * (1 + torch.cos(math.pi * a))
 
     d = (os_ - 1) / (2 * os_)                                          # sample p os_ -> pixel centre p: shift by d px
-    Ty = taper(f) * torch.sinc(f) * torch.exp(2j * math.pi * f * d)
-    Tx = taper(fr) * torch.sinc(fr) * torch.exp(2j * math.pi * fr * d)
+    Ty = taper(f) * (torch.sinc(f) if integrate else 1) * torch.exp(2j * math.pi * f * d)
+    Tx = taper(fr) * (torch.sinc(fr) if integrate else 1) * torch.exp(2j * math.pi * fr * d)
     H = Ty[:, None] * Tx[None, :]
     if cov is not None:
         cov = torch.as_tensor(cov, device=I.device, dtype=torch.float32).reshape(-1, 3)
@@ -393,13 +393,13 @@ class VectorialPSF(torch.nn.Module, PSF):
         """Largest |x|, |y| offset (px) from the ROI centre that the fitter allows."""
         return self.roisize / 2 - 1.0
 
-    def render(self, pos, grad=False, focus=None):
+    def render(self, pos, grad=False, focus=None, dipM=None):
         """Normalized PSF at pos [N, 3] = (x px, y px, z um) at the focus self.focus_um (or `focus`) -> [N, P, P].
         grad=True also returns d/dx, d/dy (per px) and d/dz (per um), by forward-mode automatic differentiation."""
         f = self.focus_um if focus is None else focus
         if not grad:
-            return self(pos, f)
-        fn = lambda p: self(p, f)
+            return self(pos, f, dipM=dipM)
+        fn = lambda p: self(p, f, dipM=dipM)
         out = []
         val = None
         for k in range(3):
@@ -411,14 +411,22 @@ class VectorialPSF(torch.nn.Module, PSF):
         return val, out[0], out[1], out[2]
 
     def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8,
-                  pos_fn=None):
+                  pos_fn=None, dipole_components=False):
         """CubicSplinePSF of this model (see PSF.to_spline). pos_fn: knot z -> (emitter z, focus) (default: the
-        emitter height at self.focus_um; e.g. spline.stage_scan_pos_fn for a bead-stack geometry)."""
+        emitter height at self.focus_um; e.g. spline.stage_scan_pos_fn for a bead-stack geometry).
+        dipole_components=True also tabulates xx, yy, zz, xy, xz, yz for per-emitter dipM rendering."""
         zr = self.z_range if z_range is None else z_range
         spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
                                  xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
-        big = self if self.roisize == spl.Pl else self.resized(spl.Pl)
+        big = self.resized(spl.Pl) if self.roisize != spl.Pl or dipole_components else self
         spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
+        if dipole_components:
+            from torch_psf._dipole import unit_tensors
+            tables = []
+            for M in unit_tensors(big.dev):
+                big.dipM = M
+                tables.append(spl.knots_from_vectorial(big, pos_fn, chunk=chunk))
+            spl._set_dipole_knots(torch.stack(tables))
         return spl
 
     def _apply(self, fn, *args, **kwargs):
