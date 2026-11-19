@@ -18,7 +18,7 @@ import torch
 def _result(psf, report, history, data):
     """Result of the low-level estimators: dict(psf, report, history, **data)."""
     return dict(psf=psf, report=report, history=history, **data)
-from torch_psf.fit import solve_linear
+from torch_psf.fit import solve_linear, readnoise_variance
 
 
 def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0, blur='none',
@@ -26,8 +26,10 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
                lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False, fix_focus=False,
                log=None, stop=None):
     """tracks: Tracks (rois [B, T, R, R] in photons, mask, xy_init). vectorial: starting VectorialPSF (copied;
-    roisize = R). readnoise_e: read noise (e- rms, scalar). zmax_um: emitter heights 0..zmax_um. focus_um: starting
-    focus (fitted). blur: 'none' or 'line' (image-plane line blur v v^T, px^2). groups [B, T] (long, values
+    roisize = R). readnoise_e: read noise (e- rms): a scalar, or per pixel of every sample [B, R, R] (an sCMOS
+    read-noise map cut at each sample's crop; the variance model is then mu + rn^2 per pixel). zmax_um: emitter heights 0..zmax_um. focus_um: starting
+    focus (fitted). blur: 'none', 'line' (image-plane line blur v v^T, px^2) or 'cov' (a general 2 x 2 Gaussian blur
+    covariance L L^T, px^2; the line blur plus an isotropic / second-axis part). groups [B, T] (long, values
     0..ngroups-1): background groups and PSF groups (default one group). group_psf_kwargs / extra_params: per-group
     PSF hook (module docstring). fix_zernike / fix_focus: hold the Zernikes / the focus at their starting values.
     Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
@@ -39,12 +41,16 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     model = vectorial.resized(R)
     model.zcoef.requires_grad_(True)
     focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
-    rn2 = torch.tensor(float(readnoise_e) ** 2, device=dev)
+    rn2, pix = readnoise_variance(readnoise_e, B, R, dev)
     xy = (tracks.xy_init.float() - c).clone().requires_grad_(True)
     zr = torch.zeros(B, device=dev, requires_grad=True)
     BL = None
     if blur == 'line':
         BL = torch.tensor([0.05, 0.0], device=dev, requires_grad=True)   # start off zero (the gradient of v v^T vanishes there)
+    elif blur == 'cov':
+        BL = torch.tensor([0.05, 0.0, 0.05], device=dev, requires_grad=True)   # Cholesky factor (a, b, c) of the covariance
+    elif blur != 'none':
+        raise ValueError(f"blur: 'none' | 'line' | 'cov', not {blur!r}")
     grp = torch.zeros(B, T, dtype=torch.long, device=dev) if groups is None else groups.to(dev)
     mask = tracks.mask
     extra = list(extra_params)
@@ -55,7 +61,9 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     npx = float(mask.sum()) * R * R
 
     def blur_cov():
-        return None if BL is None else torch.stack([BL[0] ** 2, BL[1] ** 2, BL[0] * BL[1]])
+        if BL is None: return None
+        if len(BL) == 2: return torch.stack([BL[0] ** 2, BL[1] ** 2, BL[0] * BL[1]])                  # line: v v^T
+        return torch.stack([BL[0] ** 2, BL[1] ** 2 + BL[2] ** 2, BL[0] * BL[1]])                   # cov: L L^T, L = [[a, 0], [b, c]]
 
     def psf_of(pos, b):
         if group_psf_kwargs is None:
@@ -72,17 +80,18 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
         data = tracks.rois[sl]
         b = data.shape[0]
         g_ = grp[sl]
+        r2 = rn2[sl] if pix else rn2                       # [b, 1, R * R] or scalar
         pos = torch.cat([xy[sl], zmax_um * torch.sigmoid(zr[sl])[:, None]], 1)
         psf = psf_of(pos, b)
         if psf.dim() == 4:      # per-group PSF -> per-frame PSF [b, T, R, R]
             psf = torch.gather(psf, 1, g_[..., None, None].expand(-1, -1, R, R))
-            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, rn2, ngroups)
+            I, bg = solve_linear(psf.reshape(b, T, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
             mu = I[..., None, None] * psf
         else:
-            I, bg = solve_linear(psf.reshape(b, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, rn2, ngroups)
+            I, bg = solve_linear(psf.reshape(b, -1).detach(), data.reshape(b, T, -1), mask[sl], g_, r2, ngroups)
             mu = I[..., None, None] * psf[:, None]
         mu = (mu + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
-        var = mu + rn2
+        var = mu + (r2.reshape(b, 1, R, R) if pix else r2)
         nll = 0.5 * (data - mu) ** 2 / var + 0.5 * torch.log(2 * math.pi * var)
         nll = torch.where(mask[sl][..., None, None], nll, torch.zeros_like(nll)).sum()
         return nll, I, bg, mu, var, data

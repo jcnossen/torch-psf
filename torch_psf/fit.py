@@ -175,6 +175,18 @@ def at_limit(theta, psf, margin=0.06):
 
 
 @torch.no_grad()
+def readnoise_variance(readnoise_e, B, R, device):
+    """read-noise variance (e^2) of track samples for the variable-projection fits: a scalar read noise (e rms) -> 0-dim
+    tensor; a per-pixel map per sample [B, R, R] (e rms, e.g. an sCMOS read-noise map cut at each sample's crop) ->
+    [B, 1, R * R] (broadcasts against [B, T, R * R]). Returns (rn2, per_pixel)."""
+    r = torch.as_tensor(readnoise_e, dtype=torch.float32, device=device)
+    if r.dim() > 0:
+        assert r.shape == (B, R, R), f'per-pixel read noise must be [B, R, R] = {(B, R, R)}, not {tuple(r.shape)}'
+        return (r ** 2).reshape(B, 1, R * R), True
+    return r ** 2, False
+
+
+@torch.no_grad()
 def solve_linear(psf, data, mask, group, rn2, ngroups=2, iters=3, I_min=0.0):
     """Variable projection helper: closed-form (iteratively reweighted linear least squares) solution of the linear
     parameters of a track sample,
