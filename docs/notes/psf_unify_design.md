@@ -21,7 +21,7 @@ Base: master 6afbd1f, plus branch dipole-orientation (d092fcf, qnano1; not merge
 | FieldPSF | field.py:287 | composition | (zip field block) | VectorialPSF + FieldZernikes (exact per position) |
 | TiledSplinePSF | field.py:416 | composition | (zip field block) | one spline per field tile, nearest tile |
 | _Bound | field.py:217 | wrapper | – | binds per-emitter field xy for PSF.fit |
-| branch: LayeredVectorialPSF | layered.py:30 | optical | vectorial_layered | emitter in a film; via VectorialPSF._emitter_pupil hook |
+| branch: LayeredVectorialPSF | layered.py:30 | optical | vectorial_layered | DELETED (user decision 2026-11-19: no gain on PMMA); the _emitter_pupil hook stays as a stage |
 | branch: FocusZ, Polychromatic | orientation.py | wrappers (duck-typed) | – | stage z-mode; wavelength average |
 | outside: sofi GridPSF | sofi/model.py | wrapper | – | needs VectorialPSF internals |
 
@@ -55,8 +55,8 @@ contraction, d/d extras = analytic through the weights, d/d (x, y, z) = the basi
 - `PupilModel` = today's VectorialPSF split in stages (as the branch already starts: `_emitter_pupil`, `_fields`, `_image`):
   pupil -> image fields E [N, 6, n, n] -> dipole contraction -> one shared `PixelIntegrator`
   ('box' | 'spectral' | 'gauss_legendre' | 'point') with the blur inside it.
-- Subclasses only replace a stage: LayeredVectorialPSF (`_emitter_pupil`), FourPiPSF (two arms + coherent combine,
-  reusing the stages instead of copying them), Polychromatic (a wrapper or a stage).
+- Subclasses only replace a stage (e.g. via the `_emitter_pupil` hook): FourPiPSF (two arms + coherent combine,
+  reusing the stages instead of copying them).
 - ExactVectorialPSF goes away (its modes become PixelIntegrator modes; 'point' added).
 - One forward-mode-gradient helper used by all optical models.
 - Gaussian models stay a small separate analytic family.
@@ -77,6 +77,15 @@ contraction, d/d extras = analytic through the weights, d/d (x, y, z) = the basi
   nearest or bilinear = 4 components with weights). FieldPSF and TiledSplinePSF become two modes of one wrapper.
 - `ZMode` wrapper (emitter height vs stage focus) replacing FourPiPSF.zmode, spline pos_fn and FocusZ.
 - `Bound` (fixed per-emitter xy) for the generic fitter.
+- `Polychromatic` (user decision 2026-11-19: a composable wrapper, not a special case): a weighted sum over an
+  emission spectrum of the wrapped model's stage chain, with the pupil phase (Zernikes, free pupil phase, a vortex
+  plate) scaled per wavelength (fixed optical path: phase x lambda_0 / lambda), each wavelength normalised as the
+  base; it never mutates the base model (per-wavelength evaluation through stage arguments, not attribute swaps).
+  Composes with Field, ZMode, Channels / 4Pi and dipole bases; to_spline tabulates the spectrum-averaged PSF once (a
+  single component), so fitting with the table costs nothing extra.
+- Acceptance test of the composition: the Vortex PSF of the orientation work as ONE composed model
+  (VectorialPSF + vortex plate phase -> Polychromatic -> Field -> ZMode, with per-emitter dipM / dipole_basis),
+  matching the current orientation.py + FocusZ + Polychromatic results (torch-psf-sofi's reference numbers).
 
 **One call signature everywhere**
 `render(pos, grad=False, *, dipM=None, phi=None, xy=None, focus=None, angle=None)` -> [N, P, P] or [N, C, P, P];
@@ -117,9 +126,34 @@ phase_spline, field) so old files and SIMCODE's models keep working.
      Zernike offsets; channels that share optics = one batched call with per-spot focus / offset; 4Pi = two arm
      modules, coherent combination.
 5. Branch dipole-orientation (torch-psf-sofi) is merged into psf-unify first. Its experimental parts: FocusZ (to be
-   replaced by the z-mode wrapper), Polychromatic (a special case: stays a standalone wrapper in orientation.py and
-   does not shape the class design; adapted only to the new signatures), LayeredVectorialPSF (experimental). orientation.py stays its own module (fitter, estimator); the refactor adapts it
+   replaced by the z-mode wrapper), Polychromatic (becomes the composable wrapper of section 3C;
+   the orientation.py version is replaced by it); LayeredVectorialPSF is deleted (not carried into the design). orientation.py stays its own module (fitter, estimator); the refactor adapts it
    to the new interface and keeps its tests and the (xx, yy, zz, xy, xz, yz) / factor-2 basis convention.
-6. Order: stage 0 benchmark report + output-pinning tests; 1 optical stages + one PixelIntegrator; 2 one SplinePSF
+6. Compatibility with models trained on torch-psf 4b0ffc3 (SIMCODE m1809 / m25, psf_v4 files: psf.zip 0.3.0 with
+   per-angle 'integrated_spline' B-spline coefficients, 4 knots/px, and the calib json, pixel_integration
+   'spectral'): reading these files must give the same pixel values and gradients as 4b0ffc3 (target bit-identical,
+   at most 1e-6 of the peak, stated per stage). The default for NEW tables may change; the kernel and coefficients
+   of an existing block never do. PSF.load(path, angle=k) keeps its meaning; IntegratedSplinePSF render / for_angle,
+   convert_calibration and save_zip get a documented replacement where renamed, so SIMCODE can bump its pin without
+   retraining. Checked at psf-unify 6cb8f10: calib_1809_2_psf_v4_axis.{psf.zip,json}, angles None / 0 / 1, render and
+   grad: bit-identical to 4b0ffc3. Each stage: re-run that check (study/psf_unify/check_v4.py, files not in git) and
+   a synthetic per-angle integrated-spline pin in tests.
+   SIMCODE also BUILDS integrated splines on load (simcode.psf: IntegratedSplinePSF.from_vectorial(per-angle vecs,
+   z_range=(0, 0.4), roisize=41, xy_limit=2.0, oversample=4, dz_um=0.01, zpad=6); the kernel is implicitly the cubic
+   B-spline). The replacement of from_vectorial takes an EXPLICIT kernel (and grid); SIMCODE passes kernel='bspline'
+   and its grid on its branch and keeps that choice until a retrain, whatever the new default. The per-stage check
+   includes this build from the per-axis json (coefficients and renders vs 4b0ffc3, same tolerance). Checked at
+   6cb8f10: coefs_angle [2, 53, 204, 204] and renders (angles None / 0 / 1, with grad) bit-identical to 4b0ffc3.
+7. Order: stage 0 benchmark report + output-pinning tests; 1 optical stages + one PixelIntegrator; 2 one SplinePSF
    with the table-indexed evaluator; 3 compositions + one render signature; 4 per-class format versions; 5 benchmark
    report again. Each a Codex task (gpt-6.2-astra, high reasoning effort), reviewed and tested before the next.
+
+## 6. Notes for the stages
+- Composed Vortex reference (acceptance test of section 3C): dipole-orientation 82d06ef,
+  study/orientation/composed_reference.py + tests/data/orientation_composed_ref.json +
+  tests/test_orientation.py::test_composed_vortex_reference (images 1e-4 relative; noise-free fits theta / phi
+  +-0.2 deg, g +-0.01, z +-2 nm; seeded noise +-0.5 deg, +-0.02, +-5 nm).
+- Tilt sign: our model and the Hulleman Vortex code report opposite tilt signs (they agree per spot within 3.6 deg after
+  mu_z -> -mu_z), from the opposite supercritical-angle phase convention (cos theta_med = -i|.| there vs +i|.| here),
+  possibly with an image-axis convention. Which is physical needs a sample of known tilt. The refactor keeps OUR
+  convention unchanged; the composed reference pins it.
