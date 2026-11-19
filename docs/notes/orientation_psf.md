@@ -556,3 +556,46 @@ and frames):
 * The g2 pile-up at 0 in the baseline, where their hdf5 peaks at 0.83, is the clearest remaining discrepancy. It goes
   with the baseline model's larger χ² (1.8–1.9 against 1.55 for our in-situ calibrated model).
 * The strand width (40–68 nm) is without drift correction or a spline fit, so it is not comparable yet.
+
+### 8b. Their model reproduced exactly (`vortex_exact.py`, checked against simcode2's port of their code)
+
+**The mapping** (found with `vortex_crosscheck.py`):
+
+    their image(x, y, z, mu, W) = rot180[ our image(-x', -y', z, mu', -W) ]
+
+* **Arrays and phase sign.** Their pupil and image x run along the first array index (the image row), y along the
+  column. So their pupil maps are our pupil maps array by array, with the phase sign flipped: their convention,
+  exp(+i W) with cos_med = −i|.| beyond the critical angle, is the complex conjugate of ours.
+* **Positions and dipole.** Their x and y are our y and x, and the dipole components swap likewise. z is the same
+  (their stage z).
+* **NAT field coordinates.** Their xfov is the image column; my `vortex_baseline.py` had it from the row.
+* **Fit accuracy.** The images agree within 0.2–1.5 % of the peak, including the plate, the per-spot NAT Zernikes
+  (projected onto our Noll basis; projection residual 5e-6 nm) and their W_mis + nominal-focus phase. The rest is their
+  two-interface Fresnel through the 1.523 coverslip.
+
+`vortex_baseline.py` had both the NAT axes and the W sign wrong, which explains why W_mis "made things worse" there.
+
+**λ-DNA, the same ROIs as their Octave table** (first 3000 spots; 2775 not flagged as outliers):
+
+| our fit of their model | axis angle to theirs, median / p90 | spots within 2° | dxy | dz median / MAD | g2 ours / theirs | N ratio |
+|---|---|---|---|---|---|---|
+| from their initial values, one start | 0.22° / 73° | 76 % | 0.30 nm | 0.2 / 1.5 nm | 0.68 / 0.757 | 0.998 |
+| + 4 z starts, best likelihood | 0.15° / 1.7° | 91 % | 0.24 nm | 0.1 / 1.1 nm | 0.757 / 0.757 | 0.998 |
+
+What remains is local minima of the single-start fit; their LM and ours take different paths. With a z grid of
+starts, the per-spot results agree to fractions of a degree and a nanometre.
+
+**PMMA, their ROIs and initial values** (their `pmma_summary.py`: the 40 brightest molecules, 11 slices around focus,
+their outlier rule):
+
+| setting | ours: slope, σφ / σθ (CRLB), g2 | their code: slope, σφ / σθ (CRLB), g2 |
+|---|---|---|
+| n_med 1.49, z0 = 0 | −0.14, 41° / 22° (6.8° / 4.2°), 0.72 | −0.44, 30° / 20°, 0.74 |
+| n_med 1.49, z grid | −1.04, 22.7° / 11.2° (7.3° / 4.1°), 0.82 | −0.95, 23° / 14°, 0.83 |
+| n_med 1.0, z0 = 0 | −0.90, 16.0° / 4.7° (3.0° / 2.6°), 0.80 | −0.91, 5.7° / 3.3° (2.9° / 2.6°), 0.84 |
+| n_med 1.0, z grid | −0.98, 3.48° / 2.84° (2.60° / 2.20°), 0.84 ± 0.08 | −0.99, 3.1° / 2.8° (2.6° / 2.2°), 0.86 ± 0.05 |
+
+The paper reports −0.99, g2 0.86 ± 0.03, and σ 2.3° / 1.8° against a CRLB of 1.8° / 1.5°. Their code and ours both
+reproduce it only with n_med ≈ 1 and a grid of z starts. Remaining differences between our fit and their code:
+* single-start local minima (the n_med 1.0, z0 = 0 azimuth);
+* the paper's own molecule selection (21 molecules) and statistic (a mean), against the 40-brightest median here.
