@@ -165,17 +165,20 @@ def run_dna(zgrid=None, nmax=None):
                                                                    for z in (-0.6, -0.3, 0.3, 0.6)])):
         if name == 'zgrid' and not zgrid:
             continue
-        best = None
-        for st in starts:
-            st = st.clone(); st[:, 3] = st[:, 3]               # I start = their N start (rough)
-            r = fit_orientation(E.psf, d, theta0=st, iters=50, z_limits=(-1.1, 1.1), g_limits=(0.0, 1.0), batch=1000,
-                                zcoef_offset=zo)
-            if best is None:
-                best = r
-            else:
-                b = r['nll'] < best['nll']
-                for k in ('theta', 'nll'):
-                    best[k][b] = r[k][b]
+        thl, nll = [], []
+        for c0 in range(0, len(d), 800):
+            sl_ = slice(c0, c0 + 800)
+            b_ = None
+            for st in starts:
+                r = fit_orientation(E.psf, d[sl_], theta0=st[sl_], iters=50, z_limits=(-1.1, 1.1), g_limits=(0.0, 1.0),
+                                    batch=800, zcoef_offset=zo[sl_])
+                if b_ is None:
+                    b_ = r
+                else:
+                    b = r['nll'] < b_['nll']
+                    b_['theta'][b] = r['theta'][b]; b_['nll'][b] = r['nll'][b]
+            thl.append(b_['theta']); nll.append(b_['nll'])
+        best = dict(theta=torch.cat(thl), nll=torch.cat(nll))
         th = best['theta']
         g2, Nf = VB.to_their_g2(E.v, th[:, 5:8], th[:, 8])
         mu_o = E.ours_to_their_axis(unit(th[:, 5:8])).cpu().numpy()
@@ -197,6 +200,13 @@ def run_dna(zgrid=None, nmax=None):
                          g2_ours_median=float(np.median(g2.cpu().numpy()[ok])), g2_theirs_median=float(np.median(th_their[ok, 7])),
                          seconds=time.time() - t0)
         log(name, json.dumps(res[name]))
+        # per-spot table (their FOV coordinates: x = column, y = row, 1-based as their x_px / y_px; their axis)
+        np.savez(os.path.join(OUT, f'exact_dna_{name}.npz'), frame=fr, roix=rx, roiy=ry,
+                 x_px=rx - th[:, 0].cpu().numpy(), y_px=ry - th[:, 1].cpu().numpy(), z_nm=th[:, 2].cpu().numpy() * 1e3,
+                 N=(th[:, 3] * Nf).cpu().numpy(), bg=th[:, 4].cpu().numpy(), g2=g2.cpu().numpy(), g=th[:, 8].cpu().numpy(),
+                 mu_their=mu_o, nll=best['nll'].cpu().numpy(), their_outlier=~ok, their_chi2=f('chi2'),
+                 their_x_px=f('x_px'), their_y_px=f('y_px'), their_azim=th_their[:, 5], their_pola=th_their[:, 6],
+                 their_g2=th_their[:, 7], their_z_nm=th_their[:, 2], their_N=th_their[:, 3])
     json.dump(res, open(os.path.join(OUT, 'exact_dna.json'), 'w'), indent=1)
 
 
@@ -284,10 +294,60 @@ def run_pmma(refmed=1.0, zgrid=False, tag=None):
     json.dump(res, open(os.path.join(OUT, f'exact_pmma_{tag}.json'), 'w'), indent=1)
 
 
+def run_insitu_dna():
+    """our own in-situ calibrated model (vortex_real.py plate2: plate centre, Zernikes, apodization; n_med 1.333 for
+    water, FocusZ at the coverslip) on the same lambda-DNA ROIs as their Octave table, our default starts + z grid;
+    compared per spot with their fits and with our exact-model fits (exact_dna_zgrid.npz)"""
+    t0 = time.time()
+    import csv
+    rows = list(csv.DictReader(l for l in open(os.path.join(REF, 'out', 'tables', 'octave_dna_crop_f0-600.csv'))
+                               if not l.startswith('#')))
+    f = lambda k: np.array([float(r[k]) for r in rows])
+    fr = f('frame').astype(int); rx = f('roix').astype(int); ry = f('roiy').astype(int)
+    mov = VR._movie_photons(VR.DNA_MOVIE, frames=(0, int(fr.max()) + 1)).numpy()
+    mov = np.where(mov <= 0, 1e-3, mov)
+    d = torch.as_tensor(np.stack([mov[t, r - 1 - 7:r - 1 + 8, c - 1 - 7:c - 1 + 8] for t, c, r in zip(fr, rx, ry)]),
+                        dtype=torch.float32, device=DEV)
+    psf = VR.sm_focusz(n_med=1.333, height=0.0, z_range=(-1.1, 1.1))
+    ths, nll = [], []
+    for c0 in range(0, len(d), 800):
+        r = fit_orientation(psf, d[c0:c0 + 800], iters=40, z_limits=(-1.1, 1.1), batch=800,
+                            zgrid=(-0.6, -0.3, 0.0, 0.3, 0.6))
+        ths.append(r['theta']); nll.append(r['nll'])
+    th = torch.cat(ths)
+    g2, Nf = VB.to_their_g2(psf.psf, th[:, 5:8], th[:, 8])
+    mu = unit(th[:, 5:8]).cpu().numpy()
+    mu_o = mu[:, [1, 0, 2]]                                  # our (column, row, z) -> their (row, column, z)
+    a, p = f('azim_rad'), f('pola_rad')
+    mu_t = np.stack([np.sin(p) * np.cos(a), np.sin(p) * np.sin(a), np.cos(p)], 1)
+    ok = f('outlier') == 0
+    ang = axis_angle(mu_o, mu_t)
+    E = np.load(os.path.join(OUT, 'exact_dna_zgrid.npz'))
+    ang_e = axis_angle(mu_o, E['mu_their'])
+    x = rx - 1 + th[:, 0].cpu().numpy(); y = ry - 1 + th[:, 1].cpu().numpy()
+    dxy = np.hypot(x - (f('x_px') - 1), y - (f('y_px') - 1)) * 65
+    dz = th[:, 2].cpu().numpy() * 1e3 - f('z_nm')
+    mad = lambda v: float(np.median(np.abs(v - np.median(v))))
+    res = dict(n=len(rows), axis_angle_vs_theirs_median=float(np.median(ang[ok])),
+               axis_angle_vs_theirs_p90=float(np.percentile(ang[ok], 90)),
+               frac_lt_5deg=float((ang[ok] < 5).mean()), axis_angle_vs_exact_median=float(np.median(ang_e[ok])),
+               dxy_median_nm=float(np.median(dxy[ok])), dz_median_nm=float(np.median(dz[ok])), dz_mad_nm=mad(dz[ok]),
+               g2_insitu_median=float(np.median(g2.cpu().numpy()[ok])), g2_theirs_median=float(np.median(f('g2')[ok])),
+               N_ratio_median=float(np.median((th[:, 3] * Nf).cpu().numpy()[ok] / f('N')[ok])),
+               nll_insitu_minus_exact_median=float(np.median(torch.cat(nll).cpu().numpy()[ok] - E['nll'][ok])),
+               seconds=time.time() - t0)
+    log('insitu', json.dumps(res))
+    np.savez(os.path.join(OUT, 'insitu_dna.npz'), mu_their=mu_o, g2=g2.cpu().numpy(), x=x, y=y,
+             z_nm=th[:, 2].cpu().numpy() * 1e3, nll=torch.cat(nll).cpu().numpy())
+    json.dump(res, open(os.path.join(OUT, 'insitu_dna.json'), 'w'), indent=1)
+
+
 if __name__ == '__main__':
     stage = sys.argv[1]
     if stage == 'check':
         run_check()
+    elif stage == 'insitu_dna':
+        run_insitu_dna()
     elif stage == 'pmma':
         rm = [float(a.split('=')[1]) for a in sys.argv if a.startswith('refmed=')]
         run_pmma(rm[0] if rm else 1.0, zgrid='zgrid' in sys.argv)
