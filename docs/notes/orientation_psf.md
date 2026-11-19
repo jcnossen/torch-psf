@@ -467,3 +467,89 @@ run with `python -I`):
   3. The frame mapping to their λ-DNA hdf5 for a per-localisation comparison.
   4. Throughput: about 17 spots / s on the shared GPU with 6 starts per spot. The full movie (~0.5 M spots) needs
      fewer starts or a spline / lookup model.
+
+## 8. Rebase onto master 4b0ffc3, model refinements, the paper's baseline
+
+**Rebase.** `dipole-orientation` now sits on master 4b0ffc3. The old head is tagged
+`archive/dipole-orientation-0947`. `VectorialPSF.forward` of master is split into `_fields()` and `_image()`, with
+`pixel_integration` in `_image()`, plus a one-line hook `_emitter_pupil()`.
+* Checked against master: `render`, `render(grad=True)`, `forward(dipM=...)` and the `to_spline` knots differ by
+  exactly 0, for 'box', 'spectral' and 'gauss_legendre', with and without blur.
+* `dipole_basis()` works in every pixel_integration mode (tested).
+* Full suite on CPU: 191 passed, 32 skipped (master 177 + 14 orientation tests); `tests/test_layered.py` adds 3 more.
+
+**PMMA precision gap: layered sample, field-dependent Zernikes** (`vortex_real.py` stages `layer` and `field`).
+* **(a) Layered sample.** `torch_psf/layered.py` models a coverslip / film / top-medium stack, checked in two limits:
+  * without a top interface it reproduces the plain model;
+  * as the film thickness goes to 0 it equals an emitter in the top medium, with the z dipole weaker by (n_film / n_top)⁴.
+
+  On the PMMA stacks a glass / PMMA (1.49) / air model drives the fitted film thickness to its lower bound 0 from
+  any start (10–120 nm). It is slightly worse than the single effective medium:
+
+  | model (joint fit) | NLL / px | χ² | per-plane σθ / σφ | z slope |
+  |---|---|---|---|---|
+  | effective medium n 0.94 | −269.12 | 2.05 | 2.35° / 2.27° | −0.875 |
+  | layered | −269.06 | 2.11 | 4.38° / 2.38° | −0.84 |
+
+  The effective medium index is kept as a parameter.
+* **(b) Field-dependent Zernikes.** `FieldZernikes` (modes 5, 6, 7, 8, 11; orders 2, 2, 1, 1, 1; ridge prior 0.05 λ)
+  is used inside `fit_dipole_stacks`, and spots get per-spot `zcoef_offset`. `field.py` was not edited.
+  * Training is on the even-numbered molecules; validation is on the odd ones, which were held out.
+  * Joint-fit χ² falls from 1.72 to 1.64. The fitted field variation is 30–58 mλ over the field.
+  * Held-out per-plane σθ falls from 2.08° to 1.66° and σφ from 2.26° to 1.89°, against a CRLB of 1.06° / 1.12°:
+    the ratio to the CRLB goes from 1.9–2.0 to 1.6–1.7. The z slope moves from −0.913 to −0.924.
+  * (c) Polychromatic emission: implemented (`orientation.Polychromatic`) but not run, per the change of priority.
+* **g at the bound.** The Dataset now has `g` from a fit whose bounds (`g_limits`) can be widened, e.g. (−0.5, 1.5), and
+  `g_display`, clamped to [0, 1].
+  * Simulation (Vortex PSF, 4000 photons, bg 10, true g = 1): clamped fit bias −0.018 and sd 0.028 against a CRLB of
+    0.056; unconstrained fit bias +0.008 and sd 0.054, which matches the CRLB.
+  * At true g = 0.5, the unconstrained sd (0.089) is larger than the CRLB (0.058): a few fits wander, and this is not
+    resolved.
+
+**Baseline with the paper's processing** (`vortex_baseline.py`; settings read from their MATLAB code):
+* **Optics and sampling:** NA 1.47; n_imm 1.518; the 1.523-design / 120 µm working-distance immersion mismatch
+  phase W_mis (or 1.5209); 597.5 nm; PSF point-sampled at the pixel centres with a 32 × 32 pupil.
+* **Plate and aberrations:** 64-level plate with phase depth 593 nm, charge +1; their NAT aberration map applied per
+  spot as fixed `zcoef_offset`. NAT field coordinates: their xn is the image row and yn the column (their array
+  layout). Zernike (n, m) maps to Noll 5, 6, 7, 8, 9, 10, 11, 13, 12, 17, 16, 22.
+* **Detection:** FastPeakFind (threshold 25, 3 × 3 median, 7 × 7 Gaussian, weighted centroids), 15 px edge, spots with
+  a neighbour closer than 5.3 px dropped.
+* **Fit:** their moment-based initial values, one start at z = 0, 50 LM iterations, g in [0, 1].
+* **Filters:** their outlier rules and χ² between 0.75 and 3.
+* **g2 convention:** their g2 weights the free and fixed parts each normalised by its pupil energy. Converted from our
+  g as g2 = g n_fix / (g n_fix + (1 − g) n_free); the fits themselves are identical.
+
+| PMMA through focus (their 11 slices) | slope | σθ / CRLB | σφ / CRLB | g2 | χ² |
+|---|---|---|---|---|---|
+| paper | −0.99 | 1.8° / 1.5° | 2.3° / 1.8° | 0.86 ± 0.03 | — |
+| their settings (n_med 1.49, W_mis, NAT, z0 = 0) | −0.07 (z not tracked) | — | — | 0.69 | 2.91 |
+| + starts on a z grid | +0.15 | 9.0° / 2.0° | 10.1° / 3.1° | 0.80 | 2.48 |
+| + n_med 1.0, z grid | −0.29 | 3.4° / 1.1° | 8.3° / 1.8° | 0.80 | 2.31 |
+| + n_med 1.0, z grid, without W_mis | −0.79 | 4.7° / 1.2° | 4.9° / 1.4° | 0.84 ± 0.09 | 2.05 |
+| ours: in-situ plate (centre, Zernikes, n_med, apodization), z grid | −0.88 | 2.35° / 1.10° | 2.27° / 1.16° | (g 0.90) | 2.05 |
+
+Causes of the gaps, as far as isolated:
+1. **The single z = 0 start** of their initial values does not follow the defocus. Their published slope implies
+   their per-slice fits were started differently, or fitted the stack jointly (their code has a 'zstack' mode).
+2. **n_med 1.49 vs ≈ 1** (thin film under air).
+3. **The immersion-mismatch phase as I implement it from their code** (rms 0.22 λ, mostly Z11 −0.18, Z22 −0.11;
+   0.13 λ with 1.5209) consistently makes the fits worse. Their NAT spherical (+56 mλ) alone equals our in-situ
+   estimate (+57 mλ). Either I misread how W_mis enters, or their bead calibration absorbed it differently. **Open.**
+4. **The plate centre and the remaining Zernikes**, fitted in situ in our pipeline, close most of the rest.
+
+λ-DNA (stk_0001, frames 0–600, 256² crop, their detection: 14 896 spots, against 13 342 in their hdf5 for the same crop
+and frames):
+
+| | Δφ to the DNA axis (median / MAD) | g2 peak / median | N median | FWHM across the strand | χ² |
+|---|---|---|---|---|---|
+| paper (one strand, drift-corrected) | 82° / 17° (87° / 18° in other work) | 0.8 | 4600 | 20 nm | — |
+| their hdf5, same crop, our axis estimate | 95.7° / 35.7° | 0.83 / 0.75 | 4620 | — | — |
+| our baseline (their settings) | 90.5° / 27.7° | pile-up at 0 / 0.66 | 5320 | 68 nm | 1.83 |
+| our baseline without W_mis | 93.9° / 25.1° | pile-up at 0 / 0.62 | 3280 | 40 nm | 1.88 |
+| our pipeline (section 7) | 97.6° / 29.8° (radius 3 px axis) | g median 0.78 | — | — | 1.55 |
+
+* Δφ and its MAD are dominated by how the DNA axis is estimated: local PCA within 8 px against their spline along a
+  hand-picked strand. On the same crop and the same axis estimate, theirs and ours agree within a few degrees.
+* The g2 pile-up at 0 in the baseline, where their hdf5 peaks at 0.83, is the clearest remaining discrepancy. It goes
+  with the baseline model's larger χ² (1.8–1.9 against 1.55 for our in-situ calibrated model).
+* The strand width (40–68 nm) is without drift correction or a spline fit, so it is not comparable yet.
