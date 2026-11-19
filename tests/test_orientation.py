@@ -8,8 +8,8 @@ from torch_psf.orientation import (angles, from_angles, unit, canonical, cone_to
                                    angle_error, vortex_phase, tangent_basis)
 
 
-def small_model(R=11, npupil=32, aberr=True, **kw):
-    v = VectorialPSF(R, pixel_um=0.108, wavelength_um=0.7, npupil=npupil, oversample=2, device='cpu',
+def small_model(R=11, npupil=32, aberr=True, oversample=2, **kw):
+    v = VectorialPSF(R, pixel_um=0.108, wavelength_um=0.7, npupil=npupil, oversample=oversample, device='cpu',
                      focus_um=0.25, **kw)
     if aberr:
         g = torch.Generator().manual_seed(0)
@@ -63,9 +63,13 @@ def test_ensemble_photoselection_gamma():
     assert abs(float(excitation_factor(torch.eye(3) / 3, K)) - 1) < 1e-6
 
 
-def test_basis_images_are_linear_in_M():
-    v = small_model()
-    v.blur = torch.tensor([0.2, 0.1, 0.05])
+import pytest
+
+
+@pytest.mark.parametrize('mode,blur', [('box', True), ('spectral', True), ('gauss_legendre', False)])
+def test_basis_images_are_linear_in_M(mode, blur):
+    v = small_model(pixel_integration=mode) if mode == 'box' else small_model(pixel_integration=mode, oversample=3)
+    v.blur = torch.tensor([0.2, 0.1, 0.05]) if blur else None
     pos = torch.tensor([[0.3, -0.2, 0.05], [-0.4, 0.1, 0.15]])
     B = basis_images(v, pos)
     M = dipole_M(torch.tensor([[1.0, 2.0, 0.5], [0.2, -0.3, 1.0]]), torch.tensor([0.8, 0.4]))
