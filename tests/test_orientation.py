@@ -241,3 +241,24 @@ def test_channels_psf_uses_the_vectorial_dipole_basis():
     assert B.shape == (2, 2, 6, 7, 7)
     comb = torch.einsum('nk,nckuv->ncuv', M_to_m6(M), B)
     assert float((comb - ref).abs().max()) <= 1e-5 * float(ref.abs().max())
+
+
+def test_dipole_basis_focus_defaults_to_focus_um_in_channels_psf():
+    """VectorialPSF.dipole_basis(pos) uses focus_um (as render), so a VectorialPSF subclass channel whose type_name is
+    not 'vectorial' works in ChannelsPSF (which passes focus= only for type_name 'vectorial')"""
+    from torch_psf import ChannelsPSF
+
+    class OtherVectorial(VectorialPSF):
+        type_name = None
+
+    kw = dict(roisize=7, npupil=16, oversample=2, device='cpu', z_range=(0.0, 0.3), focus_um=0.05)
+    arms = [OtherVectorial(**kw), VectorialPSF(**kw)]
+    m = ChannelsPSF(arms, channel_offsets=[[0.1, -0.2], [-0.2, 0.1]])
+    pos = torch.tensor([[0.17, -0.23, 0.01], [-0.32, 0.24, 0.02]])
+    M = dipole_M(from_angles(torch.tensor([30.0, 70.0]), torch.tensor([20.0, 200.0])), torch.tensor([0.9, 0.6]))
+    with torch.no_grad():
+        assert torch.equal(arms[0].dipole_basis(pos), arms[0].dipole_basis(pos, arms[0].focus_um))
+        B = m.dipole_basis(pos)
+        ref = m.render(pos, dipM=M)
+    comb = torch.einsum('nk,nckuv->ncuv', M_to_m6(M), B)
+    assert float((comb - ref).abs().max()) <= 1e-5 * float(ref.abs().max())

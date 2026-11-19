@@ -425,8 +425,8 @@ run with `python -I`):
   * 4 of 233 planes are outliers. Our molecules are brighter, hence the smaller CRLB.
   * Our Vortex vs standard comparison is noisier because their standard-PSF reference is a full z-stack fit.
   * The precision gap to the CRLB (2× vs their 1.2–1.3×) and the z scale (0.88) point at the remaining model error:
-    the joint χ² is 2. Candidates are the field dependence of the aberrations (constant here), the thin-film optics
-    (a single medium of n ≈ 1 approximates glass / PMMA film / air) and the emission spectrum (one wavelength).
+    the joint χ² is 2. Candidates are the field dependence of the aberrations (constant here) and the emission
+    spectrum (one wavelength).
 * **Re-orientation movie** (ATTO 565 on glass in air, 900 ms frames, TIRF, central 1024 × 1024 field, bright spots
   only (threshold 20): 4935 spots, 225 molecules tracked over ≥ 10 of the 23 frames). `FocusZ` model with n_med 1.0,
   emitter at the glass and the in-situ plate:
@@ -461,8 +461,7 @@ run with `python -I`):
   and the z tracking is linear.
 * **Open:**
   1. Precision is 1.4–2 × the CRLB, and the z scale is 0.88 against their 0.99. Next steps: field-dependent Zernikes
-     (FieldPSF; their NAT map), a two-layer glass / PMMA / air model instead of n_med ≈ 1, and polychromatic
-     emission.
+     (FieldPSF; their NAT map) and polychromatic emission.
   2. The pile-up at g = 1: a soft bound, or report g as is with its CRLB.
   3. The frame mapping to their λ-DNA hdf5 for a per-localisation comparison.
   4. Throughput: about 17 spots / s on the shared GPU with 6 starts per spot. The full movie (~0.5 M spots) needs
@@ -476,29 +475,18 @@ run with `python -I`):
 * Checked against master: `render`, `render(grad=True)`, `forward(dipM=...)` and the `to_spline` knots differ by
   exactly 0, for 'box', 'spectral' and 'gauss_legendre', with and without blur.
 * `dipole_basis()` works in every pixel_integration mode (tested).
-* Full suite on CPU: 191 passed, 32 skipped (master 177 + 14 orientation tests); `tests/test_layered.py` adds 3 more.
+* Full suite on CPU: 191 passed, 32 skipped (master 177 + 14 orientation tests).
 
-**PMMA precision gap: layered sample, field-dependent Zernikes** (`vortex_real.py` stages `layer` and `field`).
-* **(a) Layered sample.** `torch_psf/layered.py` models a coverslip / film / top-medium stack, checked in two limits:
-  * without a top interface it reproduces the plain model;
-  * as the film thickness goes to 0 it equals an emitter in the top medium, with the z dipole weaker by (n_film / n_top)⁴.
-
-  On the PMMA stacks a glass / PMMA (1.49) / air model drives the fitted film thickness to its lower bound 0 from
-  any start (10–120 nm). It is slightly worse than the single effective medium:
-
-  | model (joint fit) | NLL / px | χ² | per-plane σθ / σφ | z slope |
-  |---|---|---|---|---|
-  | effective medium n 0.94 | −269.12 | 2.05 | 2.35° / 2.27° | −0.875 |
-  | layered | −269.06 | 2.11 | 4.38° / 2.38° | −0.84 |
-
-  The effective medium index is kept as a parameter.
-* **(b) Field-dependent Zernikes.** `FieldZernikes` (modes 5, 6, 7, 8, 11; orders 2, 2, 1, 1, 1; ridge prior 0.05 λ)
+**PMMA precision gap: field-dependent Zernikes** (`vortex_real.py` stage `field`).
+* A layered glass / film / air model was tried; it gave film thickness → 0 and no gain. n_med ≈ 1 is used, as in
+  the authors' code.
+* **Field-dependent Zernikes.** `FieldZernikes` (modes 5, 6, 7, 8, 11; orders 2, 2, 1, 1, 1; ridge prior 0.05 λ)
   is used inside `fit_dipole_stacks`, and spots get per-spot `zcoef_offset`. `field.py` was not edited.
   * Training is on the even-numbered molecules; validation is on the odd ones, which were held out.
   * Joint-fit χ² falls from 1.72 to 1.64. The fitted field variation is 30–58 mλ over the field.
   * Held-out per-plane σθ falls from 2.08° to 1.66° and σφ from 2.26° to 1.89°, against a CRLB of 1.06° / 1.12°:
     the ratio to the CRLB goes from 1.9–2.0 to 1.6–1.7. The z slope moves from −0.913 to −0.924.
-  * (c) Polychromatic emission: implemented (`orientation.Polychromatic`) but not run, per the change of priority.
+  * Polychromatic emission: implemented (`orientation.Polychromatic`) but not run, per the change of priority.
 * **g at the bound.** The Dataset now has `g` from a fit whose bounds (`g_limits`) can be widened, e.g. (−0.5, 1.5), and
   `g_display`, clamped to [0, 1].
   * Simulation (Vortex PSF, 4000 photons, bg 10, true g = 1): clamped fit bias −0.018 and sd 0.028 against a CRLB of
