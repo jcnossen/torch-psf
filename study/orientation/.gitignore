@@ -1,3 +1,4 @@
 results/
 *.log
 __pycache__/
+fig_*.png
