@@ -31,6 +31,7 @@ Intensity I: photons an isotropic emitter (g = 0) at the coverslip would give pe
 factor); a fixed dipole's detected total also depends on its orientation and height (the vectorial normalization).
 """
 import math
+import time
 import torch
 from torch_psf.vectorial import photosel_tensor
 from torch_psf.fit import lm_poisson, localize
@@ -168,15 +169,24 @@ def excitation_factor(M, K):
 
 
 # ------------------------------------------------------------------ Vortex PSF
-def vortex_phase(model, charge=1, offset=0.0, apply=True):
+def vortex_phase(model, charge=1, offset=0.0, apply=True, center=(0.0, 0.0), levels=0, depth=1.0):
     """Spiral phase plate of topological charge `charge` in the emission pupil (Vortex PSF, Hulleman et al., Nat.
-    Commun. 12, 5934 (2021)): phase = charge * atan2(p_y, p_x) + offset (rad), p_x along +x (column), p_y along +y
-    (row) of the pupil grid. Returns the phase map in waves ([npupil, npupil], inside the pupil); apply=True also
-    writes it to model.pupil_phase (replacing the free phase map)."""
-    W = ((charge * torch.atan2(model.py, model.px) + offset) / (2 * math.pi)) % 1.0 * model.mask
+    Commun. 12, 5934 (2021)): phase = depth * 2 pi * frac((charge * atan2(p_y - c_y, p_x - c_x) + offset) / 2 pi)
+    (rad), p_x along +x (column), p_y along +y (row) of the pupil grid in units of the pupil radius, centre
+    c = center (a lateral offset of the plate, pupil radii; a tensor makes the map differentiable in it). levels > 0:
+    the spiral quantised to that many steps (the plate V-593-10-1 has 64); depth: the full phase step in waves
+    (design wavelength / emission wavelength, e.g. 593 / 597.5; 1 = an exact 2 pi). Their MATLAB code
+    (vecfitcpu_vortex, doevortexflip = 1) has the pupil x along the image rows, which is charge -1 here.
+    Returns the phase map in waves ([npupil, npupil], inside the pupil); apply=True also writes it to
+    model.pupil_phase (replacing the free phase map)."""
+    c = torch.as_tensor(center, dtype=model.px.dtype, device=model.px.device)
+    f = (charge * torch.atan2(model.py - c[1], model.px - c[0]) + offset) / (2 * math.pi) % 1.0
+    if levels:
+        f = torch.floor(f * levels + 0.5) / levels % 1.0
+    W = depth * f * model.mask
     if apply:
         with torch.no_grad():
-            model.pupil_phase.copy_(W)
+            model.pupil_phase.copy_(W.detach())
     return W
 
 
@@ -404,3 +414,106 @@ def angle_error(mu_est, mu_true, deg=True):
     c = (unit(mu_est) * unit(mu_true)).sum(-1).abs().clamp(max=1)
     a = torch.acos(c)
     return torch.rad2deg(a) if deg else a
+
+
+# ------------------------------------------------------------------ pipeline
+class OrientationEstimator:
+    """Orientation + 3D localization of sparse single molecules with a calibrated (e.g. Vortex) VectorialPSF.
+
+    Pipeline: spot detection (torch_psf.spots.extract_spots; roisize = psf.roisize) -> per-spot Poisson MLE of
+    (x, y, z, I, bg, mu, g) (fit_orientation: isotropic start, linear-M start and its mirror) -> CRLBs -> Dataset.
+
+    psf: VectorialPSF (its focus_um is the focal plane of the fits; z = emitter height in the model's coordinate).
+    camera: Camera / calibration json / None (data in photons). z_limits (um): the fitted z range (default
+    psf.z_range); g_limits; iters (LM iterations per start); mirror (also the mirrored-tilt start); batch (spots per
+    GPU batch); threshold and detect_kw: detection (see PSF.localize). progress(done, total, n) / stop() hooks.
+
+    estimate(data, frames=None) -> Dataset. data: a movie (path / array [T, H, W] / reader) or Spots;
+    fit_rois(rois, corners=None, frame_ids=None) for ROIs [N, P, P] in photons (corners [N, 2] = (x0, y0)).
+    Dataset fields (one row per spot): frame, pos [n, 3] px (image x, y; z = emitter height / lateral pixel size),
+    crlb [n, 3] px, photons (signal photons in the ROI), bg, intensity (I: photons of an isotropic emitter at the
+    coverslip, the model's scale), theta_deg (polar angle from the optical axis, 0..90), phi_deg (azimuth from +x
+    towards +y, 0..360, of the axis with mu_z >= 0), g (order parameter, g2 of Hulleman et al.), crlb_theta_deg,
+    crlb_phi_deg, crlb_inplane_deg, crlb_g, crlb_photons, crlb_bg, mu [n, 3], loglik (-NLL), chi2 (mean
+    (d - mu)^2 / mu per pixel), at_limit (x / y at the offset limit)."""
+
+    def __init__(self, psf, camera=None, threshold=6.0, iters=40, z_limits=None, g_limits=(0.0, 1.0), mirror=True,
+                 batch=500, zstarts=4, device=None, progress=None, stop=None, **detect_kw):
+        from torch_psf.estimators import _camera
+        self.psf, self.camera = psf, _camera(camera)
+        self.threshold, self.iters, self.mirror, self.batch, self.zstarts = threshold, iters, mirror, batch, zstarts
+        self.z_limits = tuple(z_limits) if z_limits is not None else tuple(psf.z_range)
+        self.g_limits = tuple(g_limits)
+        self.dev = psf.dev if device is None else torch.device(device)
+        self.progress, self.stop, self.detect_kw = progress, stop, detect_kw
+        self.report = {}
+
+    @torch.no_grad()
+    def fit_rois(self, rois, corners=None, frame_ids=None):
+        """The fit part of estimate for ROIs [N, P, P] (photons) -> Dataset."""
+        from torch_psf.dataset import Dataset
+        from torch_psf.fit import at_limit
+        psf = self.psf
+        rois = torch.as_tensor(rois, dtype=torch.float32, device=self.dev)
+        N, P = len(rois), psf.roisize
+        cols = {k: [] for k in ('th', 'nll', 'chi2', 'ph', 'cr')}
+        for s in range(0, N, self.batch):
+            d = rois[s:s + self.batch]
+            r = fit_orientation(psf, d, iters=self.iters, z_limits=self.z_limits, g_limits=self.g_limits,
+                                batch=self.batch, mirror=self.mirror, zstarts=self.zstarts)
+            th = r['theta']
+            mu, _ = model_and_jacobian(psf, th)
+            mu = mu[:, 0]
+            cols['th'].append(th); cols['nll'].append(r['nll']); cols['cr'].append(r['crlb'])
+            cols['chi2'].append(((d - mu) ** 2 / mu.clamp_min(1e-6)).flatten(1).mean(1))
+            cols['ph'].append((mu - th[:, 4, None, None]).flatten(1).sum(1))
+            if self.progress is not None:
+                self.progress(min(s + self.batch, N), N, min(s + self.batch, N))
+            if self.stop is not None and self.stop():
+                break
+        n = sum(len(t) for t in cols['th'])
+        if n == 0:
+            th = torch.zeros(0, NPAR, device=self.dev)
+            cr = {k: torch.zeros(0) for k in ('x', 'y', 'z', 'I', 'bg', 'theta', 'phi', 'inplane', 'g')}
+            nll = chi2 = ph = torch.zeros(0)
+        else:
+            th = torch.cat(cols['th']); nll = torch.cat(cols['nll']); chi2 = torch.cat(cols['chi2'])
+            ph = torch.cat(cols['ph'])
+            cr = {k: torch.cat([c[k] for c in cols['cr']]) for k in cols['cr'][0] if k not in ('cov', 'corr')}
+        h = (P - 1) / 2
+        xy = th[:, :2].double()
+        if corners is not None:
+            xy = xy + torch.as_tensor(corners[:n], device=self.dev).double() + h
+        px = psf.pixel_um
+        tdeg, pdeg = angles(th[:, 5:8])
+        cpu = lambda t: t.detach().cpu()
+        fr = torch.as_tensor(frame_ids[:n]).cpu() if frame_ids is not None else torch.zeros(n, dtype=torch.int32)
+        I = th[:, 3]
+        fields = dict(frame=fr, pos=cpu(torch.cat([xy, th[:, 2:3].double() / px], 1)),
+                      crlb=cpu(torch.stack([cr['x'], cr['y'], cr['z'] / px], 1).float()),
+                      photons=cpu(ph), bg=cpu(th[:, 4]), intensity=cpu(I),
+                      crlb_photons=cpu(cr['I'] * ph / I.clamp_min(1e-6)), crlb_bg=cpu(cr['bg']),
+                      theta_deg=cpu(tdeg), phi_deg=cpu(pdeg), g=cpu(th[:, 8]), mu=cpu(th[:, 5:8]),
+                      crlb_theta_deg=cpu(cr['theta']), crlb_phi_deg=cpu(cr['phi']),
+                      crlb_inplane_deg=cpu(cr['inplane']), crlb_g=cpu(cr['g']),
+                      loglik=cpu(-nll), chi2=cpu(chi2), at_limit=cpu(at_limit(th, psf)))
+        meta = dict(method='torch_psf OrientationEstimator', n_dims=3, pixel_nm=1000.0 * float(px),
+                    focus_um=float(psf.focus_um), z_limits=list(self.z_limits),
+                    vortex=getattr(psf, 'vortex', None))
+        if n:
+            meta['chi2_median'] = float(chi2.median())
+        return Dataset(fields, meta)
+
+    def estimate(self, data, frames=None):
+        """data: a movie (path / array [T, H, W] / reader; frames = (f0, f1)) or Spots -> Dataset (fit_rois for bare
+        ROIs)."""
+        from torch_psf.spots import Spots, extract_spots
+        t0 = time.time()
+        sp = data if isinstance(data, Spots) else extract_spots(
+            data, self.psf.roisize, self.camera, frames, device=self.dev, threshold=self.threshold, stop=self.stop,
+            **self.detect_kw)
+        ds = self.fit_rois(sp.rois, sp.corner, sp.frame)
+        ds['id'] = torch.arange(len(ds), dtype=torch.int64)
+        ds.meta['n_spots'] = len(sp)
+        self.report = dict(n=len(ds), seconds=time.time() - t0, chi2_median=ds.meta.get('chi2_median'))
+        return ds

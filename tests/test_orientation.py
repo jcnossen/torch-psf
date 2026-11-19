@@ -148,3 +148,55 @@ def test_fit_spots_and_track():
     d2 = torch.poisson(mu2)
     r2 = fit_orientation(v, d2, K=K, iters=25, zstarts=2)
     assert float(angle_error(r2['theta'][:, 5:8], th2[:, 5:8]).max()) < 10
+
+
+def test_orientation_estimator_on_a_small_movie():
+    from torch_psf.orientation import OrientationEstimator
+    from torch_psf.camera import Camera
+    torch.manual_seed(0)
+    v = small_model(R=11)
+    big = v.resized(17)
+    vortex_phase(v, charge=-1); vortex_phase(big, charge=-1)
+    cam = Camera(gain_e_per_adu=0.5, offset_adu=100.0)
+    mus = from_angles(torch.tensor([50.0, 70.0]), torch.tensor([30.0, 200.0]))
+    mov = torch.full((2, 40, 40), 10.0)
+    xy = [(12.3, 14.6), (27.8, 25.2)]
+    for t in range(2):
+        for (x, y), mu in zip(xy, mus):
+            ix, iy = int(round(x)), int(round(y))
+            with torch.no_grad():
+                img = big(torch.tensor([[x - ix, y - iy, 0.05]]), v.focus_um, dipM=dipole_M(mu[None], torch.ones(1)))[0]
+            mov[t, iy - 8:iy + 9, ix - 8:ix + 9] += 20000 * img
+    adu = torch.poisson(mov) / 0.5 + 100.0
+    est = OrientationEstimator(v, camera=cam, threshold=5.0, iters=25, z_limits=(0.0, 0.3), zstarts=2)
+    ds = est.estimate(adu.numpy())
+    assert len(ds) == 4
+    for k in ('theta_deg', 'phi_deg', 'g', 'crlb_theta_deg', 'mu', 'chi2', 'photons'):
+        assert k in ds
+    for i in range(len(ds)):
+        j = 0 if float(ds['pos'][i, 0]) < 20 else 1
+        assert abs(float(ds['pos'][i, 0]) - xy[j][0]) < 0.3 and abs(float(ds['pos'][i, 1]) - xy[j][1]) < 0.3
+        assert float(angle_error(ds['mu'][i:i + 1], mus[j:j + 1])) < 6
+    assert 0.5 < float(ds['chi2'].median()) < 2
+
+
+def test_vortex_bead_calibration_finds_the_charge():
+    from torch_psf.vortex import vortex_psf, calibrate_beads
+    from torch_psf.optics import Optics
+    torch.manual_seed(0)
+    o = Optics(NA=1.4, n_med=1.518, n_imm=1.518, wavelength_um=0.6, pixel_um=0.08)
+    truth = vortex_psf(o, roisize=13, charge=-1, npupil=32, oversample=1, device='cpu')
+    truth.set_zernike({5: 0.03, 8: -0.02})
+    f = 0.15 * (torch.arange(9, dtype=torch.float32) - 4)
+    stack = torch.full((9, 40, 40), 5.0)
+    for x0, y0 in ((6, 6), (21, 20)):
+        with torch.no_grad():
+            img = truth(torch.tensor([[0.2, -0.1, 0.0]]).expand(9, 3).contiguous(), f)
+        stack[:, y0:y0 + 13, x0:x0 + 13] += 20000 * img
+    stack = torch.poisson(stack)
+    start = vortex_psf(o, roisize=13, charge=-1, npupil=32, oversample=1, device='cpu')
+    psf, rep = calibrate_beads([stack.numpy()], 0.15, start, charges=(-1, 1), iters=80, roisize=13, nbeads=2,
+                               drift=False)
+    assert rep['charge'] == -1
+    assert rep['nll_per_px'][-1] < rep['nll_per_px'][1]
+    assert abs(float(psf.zcoef[0]) - 0.03) < 0.01
