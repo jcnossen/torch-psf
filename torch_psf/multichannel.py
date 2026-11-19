@@ -45,6 +45,7 @@ import torch
 from torch_psf.psf import PSF
 from torch_psf.fit import lm_poisson, poisson_nll
 from torch_psf.dataset import Dataset
+from torch_psf._dipole import unit_tensors
 
 
 def _as_t(v, dev, dtype=torch.float32):
@@ -180,10 +181,14 @@ class MultiChannelPSF(PSF):
         return torch.cat([pos[:, None, :2] + d, pos[:, None, 2:3].expand(N, C, 1)], 2)
 
     # ------------------------------------------------------------------ the model
-    def render_channels(self, pos_c, extra=None, grad=False):
+    def dipole_basis(self, pos, **kwargs):
+        """[N,C,6,P,P] in xx, yy, zz, xy, xz, yz order. Off-diagonal basis images include the factor two."""
+        raise NotImplementedError
+
+    def render_channels(self, pos_c, extra=None, grad=False, dipM=None):
         """pos_c [N, C, 3] (per-channel x, y px, z um), extra [N, k] or None -> [N, C, P, P]; grad=True: (value,
         d/dx, d/dy, d/dz, d/d extra...) each [N, C, P, P] (channel c with respect to its own position). Without the
-        intensity ratio (render applies it)."""
+        intensity ratio (render applies it). dipM is the shared [3,3] or per-emitter [N,3,3] emission tensor."""
         raise NotImplementedError
 
     def _extra(self, N, extra=None, dev=None, **named):
@@ -205,7 +210,7 @@ class MultiChannelPSF(PSF):
         r = self.intensity_ratio[None, :, None, None]
         return out * r if torch.is_tensor(out) else tuple(o * r for o in out)
 
-    def render(self, pos, grad=False, offsets=None, corners=None, **extra):
+    def render(self, pos, grad=False, offsets=None, corners=None, dipM=None, **extra):
         """Normalized channel images [N, C, P, P] at the reference position pos [N, 3] (x, y px, z um), per-spot
         offsets [N, C, 2] (px) or None, and the extra parameters by name (e.g. phi=[N]; default 0), intensity ratio
         included. grad=True: (value, d/dx, d/dy, d/dz, d/d extra...). corners [N, C, 2]: per-channel ROI corners
@@ -213,13 +218,18 @@ class MultiChannelPSF(PSF):
         pos = _as_t(pos, self.dev)
         ex = self._extra(len(pos), None, pos.device, **extra)
         if self.mapped:
-            return self._ratio(self._render_mapped(pos, ex, offsets, corners, grad))
-        return self._ratio(self.render_channels(self.channel_positions(pos, offsets), ex, grad))
+            return self._ratio(self._render_mapped(pos, ex, offsets, corners, grad, dipM))
+        kw = {} if dipM is None else dict(dipM=dipM)
+        return self._ratio(self.render_channels(self.channel_positions(pos, offsets), ex, grad, **kw))
 
-    def _render_mapped(self, pos, ex, offsets, corners, grad):
+    def _render_mapped(self, pos, ex, offsets, corners, grad, dipM=None, **kw):
         """render_channels at the mapped positions; x / y derivatives chained through the mapping Jacobians"""
         pos_c, J, fxy = self.mapped_positions(pos, offsets, corners)
-        out = self.render_channels(pos_c, ex, grad, **({'field_xy': fxy} if self.accepts_field_xy else {}))
+        if self.accepts_field_xy:
+            kw['field_xy'] = fxy
+        if dipM is not None:
+            kw['dipM'] = dipM
+        out = self.render_channels(pos_c, ex, grad, **kw)
         if not grad:
             return out
         g, gx, gy, gz, *ge = out
@@ -236,7 +246,12 @@ class MultiChannelPSF(PSF):
         return self._ratio(self.render_channels(self.channel_positions(theta[:, :3], offsets), ex, grad))
 
     def __call__(self, pos, intensity=None, bg=None, offsets=None, corners=None, **extra):
+        return self.forward(pos, intensity, bg, offsets, corners, **extra)
+
+    def forward(self, pos, intensity=None, bg=None, offsets=None, corners=None, dipM=None, **extra):
         """intensity [N] * render(pos) + bg ([N] or [N, C])."""
+        if dipM is not None:
+            extra['dipM'] = dipM
         out = self.render(pos, offsets=offsets, corners=corners, **extra)
         if intensity is not None:
             out = out * intensity[:, None, None, None]
@@ -584,10 +599,33 @@ class ChannelsPSF(MultiChannelPSF):
         """per channel: True for a field-dependent model (FieldPSF / TiledSplinePSF)"""
         return [hasattr(m, 'field_block') for m in self.models]
 
-    def render_channels(self, pos_c, extra=None, grad=False, field_xy=None):
+    def dipole_basis(self, pos, offsets=None, corners=None):
+        """[N,C,6,P,P] for xx, yy, zz, xy, xz, yz, with both symmetric terms in each off-diagonal image.
+        Reference positions include intensity ratios as in render. Per-channel positions give the raw render_channels basis."""
+        pos = _as_t(pos, self.dev)
+        raw = pos.ndim == 3
+        pc = pos if raw else self.channel_positions(pos, offsets, corners)
+        field_xy = None
+        if corners is not None and (raw or self.mapped):
+            field_xy = _as_t(corners, self.dev) + (self.roisize - 1) / 2
+        images = []
+        for c, model in enumerate(self.models):
+            p = pc[:, c]
+            kw = dict(xy=field_xy[:, c]) if field_xy is not None and self.field_dependent[c] else {}
+            if hasattr(model, 'dipole_basis'):
+                if getattr(model, 'type_name', None) == 'vectorial':
+                    kw['focus'] = model.focus_um
+                images.append(model.dipole_basis(p, **kw))
+            else:
+                images.append(torch.stack([model.render(p, dipM=M, **kw) for M in unit_tensors(self.dev)], 1))
+        basis = torch.stack(images, 1)
+        return basis if raw else basis * self.intensity_ratio[None, :, None, None, None]
+
+    def render_channels(self, pos_c, extra=None, grad=False, field_xy=None, dipM=None):
         fd = self.field_dependent
-        outs = [m.render(pos_c[:, c], grad, xy=field_xy[:, c]) if (fd[c] and field_xy is not None)
-                else m.render(pos_c[:, c], grad) for c, m in enumerate(self.models)]
+        kwargs = {} if dipM is None else dict(dipM=dipM)
+        outs = [m.render(pos_c[:, c], grad, xy=field_xy[:, c], **kwargs) if (fd[c] and field_xy is not None)
+                else m.render(pos_c[:, c], grad, **kwargs) for c, m in enumerate(self.models)]
         if not grad:
             return torch.stack(outs, 1)
         return tuple(torch.stack([o[k] for o in outs], 1) for k in range(4))

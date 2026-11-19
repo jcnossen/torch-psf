@@ -27,6 +27,7 @@ import math
 import torch
 from torch_psf.optics import resolve_device
 from torch_psf.psf import PSF
+from torch_psf._dipole import DipoleSpline
 
 
 def geometry_matrix(device, tau: float = 0.5, dtype=torch.float32):
@@ -54,7 +55,7 @@ def stage_scan_pos_fn(focus0_um, scale, emitter_z=0.0):
     return pos_fn
 
 
-class CubicSplinePSF(PSF):
+class CubicSplinePSF(DipoleSpline, PSF):
     type_name = 'spline'
     """Spline PSF for roisize x roisize patches (odd or even roisize) and emitter heights z_range = (lo, hi) um.
 
@@ -137,12 +138,14 @@ class CubicSplinePSF(PSF):
             p = self.e * t[..., None] ** (self.e - 1).clamp_min(0)
         return p @ self.G
 
-    def render(self, pos, grad=False, knots=None):
+    def render(self, pos, grad=False, knots=None, dipM=None):
         """pos [N, 3] = (x px, y px, z um) -> normalized patches [N, P, P]; with grad also d/dx, d/dy (per px) and
         d/dz (per um). Outside the supported range x, y and z are clamped (to xy_limit and the knot z range) and the
         derivatives are those of the spline at the clamped position (not zero): a fit that starts outside still sees a
         slope towards the inside. Differentiable with respect to the knots (pass knots=K to use other
         knots than self.knots, e.g. a tensor that requires grad)."""
+        if dipM is not None:
+            return self._dipole_render(pos, grad, dipM, knots)
         K = self.knots if knots is None else knots
         N, P, S, Lw = pos.shape[0], self.roisize, self.S, self.Lw
         pos = pos.to(self.dtype)
@@ -182,6 +185,7 @@ class CubicSplinePSF(PSF):
         self.knots = self.knots.to(dev, self.dtype)
         self.pat, self.G, self.e = self.pat.to(dev), self.G.to(dev), self.e.to(dev)
         self.dev = self.knots.device
+        self._set_dipole_knots(self.dipole_knots)
         return self
 
     def resized(self, roisize, device=None):
@@ -192,6 +196,7 @@ class CubicSplinePSF(PSF):
                            device=self.dev if device is None else device, dtype=self.dtype, knots=self.knots,
                            knot_u0_px=self.u0, knot_z0_um=self.z0, pixel_um=self.pixel_um)
         s.provenance = self.provenance
+        s._set_dipole_knots(self.dipole_knots)
         return s
 
     def to_spline(self, roisize=None, z_range=None, **kw):
@@ -295,15 +300,20 @@ class CubicSplinePSF(PSF):
             d, arrays = source._file_dict()
         d['spline'] = self.to_dict()
         arrays['knots'] = self.knots.detach().cpu().numpy()
+        if self.dipole_knots is not None:
+            arrays['dipole_knots'] = self.dipole_knots.detach().cpu().numpy()
         return d, arrays
 
     @classmethod
     def _from_file(cls, d, arrays, roisize=None, device=None, **kw):
         g = d['spline']
         px = g.get('pixel_um') or (d['optics'].get('pixel_um') if 'optics' in d else None)
-        return cls(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'],
+        model = cls(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'],
                    xy_limit=g['xy_limit'], device=device, knots=torch.as_tensor(arrays['knots']),
                    knot_u0_px=g.get('u0_px'), knot_z0_um=g.get('z0_um'), pixel_um=px)
+        if g.get('dipole_components'):
+            model._set_dipole_knots(arrays['dipole_knots'])
+        return model
 
     @staticmethod
     def load_source(path, device=None):
@@ -317,4 +327,4 @@ class CubicSplinePSF(PSF):
         """Grid description (without the knots) for the PSF file."""
         return dict(roisize=self.roisize, z_range=[self.zlo, self.zhi], oversample=self.S, dz_um=self.hz,
                     zpad=self.zpad, xy_limit=self.xmax, c=self.c, z0_um=self.z0, nz=self.nz, u0_px=self.u0,
-                    pixel_um=self.pixel_um)
+                    pixel_um=self.pixel_um, **({'dipole_components': True} if self.dipole_knots is not None else {}))

@@ -338,12 +338,12 @@ class FieldPSF(PSF):
         m.provenance = self.provenance
         return m
 
-    def render(self, pos, grad=False, xy=None, focus=None):
+    def render(self, pos, grad=False, xy=None, focus=None, dipM=None):
         """pos [N, 3] (x, y px from the ROI centre, z um) -> [N, P, P] at the base focus (or `focus`); xy [N, 2]:
         field positions (None = the reference point). grad: also d/dx, d/dy, d/dz (forward-mode AD)."""
         f = self.base.focus_um if focus is None else focus
         off = None if xy is None else self.offsets(xy)
-        fn = lambda p: self.base(p, f, zcoef_offset=off)
+        fn = lambda p: self.base(p, f, zcoef_offset=off, dipM=dipM)
         if not grad:
             return fn(pos)
         out, val = [], None
@@ -507,21 +507,24 @@ class TiledSplinePSF(PSF):
         return (f'TiledSplinePSF({self.nx} x {self.ny} tiles of {self.tile:g} px over {self.extent}, roisize '
                 f'{self.roisize}, {len(self._splines)} built)')
 
-    def render(self, pos, grad=False, xy=None):
+    def render(self, pos, grad=False, xy=None, dipM=None):
         if xy is None:
-            return self.reference_spline().render(pos, grad)
+            return self.reference_spline().render(pos, grad, dipM=dipM)
         ti = self.tile_index(xy).to(pos.device)
+        if dipM is not None:
+            dipM = torch.as_tensor(dipM, device=pos.device)
         res = None
         for t in torch.unique(ti).tolist():
             m = ti == t
-            r = self.spline(t).render(pos[m], grad)
+            tensor = dipM[m] if dipM is not None and dipM.ndim == 3 else dipM
+            r = self.spline(t).render(pos[m], grad, dipM=tensor)
             r = r if grad else (r,)
             if res is None:
                 res = [torch.zeros((len(pos),) + v.shape[1:], device=v.device, dtype=v.dtype) for v in r]
             for a, v in zip(res, r):
                 a[m] = v
         if res is None:
-            return self.reference_spline().render(pos, grad)
+            return self.reference_spline().render(pos, grad, dipM=dipM)
         return tuple(res) if grad else res[0]
 
     def bind(self, xy):
@@ -617,6 +620,8 @@ def field_psf_from_file(model, source, block, arrays=None, crop=None, tiles=None
                           oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
                           roisize=g['roisize'], z_range=tuple(g['z_range']))
     t = dict(tiles or {})
+    if g.get('dipole_components'):
+        fp.spline_grid['dipole_components'] = True
     tp = fp.to_tiled(tile=t.get('tile_px', 128), extent=t.get('extent'))
     tp._ref = model
     return tp

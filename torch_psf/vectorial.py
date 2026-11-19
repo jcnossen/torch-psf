@@ -393,13 +393,13 @@ class VectorialPSF(torch.nn.Module, PSF):
         """Largest |x|, |y| offset (px) from the ROI centre that the fitter allows."""
         return self.roisize / 2 - 1.0
 
-    def render(self, pos, grad=False, focus=None):
+    def render(self, pos, grad=False, focus=None, dipM=None):
         """Normalized PSF at pos [N, 3] = (x px, y px, z um) at the focus self.focus_um (or `focus`) -> [N, P, P].
         grad=True also returns d/dx, d/dy (per px) and d/dz (per um), by forward-mode automatic differentiation."""
         f = self.focus_um if focus is None else focus
         if not grad:
-            return self(pos, f)
-        fn = lambda p: self(p, f)
+            return self(pos, f, dipM=dipM)
+        fn = lambda p: self(p, f, dipM=dipM)
         out = []
         val = None
         for k in range(3):
@@ -411,14 +411,22 @@ class VectorialPSF(torch.nn.Module, PSF):
         return val, out[0], out[1], out[2]
 
     def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8,
-                  pos_fn=None):
+                  pos_fn=None, dipole_components=False):
         """CubicSplinePSF of this model (see PSF.to_spline). pos_fn: knot z -> (emitter z, focus) (default: the
-        emitter height at self.focus_um; e.g. spline.stage_scan_pos_fn for a bead-stack geometry)."""
+        emitter height at self.focus_um; e.g. spline.stage_scan_pos_fn for a bead-stack geometry).
+        dipole_components=True also tabulates xx, yy, zz, xy, xz, yz for per-emitter dipM rendering."""
         zr = self.z_range if z_range is None else z_range
         spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
                                  xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
-        big = self if self.roisize == spl.Pl else self.resized(spl.Pl)
+        big = self.resized(spl.Pl) if self.roisize != spl.Pl or dipole_components else self
         spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
+        if dipole_components:
+            from torch_psf._dipole import unit_tensors
+            tables = []
+            for M in unit_tensors(big.dev):
+                big.dipM = M
+                tables.append(spl.knots_from_vectorial(big, pos_fn, chunk=chunk))
+            spl._set_dipole_knots(torch.stack(tables))
         return spl
 
     def _apply(self, fn, *args, **kwargs):
