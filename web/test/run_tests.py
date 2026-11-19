@@ -43,16 +43,18 @@ GEN_SMLM = os.path.join(WEB, '..', 'tests', 'make_web_smlm_reference.py')
 GEN_PSFZIP = os.path.join(WEB, '..', 'tests', 'make_web_psfzip_reference.py')
 
 
-def ensure_references():
+def ensure_references(only):
     """(Re)generate the reference data in test/.cache/ when missing or when a generator has changed."""
     import hashlib
     for gen, out, stamp_name in ((GEN, CACHE, 'stamp.txt'), (GEN_SMLM, os.path.join(CACHE, 'smlm'), 'stamp_smlm.txt'),
                                  (GEN_PSFZIP, os.path.join(CACHE, 'psfzip'), 'stamp_psfzip.txt')):
+        if only.startswith('psfzip') and gen != GEN_PSFZIP:
+            continue
         h = hashlib.sha256(open(gen, 'rb').read()).hexdigest()
         stamp = os.path.join(CACHE, stamp_name)
         if os.path.exists(stamp) and open(stamp).read().strip() == h:
             continue
-        print(f'generating the reference data ({os.path.basename(gen)}, a few minutes on a GPU) ...', flush=True)
+        print(f'generating the reference data ({os.path.basename(gen)}) ...', flush=True)
         subprocess.run([sys.executable, gen, '--out', out], check=True)
         os.makedirs(CACHE, exist_ok=True)
         open(stamp, 'w').write(h)
@@ -66,7 +68,7 @@ def main():
     ap.add_argument('--no-tests', action='store_true')
     ap.add_argument('--url', default=None, help='use a running server instead of starting vite')
     a = ap.parse_args()
-    ensure_references()
+    ensure_references('' if a.screenshot else a.only)
     from playwright.sync_api import sync_playwright
     port = free_port()
     srv = None if a.url else start_vite(port)

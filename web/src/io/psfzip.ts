@@ -1,7 +1,7 @@
-// psf.zip (format 'torch-psf', version 0.2.0; docs/PSF_FORMAT.md, Python: torch_psf/psfzip.py): psf.json with one
-// channel (a vectorial model, or a spline with its vectorial model as `source`), the .npy arrays it references,
-// zstack.tif (ImageJ hyperstack ZCYX, float32), preview.png (stored) and fit_report.pdf. Reading: a psf.zip -> the
-// vectorial model (channel 0, or the `source` of a spline channel); only the .npy members that psf.json references are parsed, dtypes parseNpy cannot read are skipped.
+// psf.zip (docs/PSF_FORMAT.md): read 0.2.x and 0.3.x, write 0.2.0 box vectorial / Catmull-Rom spline models.
+// Read channel 0 and referenced arrays. Integrated splines render from their own coefficients even without a source.
+import { integratedRenderer, vectorialRenderer, type ImportedRenderer } from '../psf/imported';
+import { splineRender } from '../psf/zstack';
 import type { Optics } from '../psf/vectorial';
 import type { SplineModel, VectorialModel, ZStack } from '../psf/zstack';
 import { NdArray, parseNpy, writeNpy } from './npy';
@@ -124,20 +124,21 @@ export async function writePsfZip(p: PsfZipParts): Promise<{ bytes: Uint8Array; 
 // ------------------------------------------------------------------------------------------------ reading
 export interface PsfFileInfo {
   kind: 'psf.zip';
-  optics: Optics; noll: number[]; zcoef: number[]; focus_um: number;
+  renderer?: ImportedRenderer;
+  optics?: Optics; noll: number[]; zcoef: number[]; focus_um: number;
   roisize?: number; npupil?: number; oversample?: number; z_range_um?: [number, number] | null;
   channelType: string;                  // type of channel 0 ('vectorial', 'spline', ...)
   spline?: SplineModel | null;          // the spline of a spline channel (with its knots, from a zip)
   camera?: Record<string, unknown> | null;
-  meta?: Record<string, any>;           // psf.json (0.2)
+  meta?: Record<string, any>;           // psf.json
   arrays: Record<string, NdArray>;      // the parsed members (by member name)
   notes: string[];                      // what the web app does not use or could not read
 }
 
 function checkVersion(meta: Record<string, any>) {
   if (meta.format !== FORMAT) throw new Error(`not a torch-psf psf.json (format ${JSON.stringify(meta.format)})`);
-  const v = String(meta.version ?? '0'), [a, b] = v.split('.').map(Number);
-  if (a !== 0 || b !== 2) throw new Error(`psf.zip version ${v}: this reader supports 0.2.x`);
+  const v = String(meta.version ?? '');
+  if (!/^0\.[23]\.\d+$/.test(v)) throw new Error(`psf.zip version ${v}: this reader supports 0.2.x and 0.3.x`);
 }
 
 /** Member names that psf.json references: {member: owner} (channel arrays, sources, mapping grids, field
@@ -161,7 +162,14 @@ export function referencedMembers(meta: Record<string, any>): Record<string, str
 
 const VEC_UNUSED = ['psf_blur_px2', 'psf_dipole_M', 'psf_dipole_w', 'diattenuation', 'psf_dipole_M_angle', 'psf_blur_angle_px2'];
 
-/** The vectorial model of a 0.2 psf.json (channel 0, or the source of a spline channel). arrays: parsed members. */
+function integrationMode(value: unknown): 'box' | 'spectral' | 'gauss_legendre' {
+  if (value == null || value === 'box' || value === 'midpoint') return 'box';
+  if (value === 'spectral' || value === 'exact') return 'spectral';
+  if (value === 'gauss_legendre' || value === 'gauss') return 'gauss_legendre';
+  throw new Error(`unsupported pixel_integration ${JSON.stringify(value)}`);
+}
+
+/** Channel 0 of a psf.json (channel 0, or the source of a spline channel). arrays: parsed members. */
 export function psfFromMeta(meta: Record<string, any>, arrays: Record<string, NdArray> = {}, notes: string[] = []): Omit<PsfFileInfo, 'kind'> {
   checkVersion(meta);
   const chans: any[] = meta.channels ?? [];
@@ -170,28 +178,57 @@ export function psfFromMeta(meta: Record<string, any>, arrays: Record<string, Nd
   if ([...types].every((t) => t === 'source_output' || t === 'phase_spline')) throw new Error('a coupled (4Pi) model: not supported by the web app');
   if (chans.length > 1) notes.push(`${chans.length} channels: channel 0 (${chans[0].name}) is used`);
   const ch = chans[0];
-  let blk: any, spline: SplineModel | null = null;
-  if (ch.type === 'vectorial') blk = ch;
-  else if (ch.source?.type === 'vectorial') {
-    blk = ch.source;
-    notes.push(`channel 0 is a ${ch.type} model: its vectorial source is used`);
-    if (ch.type === 'spline' && ch.model?.spline) {
-      const g = ch.model.spline, km = ch.arrays?.knots, K = km ? arrays[km] : undefined;
-      if (K && K.data instanceof Float32Array) spline = { ...g, z_range: [g.z_range[0], g.z_range[1]], pixel_um: g.pixel_um ?? null, knots: K.data };
+  const common = { channelType: ch.type, camera: meta.camera ?? null, meta, arrays, notes };
+  for (const block of [meta.source, ...chans.flatMap(c => [c, c.source])]) integrationMode(block?.model?.pixel_integration);
+  let spline: SplineModel | null = null;
+  if (ch.type === 'spline' && ch.model?.spline) {
+    const g = ch.model.spline, K = arrays[ch.arrays?.knots], n = (2 * g.c + 1) * g.oversample;
+    if (K?.data instanceof Float32Array && K.shape.join() === [g.nz, n, n].join() && K.data.length === g.nz * n * n)
+      spline = { ...g, pixel_um: g.pixel_um ?? null, knots: K.data };
+  }
+  if (ch.type === 'integrated_spline' || (ch.type === 'spline' && meta.version.startsWith('0.3.'))) {
+    let renderer: ImportedRenderer;
+    if (ch.type === 'integrated_spline') renderer = integratedRenderer(ch.model?.integrated_spline, ch.arrays ?? {}, arrays);
+    else {
+      if (!spline) throw new Error('spline: missing or invalid knots');
+      const s = spline;
+      renderer = { feature: 'spline', roisize: s.roisize, z_range: s.z_range, render: (x, y, z) => splineRender(s, x, y, z) };
     }
-  } else throw new Error(`channel 0 is a ${ch.type} model without a vectorial source: the web app needs a vectorial PSF`);
+    const source = ch.source?.type === 'vectorial' ? ch.source.model : undefined;
+    return { ...common, optics: source?.optics, noll: source?.zernike_noll ?? [], zcoef: source?.zernike_waves ?? [],
+      focus_um: source?.focus_um ?? 0, roisize: renderer.roisize, z_range_um: renderer.z_range, renderer, spline };
+  }
+  const blk = ch.type === 'vectorial' ? ch : ch.source;
+  if (blk?.type !== 'vectorial') throw new Error(`channel 0 is a ${ch.type} model without a vectorial source: the web app needs a vectorial PSF`);
+  if (blk !== ch) notes.push(`channel 0 is a ${ch.type} model: its vectorial source is used`);
   const m = blk.model ?? {};
   if (!Array.isArray(m.zernike_noll) || !Array.isArray(m.zernike_waves)) throw new Error('the vectorial model has no zernike_noll / zernike_waves');
   const o = m.optics ?? meta.optics ?? {};
   const optics: Optics = { pixel_um: o.pixel_um ?? m.pixelsize_um, NA: o.NA ?? m.NA, wavelength_um: o.wavelength_um ?? m.wavelength_um, n_imm: o.n_imm ?? m.n_imm, n_med: o.n_med ?? m.n_med };
-  for (const k of VEC_UNUSED) if (m[k] !== null && m[k] !== undefined) notes.push(`${k} is not used by the web app`);
-  for (const k of Object.keys(blk.arrays ?? {})) notes.push(`pupil map ${k} is not used by the web app`);
+  const mode = integrationMode(m.pixel_integration);
+  let renderer: ImportedRenderer | undefined;
+  if (mode !== 'box') {
+    if (ch.type !== 'vectorial') throw new Error(`cannot render ${ch.type} from its ${mode} source`);
+    const maps: Record<string, Float32Array> = {};
+    for (const [key, member] of Object.entries(blk.arrays ?? {})) {
+      if (key !== 'pupil_amp' && key !== 'pupil_phase') continue;
+      const arr = arrays[String(member)];
+      if (!(arr?.data instanceof Float32Array) || arr.shape.join() !== [m.npupil, m.npupil].join() || arr.data.length !== m.npupil ** 2)
+        throw new Error(`${mode}: expected ${key} float32 [${m.npupil}, ${m.npupil}]`);
+      maps[key] = arr.data;
+    }
+    renderer = vectorialRenderer({ ...m, optics, noll: m.zernike_noll, zcoef: m.zernike_waves, focus_um: m.focus_um ?? 0 }, mode, maps);
+  }
+  if (!renderer) {
+    for (const k of VEC_UNUSED) if (m[k] !== null && m[k] !== undefined) notes.push(`${k} is not used by the web app`);
+    for (const k of Object.keys(blk.arrays ?? {})) notes.push(`pupil map ${k} is not used by the web app`);
+  }
   if ((m.apod ?? []).some((v: number) => v !== 0) || (m.saf ?? []).some((v: number) => v !== 0)) notes.push('apod / saf terms are kept for rendering only');
   if (ch.field) notes.push(`field dependence (${ch.field.type}) is not used: the Zernikes at the reference point`);
   return {
     optics, noll: m.zernike_noll.map(Number), zcoef: m.zernike_waves.map(Number), focus_um: Number(m.focus_um ?? 0),
     roisize: m.roisize, npupil: m.npupil, oversample: m.oversample, z_range_um: m.z_range_um ?? null,
-    channelType: ch.type, spline, camera: meta.camera ?? null, meta, arrays, notes,
+    ...common, spline, renderer,
   };
 }
 

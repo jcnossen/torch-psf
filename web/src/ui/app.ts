@@ -467,16 +467,43 @@ export function startApp(root: HTMLElement) {
 
   // --- start PSF of the fit / the PSF for "localize only"
   const psfSel = $<HTMLSelectElement>('m-psf');
-  psfSel.onchange = () => { if (psfSel.value === 'json') $<HTMLInputElement>('m-psfjson').click(); };
+  let previewFeature = '', importSeq = 0;
+  const importedCanvas = $('m-psfpreview') as HTMLCanvasElement;
+  const preview = $('m-preview'), height = $<HTMLInputElement>('m-preview-z'), angle = $<HTMLSelectElement>('m-preview-angle');
+  psfSel.onchange = () => {
+    preview.hidden = !previewFeature || psfSel.value !== 'json';
+    if (psfSel.value === 'json') $<HTMLInputElement>('m-psfjson').click();
+  };
   $<HTMLInputElement>('m-psfjson').onchange = async (e) => {
     const f = (e.target as HTMLInputElement).files?.[0];
     if (!f) return;
+    const seq = ++importSeq;
+    previewFeature = ''; psfJson = null; preview.hidden = true;
+    height.oninput = angle.onchange = null;
     try {
       const j = await readPsfFile(f);
+      if (seq !== importSeq) return;
+      if (j.renderer) {
+        const r = j.renderer, [lo, hi] = r.z_range;
+        height.min = String(lo); height.max = String(hi); height.value = String((lo + hi) / 2);
+        angle.replaceChildren(new Option('Angle average', ''));
+        for (let a = 0; a < (r.n_angles ?? 0); a++) angle.add(new Option(`Angle ${a}`, String(a)));
+        angle.hidden = !r.n_angles;
+        const draw = () => {
+          drawArray(importedCanvas, r.render(0, 0, height.valueAsNumber, angle.value === '' ? undefined : +angle.value), r.roisize, r.roisize);
+          $('m-psfinfo').textContent = `${f.name}, channel 0, ${r.feature} at z = ${height.valueAsNumber.toFixed(3)} \u00b5m. Preview only.` +
+            (j.notes.length ? ` [${j.notes.join('; ')}]` : '');
+        };
+        draw();
+        height.oninput = angle.onchange = draw;
+        previewFeature = r.feature;
+        preview.hidden = psfSel.value !== 'json';
+        return;
+      }
       if (!Array.isArray(j.noll) || !Array.isArray(j.zcoef)) throw new Error('no zernike_noll / zernike_waves');
       psfJson = { noll: j.noll.map(Number), zcoef: j.zcoef.map(Number), name: f.name };
       $('m-psfinfo').textContent = `${f.name} (${j.kind}): ${fmtZ(psfJson.noll, psfJson.zcoef)}` + (j.notes.length ? ` [${j.notes.join('; ')}]` : '');
-    } catch (err) { psfJson = null; $('m-psfinfo').textContent = 'not a psf.zip: ' + (err as Error).message; }
+    } catch (err) { if (seq !== importSeq) return; psfJson = null; $('m-psfinfo').textContent = 'Could not open PSF: ' + (err as Error).message; }
   };
   const startPsf = (): { noll: number[]; zcoef: number[] } | null => {
     if (psfSel.value === 'json') return psfJson;
@@ -623,6 +650,10 @@ export function startApp(root: HTMLElement) {
   onInsitu = (r) => { insitu = r; fillPresets(); showInsitu(r); if (r.refine?.kept) showRefinedVolume(); else showInsituVolume(); renderSteps(); };
   async function runMovie(kind: 'estimate' | 'localize') {
     if (!player) { $('mtext').textContent = 'No movie yet.'; return; }
+    if (psfSel.value === 'json' && previewFeature) {
+      $('mtext').textContent = `WebGPU fitting and localization do not support the imported ${previewFeature} model.`;
+      return;
+    }
     const psf = kind === 'localize' && psfSel.value === 'guess' && insitu ? { noll: insitu.noll, zcoef: insitu.zcoef } : startPsf();
     if (!psf) { $('mtext').textContent = 'Choose the start PSF first (Fit PSF step).'; return; }
     const form = movieForm(psf);
@@ -1110,7 +1141,10 @@ const TEMPLATE = `
     <div class="field"><span class="fl">Emitter heights</span><span class="pair"><span class="inp"><input id="m-zlo" type="number" step="any" value="0"></span><span class="inp"><input id="m-zhi" type="number" step="any" value="0.8"><i>µm</i></span></span></div>
     <h3 class="grp">Fit</h3>
     <label class="field"><span class="fl">Start PSF</span><select id="m-psf"><option value="guess">generic astigmatic</option><option value="view">PSF in the 3D view</option><option value="insitu">last in-situ estimate</option><option value="json">PSF file (psf.zip)…</option></select></label>
-    <input id="m-psfjson" type="file" accept=".zip" hidden><p id="m-psfinfo" class="hint"></p>
+    <input id="m-psfjson" type="file" accept=".zip" hidden><p id="m-psfinfo" class="hint"></p><div id="m-preview" hidden>
+      <canvas id="m-psfpreview" width="128" height="128" aria-label="Imported PSF"></canvas>
+      <label>Emitter height <input id="m-preview-z" type="range" step="any"></label>
+      <select id="m-preview-angle" aria-label="Pattern angle"></select></div>
     ${check('m-refine', 'Spline refinement' + cite('torchpsf', 'lbfgs'), false, 'free spline knots regularised towards the fitted vectorial PSF; kept only if they predict independent test spots better')}
     <details class="adv" data-key="adv-fit"><summary>Advanced <span class="dim">spot counts, iterations, overlaps</span></summary>
       ${field('m-nspots', 'Spots for the fit', 8000, '', '1')}${field('m-nheld', 'Held-out spots', 4000, '', '1')}${field('m-iters', 'Iterations' + cite('adam'), 80, '', '1')}

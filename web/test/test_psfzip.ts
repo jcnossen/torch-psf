@@ -7,9 +7,9 @@
 import { test, check, fetchBuf, fetchJson, maxAbs, maxAbsDiff } from './harness';
 import { getDevice } from '../src/gpu/device';
 import { buildPsfZip, PsfZipRequest } from '../src/psf/makezip';
-import { readPsfFile, readPsfZip } from '../src/io/psfzip';
+import { psfFromMeta, readPsfFile, readPsfZip } from '../src/io/psfzip';
 import { ZipReader, zipEntries } from '../src/io/zip';
-import { splineZstack, vectorialZstack, VectorialModel } from '../src/psf/zstack';
+import { renderedZstack, splineZstack, vectorialZstack, VectorialModel } from '../src/psf/zstack';
 import { TiffMovie } from '../src/io/tiff';
 import { makeFitReport } from '../src/report/fitreport';
 import { DEFAULT_NOLL } from '../src/psf/vectorial';
@@ -100,7 +100,7 @@ test('psfzip: read Python-written zips (zernikes, arrays, render vs Python zstac
     const ez = Math.max(...r.zcoef.map((v, i) => Math.abs(v - ref.zernike_waves[i])));
     check(ez === 0, `${name}: zernikes differ by ${ez}`);
     for (const k of ['pixel_um', 'NA', 'wavelength_um', 'n_imm', 'n_med'] as const)
-      check(Math.fround(r.optics[k]) === Math.fround(ref.optics[k]), `${name}: optics ${k} ${r.optics[k]} vs ${ref.optics[k]}`);
+      check(Math.fround(r.optics![k]) === Math.fround(ref.optics[k]), `${name}: optics ${k} ${r.optics![k]} vs ${ref.optics[k]}`);
     check(r.focus_um === ref.focus_um && r.npupil === ref.npupil && r.oversample === ref.oversample && r.roisize === ref.roisize, `${name}: model settings`);
     const z = new ZipReader(buf), meta = JSON.parse(await z.text('psf.json')), zb = meta.zstack;
     const t = await readTif(await z.read('zstack.tif'));
@@ -112,7 +112,7 @@ test('psfzip: read Python-written zips (zernikes, arrays, render vs Python zstac
       e = relErr(splineZstack(r.spline!, zb.shape[0], k).stack, t.data);
       check(e < 1e-5, `${name}: web spline render vs Python zstack.tif, max rel err ${e}`);
     } else {
-      const v: VectorialModel = { optics: r.optics, noll: r.noll, zcoef: r.zcoef, focus_um: r.focus_um, npupil: r.npupil!, oversample: r.oversample!, roisize: r.roisize!, z_range_um: r.z_range_um ?? null };
+      const v: VectorialModel = { optics: r.optics!, noll: r.noll, zcoef: r.zcoef, focus_um: r.focus_um, npupil: r.npupil!, oversample: r.oversample!, roisize: r.roisize!, z_range_um: r.z_range_um ?? null };
       e = relErr((await vectorialZstack(device, v, zb.shape[0], k)).stack, t.data);
       check(e < 1e-4, `${name}: web vectorial render vs Python zstack.tif, max rel err ${e}`);
       // camera: maps parsed, extras not parsed by default; with cameraExtras the unsupported dtypes are skipped
@@ -126,4 +126,44 @@ test('psfzip: read Python-written zips (zernikes, arrays, render vs Python zstac
     msgs.push(`${name}: zernikes equal, render vs Python max rel err ${e.toExponential(1)} (${zb.shape.join('x')})`);
   }
   return msgs.join('; ');
+});
+
+test('psfzip: CPU render of Python 0.3 models', async () => {
+  const old = await readPsfZip(await fetchBuf('psfzip/python_vectorial.psf.zip'));
+  check(old.meta?.version === '0.2.0' && !old.renderer, 'existing box file');
+  const ref = await fetchJson('psfzip/integration_ref.json'), msgs: string[] = [];
+  for (const c of ref.cases) {
+    const buf = await fetchBuf('psfzip/' + c.name + '.psf.zip'), file = await readPsfZip(buf);
+    check(file.meta?.version === '0.3.0' && !!file.renderer, c.name + ': 0.3 renderer');
+    if (c.angle == null) {
+      const t = await readTif(await new ZipReader(buf).read('zstack.tif'));
+      const stack = renderedZstack(file.renderer!, t.n);
+      check(relErr(stack.stack, t.data) < 1e-5, c.name + ': Python zstack.tif');
+    }
+    let err = 0;
+    for (let i = 0; i < ref.positions.length; i++) {
+      const [x, y, z] = ref.positions[i], img = file.renderer!.render(x, y, z, c.angle ?? undefined);
+      err = Math.max(err, relErr(img, c.images[i]));
+    }
+    check(err < 1e-5, c.name + ': error / peak ' + err);
+    msgs.push(`${c.name} (angle ${c.angle ?? 'mean'}): ${err.toExponential(2)}`);
+  }
+  return msgs.join(', ');
+});
+
+test('psfzip: refuse unknown versions, integration modes and invalid spline coefficients', async () => {
+  const file = await readPsfZip(await fetchBuf('psfzip/integrated_angles.psf.zip'));
+  const reject = (edit: (meta: any) => void, feature: string) => {
+    const meta = structuredClone(file.meta!);
+    edit(meta);
+    let message = '';
+    try { psfFromMeta(meta, file.arrays); } catch (e) { message = (e as Error).message; }
+    check(message.includes(feature), `expected ${feature}, got ${message}`);
+  };
+  reject(m => m.version = '0.4.0', '0.4.0');
+  reject(m => m.channels[0].source.model.pixel_integration = 'unknown_rule', 'unknown_rule');
+  reject(m => m.channels[0].model.integrated_spline.basis = 'unknown_basis', 'unknown_basis');
+  reject(m => m.channels[0].model.integrated_spline.n_angles++, 'coefs_angle');
+  reject(m => m.channels[0].arrays.coefs_angle = 'missing.npy', 'coefs_angle');
+  reject(m => m.channels[0].arrays.coefs = 'second.npy', 'coefs_angle');
 });

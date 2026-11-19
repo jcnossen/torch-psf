@@ -32,8 +32,7 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
   `integrated_spline` model type. A writer writes `0.3.0` exactly when a model block of the file (a channel, its
   `source`, the top-level `source`) is an `integrated_spline` or has `pixel_integration` other than `box`, and
   `0.2.0` otherwise, so every file a 0.2 reader can read correctly stays a 0.2.0 file (byte for byte as before), and
-  the others are refused by 0.2 readers (the Python reader before this revision and the web app check the minor
-  version).
+  the others are refused by 0.2 readers. The current Python and web readers accept both minor versions.
 - The 0.1.0 files (one JSON with `type` at the top level plus a sidecar `.npz` named by `arrays`) are still written by
   `PSF.save` and read by `PSF.load`; so are plain SIMCODE calibration JSONs (no `format`, the vectorial keys at the top
   level). A 0.2.0 channel `model` block holds exactly the keys of the 0.1.0 JSON of that model type, so a 0.1.0 file

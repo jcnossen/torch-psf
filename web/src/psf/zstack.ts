@@ -3,6 +3,7 @@
 // the pixel-integrated PSF of a camera pixel centred at ((n - (kP - 1) / 2) / k, (m - (kP - 1) / 2) / k) px from the
 // emitter. Vectorial models on the GPU (VecEngine), splines on the CPU (CubicSplinePSF.render, Catmull-Rom).
 import { VecEngine } from '../gpu/ops';
+import type { ImportedRenderer } from './imported';
 import type { Optics } from './vectorial';
 
 /** numpy.linspace(lo, hi, n) (endpoint included), bit for bit. */
@@ -105,10 +106,15 @@ export async function vectorialZstack(dev: GPUDevice, m: VectorialModel, planes 
 
 /** render_zstack of a spline model: planes over its z_range. */
 export function splineZstack(s: SplineModel, planes = 25, k = 1): ZStack {
+  return renderedZstack({ ...s, render: (x, y, z) => splineRender(s, x, y, z) }, planes, k);
+}
+
+/** The stored channel model on the same sampling grid as Python render_zstack. */
+export function renderedZstack(s: Pick<ImportedRenderer, 'roisize' | 'z_range' | 'render'>, planes = 25, k = 1): ZStack {
   checkK(k);
   const zs = linspace(s.z_range[0], s.z_range[1], planes), a = shifts(k), P = s.roisize, P2 = P * P;
   const img = new Float32Array(zs.length * k * k * P2);
   let o = 0;
-  for (const z of zs) for (let iy = 0; iy < k; iy++) for (let ix = 0; ix < k; ix++) { img.set(splineRender(s, a[ix], a[iy], z), o); o += P2; }
+  for (const z of zs) for (let iy = 0; iy < k; iy++) for (let ix = 0; ix < k; ix++) { img.set(s.render(a[ix], a[iy], z), o); o += P2; }
   return { stack: interleave(img, zs.length, k, P), Z: zs.length, C: 1, H: k * P, W: k * P, z_um: zs, sample_px: 1 / k };
 }

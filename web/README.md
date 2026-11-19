@@ -122,7 +122,7 @@ estimate, or a `psf.zip`). On the demo it recovers the truth to about 0.001 wave
 
 ### psf.zip
 
-The shared PSF file of torch-psf (format `torch-psf` 0.2.0, `../docs/PSF_FORMAT.md`), one button per fit: `psf.json`
+Exports use the shared PSF file of torch-psf (format `torch-psf` 0.2.0, `../docs/PSF_FORMAT.md`), one button per fit: `psf.json`
 with one channel (the fitted vectorial model, or with "spline channel" a spline whose `source` is the vectorial model:
 bead fit: the model tabulated on the export spline grid; in-situ: the refined free knots when they were kept, else the
 model tabulated on the fit's knot grid), the camera gain / offset, provenance and the report summary; the knots as
@@ -131,10 +131,17 @@ them; default 25 planes at 1 camera px, options "planes" and "sampling 1 / k px"
 (without a creation date). Deflated with `CompressionStream('deflate-raw')` (PNG stored), fixed member times: the same
 fit gives the same bytes. Bead fit: z = emitter height at the export focus ("imaging focus"), z range = the export
 spline z range, ROI = the fit ROI; in-situ: the acquisition focal plane and emitter z range. `torch_psf.io.load` /
-`PSFZip.read` read it; the app reads `psf.zip` (channel 0's vectorial model or the `source` of a spline channel; only
-the arrays psf.json references are parsed, dtypes the npy reader does not support are skipped) as the start PSF of the
-in-situ fit. Code: `src/io/zip.ts`, `src/io/imagejtif.ts`, `src/io/psfzip.ts`, `src/psf/zstack.ts`, `src/psf/makezip.ts`,
-`src/report/preview.ts`, `src/ui/exportzip.ts`.
+`PSFZip.read` read it.
+
+The web reader accepts 0.2.x and 0.3.x and uses channel 0. For a 0.2.0 calibration, the vectorial model
+(or the vectorial source of a spline) supplies the starting Zernikes for the in-situ fit.
+Importing an integrated spline, a 0.3.x spline channel or a vectorial channel with spectral or Gauss-Legendre
+pixel integration opens a CPU-rendered preview with emitter-height and, where applicable, pattern-angle controls.
+Splines use their stored knots or coefficients. Integrated splines default to the angle average. Vectorial previews
+include pupil maps, dipole and diattenuation terms, and spectral image-plane blur. WebGPU fitting and localization
+support box integration and ordinary spline knots.
+
+Code: `src/io/psfzip.ts`, `src/psf/imported.ts`, `src/psf/zstack.ts`, `src/psf/makezip.ts`.
 
 ### Fit report (PDF)
 
