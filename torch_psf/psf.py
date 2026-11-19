@@ -268,6 +268,12 @@ class PSF:
         zernike_poly field block gives the field-dependent model (torch_psf.field: FieldPSF of a vectorial channel,
         TiledSplinePSF of a spline channel with its vectorial source)."""
         d, arrays, typ = PSF.read_file(path)
+        if angle is not None and d.get('psf_dipole_M_angle') is None and d.get('psf_blur_angle_px2') is None:
+            unused = (d.get('provenance') or {}).get('unused_model_keys') or {}
+            hint = (' (its per-angle terms are only in provenance.unused_model_keys: the file was converted by a '
+                    'torch-psf that did not keep them; convert the calibration json again)') \
+                if 'psf_dipole_M_angle' in unused or 'psf_blur_angle_px2' in unused else ''
+            raise ValueError(f'angle={angle!r}, but this PSF file has no per-angle model terms{hint}')
         if typ not in PSF._registry:
             raise ValueError(f'unknown PSF type {typ!r} (known: {sorted(PSF._registry)})')
         psf = PSF._registry[typ]._from_file(d, arrays, roisize=roisize, device=device, angle=angle, npupil=npupil,
