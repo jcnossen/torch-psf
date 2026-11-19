@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 import itertools
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -41,8 +42,45 @@ def save(out, data):
     tmp.replace(out)
 
 
+MAX_MEM_GB = None   # --max-mem-gb: cap of this process's CUDA allocator (shared GPUs)
+_GPU_INDEX = None
+
+
+def physical_gpu_index():
+    """nvidia-smi index of the card torch uses (CUDA_VISIBLE_DEVICES remaps torch's device 0): matched by UUID,
+    else the first entry of CUDA_VISIBLE_DEVICES, else 0."""
+    global _GPU_INDEX
+    if _GPU_INDEX is not None:
+        return _GPU_INDEX
+    idx = None
+    try:
+        uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
+        rows = subprocess.check_output(['nvidia-smi', '--query-gpu=index,uuid', '--format=csv,noheader'],
+                                       text=True, timeout=10).strip().splitlines()
+        for row in rows:
+            i, u = [x.strip() for x in row.split(',')]
+            if u.removeprefix('GPU-') == uuid.removeprefix('GPU-'):
+                idx = int(i)
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+        pass
+    if idx is None:
+        first = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')[0].strip()
+        idx = int(first) if first.isdigit() else 0
+    _GPU_INDEX = idx
+    return idx
+
+
+def limit_memory():
+    """Apply --max-mem-gb to the allocator (a no-op without it); returns the allowed fraction of the card."""
+    total = torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory
+    fraction = 1.0 if MAX_MEM_GB is None else min(1.0, MAX_MEM_GB * 2**30 / total)
+    if MAX_MEM_GB is not None:
+        torch.cuda.set_per_process_memory_fraction(fraction)
+    return fraction
+
+
 def gpu_sample():
-    cmd = ['nvidia-smi', '--id=0', '--query-gpu=utilization.gpu,memory.used,temperature.gpu',
+    cmd = ['nvidia-smi', f'--id={physical_gpu_index()}', '--query-gpu=utilization.gpu,memory.used,temperature.gpu',
            '--format=csv,noheader,nounits']
     try:
         u, m, t = map(float, subprocess.check_output(cmd, text=True, timeout=10).strip().split(','))
@@ -278,7 +316,7 @@ def timing_run(ref, data, out, tune, retry=False):
     # allocator to the physical memory available to this process at the start of timing.
     torch.cuda.empty_cache()
     free, total = torch.cuda.mem_get_info()
-    fraction = min(1., (free + torch.cuda.memory_reserved()) / total)
+    fraction = min(1., (free + torch.cuda.memory_reserved()) / total, limit_memory())
     torch.cuda.set_per_process_memory_fraction(fraction)
     budget = total * fraction / 2**20
     data.setdefault('allocator_budget_MiB', {}).setdefault(str(tune), budget)
@@ -335,7 +373,14 @@ def main():
     parser.add_argument('--out', type=Path, default=OUT / 'psf_bench.json')
     parser.add_argument('--phase', choices=['all', 'precision', 'timing', 'paired', 'retry'], default='all')
     parser.add_argument('--timing-worker', choices=['on', 'off'], help=argparse.SUPPRESS)
+    parser.add_argument('--max-mem-gb', type=float, default=None,
+                        help='cap of the CUDA memory this process may use (GB; shared GPUs); batches that do not fit '
+                             'are recorded as out of memory')
     args = parser.parse_args()
+    global MAX_MEM_GB
+    MAX_MEM_GB = args.max_mem_gb
+    limit_memory()
+    mem_args = [] if MAX_MEM_GB is None else ['--max-mem-gb', str(MAX_MEM_GB)]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.timing_worker or args.phase == 'paired':
         data = json.loads(args.out.read_text())
@@ -352,7 +397,7 @@ def main():
     if args.phase == 'retry':
         for tune in ('off', 'on'):
             subprocess.run([sys.executable, __file__, '--model', str(args.model), '--out', str(args.out),
-                            '--phase', 'retry', '--timing-worker', tune], check=True)
+                            '--phase', 'retry', '--timing-worker', tune] + mem_args, check=True)
         return
     model_sha = hashlib.sha256(args.model.read_bytes()).hexdigest()
     ref = PSF.load(args.model, roisize=P, device='cuda').resized(P, pixel_integration='spectral')
@@ -391,9 +436,9 @@ def main():
     torch.cuda.empty_cache()
     for tune in ('off', 'on'):
         subprocess.run([sys.executable, __file__, '--model', str(args.model), '--out', str(args.out),
-                        '--timing-worker', tune], check=True)
+                        '--timing-worker', tune] + mem_args, check=True)
     subprocess.run([sys.executable, __file__, '--model', str(args.model), '--out', str(args.out),
-                    '--phase', 'paired'], check=True)
+                    '--phase', 'paired'] + mem_args, check=True)
 
 
 if __name__ == '__main__':
