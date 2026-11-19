@@ -255,3 +255,47 @@ def test_fit_tracks_spline_matches_exact_fit():
     assert float((fs['psf'].blur - fe['psf'].blur).abs().max()) < 2e-3
     assert abs(fs['report']['nll_per_px'] - fe['report']['nll_per_px']) < 1e-5
     assert float((fs['z'] - fe['z']).abs().median()) < 1e-3
+
+
+def test_pixel_integration_refuses_unknown(tmp_path):
+    """an unknown pixel_integration (constructor, attribute, resized, a PSF json, a psf.zip) raises ValueError instead
+    of rendering 'box'; None / absent = 'box', 'exact' = 'spectral'"""
+    import json, zipfile
+    from torch_psf import PSF
+    from torch_psf.psfzip import save_zip
+    kw = dict(npupil=16, oversample=2, device='cpu')
+    for bad in ('trapezoid', 'Box', '', 3, ['box']):
+        with pytest.raises(ValueError, match='pixel_integration'):
+            VectorialPSF(9, pixel_integration=bad, **kw)
+    v = VectorialPSF(9, pixel_integration=None, **kw)
+    assert v.pixel_integration == 'box'
+    assert VectorialPSF(9, pixel_integration='exact', **kw).pixel_integration == 'spectral'
+    with pytest.raises(ValueError, match='pixel_integration'):
+        v.pixel_integration = 'simpson'
+    assert v.pixel_integration == 'box'
+    with pytest.raises(ValueError, match='pixel_integration'):
+        v.resized(9, pixel_integration='simpson')
+    # files: absent = 'box', a known value is read, an unknown one is refused
+    d = v.save(tmp_path / 'v.json')
+    assert 'pixel_integration' not in d and PSF.load(tmp_path / 'v.json', device='cpu').pixel_integration == 'box'
+    for val, ok in (('exact', 'spectral'), ('gauss_legendre', 'gauss_legendre'), ('trapezoid', None), (1, None)):
+        json.dump(dict(d, pixel_integration=val), open(tmp_path / 'w.json', 'w'))
+        if ok is None:
+            with pytest.raises(ValueError, match='PSF file: unknown pixel_integration'):
+                PSF.load(tmp_path / 'w.json', device='cpu')
+        else:
+            assert PSF.load(tmp_path / 'w.json', device='cpu').pixel_integration == ok
+    zp = tmp_path / 'v.zip'
+    save_zip(zp, VectorialPSF(9, pixel_integration='exact', z_range=(0.0, 0.4), **kw), zstack_planes=3)
+    assert PSF.load(zp, device='cpu').pixel_integration == 'spectral'
+    with zipfile.ZipFile(zp) as z:
+        members = {n: z.read(n) for n in z.namelist()}
+    meta = json.loads(members['psf.json'])
+    assert meta['channels'][0]['model']['pixel_integration'] == 'spectral'
+    meta['channels'][0]['model']['pixel_integration'] = 'trapezoid'
+    members['psf.json'] = json.dumps(meta).encode()
+    with zipfile.ZipFile(tmp_path / 'bad.zip', 'w') as z:
+        for n, b in members.items():
+            z.writestr(n, b)
+    with pytest.raises(ValueError, match='unknown pixel_integration'):
+        PSF.load(tmp_path / 'bad.zip', device='cpu')

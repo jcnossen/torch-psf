@@ -75,10 +75,13 @@ PIXEL_INTEGRATIONS = ('box', 'spectral', 'gauss_legendre')
 
 
 def pixel_integration_mode(mode):
-    """Validated pixel-integration name (VectorialPSF.pixel_integration); 'exact' = 'spectral', None = 'box'."""
-    m = 'box' if mode is None else {'exact': 'spectral', 'gauss': 'gauss_legendre', 'midpoint': 'box'}.get(mode, mode)
+    """Validated pixel-integration name (VectorialPSF.pixel_integration); 'exact' = 'spectral', None = 'box'. Any other
+    value (another string, a number, ...) raises ValueError: a model never silently falls back to 'box'."""
+    if mode is None:
+        return 'box'
+    m = {'exact': 'spectral', 'gauss': 'gauss_legendre', 'midpoint': 'box'}.get(mode, mode) if isinstance(mode, str) else None
     if m not in PIXEL_INTEGRATIONS:
-        raise ValueError(f"pixel_integration: one of {PIXEL_INTEGRATIONS} (or 'exact'), not {mode!r}")
+        raise ValueError(f"unknown pixel_integration {mode!r}: one of {PIXEL_INTEGRATIONS} (or 'exact')")
     return m
 
 
@@ -427,10 +430,15 @@ class VectorialPSF(torch.nn.Module, PSF):
         psf_blur_angle_px2: angle 0 / 1 = that angle, None = the average)."""
         o = Optics.from_dict(d['optics'] if 'optics' in d else d)
         zr = d.get('z_range_um')
+        pixint = pixel_integration if pixel_integration is not None else d.get('pixel_integration')
+        try:
+            pixint = pixel_integration_mode(pixint)
+        except ValueError as e:
+            raise ValueError(f'PSF file: {e}') from None
         vec = cls(roisize or d.get('roisize', 15), zernike_indices=tuple(d.get('zernike_noll', range(5, 22))),
                   npupil=npupil or d.get('npupil', 64), oversample=oversample or d.get('oversample', 3), device=device,
                   focus_um=float(d.get('focus_um', 0.0) or 0.0), z_range=tuple(zr) if zr else (0.0, 1.0),
-                  pixel_integration=pixel_integration or d.get('pixel_integration', 'box'), **o.vectorial_kwargs())
+                  pixel_integration=pixint, **o.vectorial_kwargs())
         t = lambda v: torch.tensor(v, device=vec.dev, dtype=torch.float32)
         with torch.no_grad():
             if d.get('zernike_waves') is not None:
