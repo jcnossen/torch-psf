@@ -256,6 +256,12 @@ class PSF:
         return d, arrays, typ
 
     @staticmethod
+    def _has_angle_terms(psf):
+        """True if the model has per-pattern-angle terms that PSF.load(angle=a) selects: VectorialPSF psf_dipole_M_angle /
+        psf_blur_angle_px2, IntegratedSplinePSF coefs_angle."""
+        return any(getattr(psf, k, None) is not None for k in ('dipM_angle', 'blur_angle', 'coefs_angle'))
+
+    @staticmethod
     def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
         """Read a PSF json (type 'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian' | 'fourpi' | 'fourpi_spline'), a
         psf.zip (docs/PSF_FORMAT.md; independent multi-channel files: torch_psf.io.load(path, channel=c)) or a plain
@@ -268,16 +274,16 @@ class PSF:
         zernike_poly field block gives the field-dependent model (torch_psf.field: FieldPSF of a vectorial channel,
         TiledSplinePSF of a spline channel with its vectorial source)."""
         d, arrays, typ = PSF.read_file(path)
-        if angle is not None and d.get('psf_dipole_M_angle') is None and d.get('psf_blur_angle_px2') is None:
-            unused = (d.get('provenance') or {}).get('unused_model_keys') or {}
-            hint = (' (its per-angle terms are only in provenance.unused_model_keys: the file was converted by a '
-                    'torch-psf that did not keep them; convert the calibration json again)') \
-                if 'psf_dipole_M_angle' in unused or 'psf_blur_angle_px2' in unused else ''
-            raise ValueError(f'angle={angle!r}, but this PSF file has no per-angle model terms{hint}')
         if typ not in PSF._registry:
             raise ValueError(f'unknown PSF type {typ!r} (known: {sorted(PSF._registry)})')
         psf = PSF._registry[typ]._from_file(d, arrays, roisize=roisize, device=device, angle=angle, npupil=npupil,
                                             oversample=oversample)
+        if angle is not None and not PSF._has_angle_terms(psf):
+            unused = (d.get('provenance') or {}).get('unused_model_keys') or {}
+            hint = (' (its per-angle terms are only in provenance.unused_model_keys: the file was converted by a '
+                    'torch-psf that did not keep them; convert the calibration json again)') \
+                if 'psf_dipole_M_angle' in unused or 'psf_blur_angle_px2' in unused else ''
+            raise ValueError(f'angle={angle!r}, but this PSF model ({typ}) has no per-angle terms{hint}')
         if d.get('provenance'):
             psf.provenance = d['provenance']
         fd = d.get('_field')

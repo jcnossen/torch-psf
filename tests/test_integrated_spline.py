@@ -65,8 +65,9 @@ def test_angles_mean_and_selection():
         assert torch.allclose(s.render(pos), 0.5 * (a[0] + a[1]), atol=1e-7)
         for k in range(2):
             assert _err(a[k], vs[k].render(pos)) < 2e-4
-    with pytest.raises(ValueError):
-        s.for_angle(2)
+    for bad in (2, -1, 0.5, True):                     # out of range, fractional, bool
+        with pytest.raises(ValueError):
+            s.for_angle(bad)
 
 
 def test_resized_shares_coefficients():
@@ -113,7 +114,9 @@ def test_single_model_round_trip(tmp_path):
     io.save_zip(f, s)
     meta, _ = psfzip.read_zip(f)
     assert set(meta['channels'][0]['arrays']) == {'coefs'}
-    m = PSF.load(f, angle=1, device='cpu')                        # no angle terms: the same model for every angle (as VectorialPSF)
+    with pytest.raises(ValueError, match='no per-angle'):      # no angle terms: an angle is refused (as VectorialPSF)
+        PSF.load(f, angle=1, device='cpu')
+    m = PSF.load(f, device='cpu')
     pos = _pos(4, xy=1.0)
     assert m.angle is None and torch.equal(m.render(pos), s.render(pos))
 

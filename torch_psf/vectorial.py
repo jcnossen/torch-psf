@@ -133,8 +133,9 @@ def pixel_box_spectral(I, os_, pad, R, fc, cov=None):
 
 
 def _angle_index(angle, n):
-    a = int(angle)
-    if a != angle or not 0 <= a < n:
+    """Index of a pattern angle into n per-angle terms; ValueError for bool, fractional or out-of-range values."""
+    a = None if isinstance(angle, bool) else int(angle)
+    if a is None or a != angle or not 0 <= a < n:
         raise ValueError(f'angle={angle!r}: this PSF has per-angle terms for angles 0..{n - 1}')
     return a
 

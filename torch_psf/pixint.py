@@ -36,7 +36,7 @@ import torch
 from torch_psf.optics import resolve_device
 from torch_psf.psf import PSF
 from torch_psf.spline import CubicSplinePSF
-from torch_psf.vectorial import dipole_tensor, spectral_min_oversample, check_spectral_oversample
+from torch_psf.vectorial import dipole_tensor, spectral_min_oversample, check_spectral_oversample, _angle_index
 
 
 # ============================================================================================ cubic kernels
@@ -404,9 +404,9 @@ class IntegratedSplinePSF(PixelSplinePSF):
             raise ValueError(f'coefs_angle {tuple(ca.shape)} does not match coefs {tuple(coefs.shape)}')
         if angle is not None and ca is None:
             angle = None                    # as VectorialPSF: a model without angle terms is the same for every angle
-        if angle is not None and not 0 <= int(angle) < len(ca):
-            raise ValueError(f'angle {angle}: the model has {len(ca)} angles')
-        self.coefs, self.coefs_angle, self.angle = coefs, ca, None if angle is None else int(angle)
+        if angle is not None:
+            angle = _angle_index(angle, len(ca))      # refuses fractional / bool / out-of-range angles
+        self.coefs, self.coefs_angle, self.angle = coefs, ca, angle
         self.zpad, self.chunk_elems = int(zpad), int(chunk_elems)
         active = coefs if angle is None else ca[int(angle)]
         geo = CubicSplinePSF(roisize, z_range, oversample=oversample, dz_um=dz_um, zpad=zpad, xy_limit=1e9, device=dev,
