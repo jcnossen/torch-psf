@@ -516,7 +516,7 @@ class InSituEstimator(Estimator):
             o = dataclasses.replace(vec0.optics, wavelength_um=float(wavelength_um))
             v = VectorialPSF.from_optics(o, vec0.roisize, zernike_indices=tuple(vec0.zidx), npupil=vec0.npupil,
                                          oversample=vec0.os, device=self.dev, focus_um=vec0.focus_um,
-                                         z_range=vec0.z_range)
+                                         z_range=vec0.z_range, pixel_integration=vec0.pixel_integration)
             with torch.no_grad():
                 v.zcoef.copy_(vec0.zcoef.detach())
         v.focus_um = float(vec0.focus_um if focus_um is None else focus_um)
