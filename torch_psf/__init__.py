@@ -51,5 +51,5 @@ from torch_psf.spots import extract_spots
 from torch_psf.estimators import ZStackEstimator, DenseBeadEstimator, InSituEstimator, PhaseDiversityEstimator
 from torch_psf.multichannel_estimator import MultiChannelBeadEstimator
 from torch_psf.sofi import SOFIEstimator
-from torch_psf.dataset import Dataset
+from torch_psf.dataset import Dataset, Drift
 from torch_psf import fit, estimation, simulate, spots, detect, io, zernike, optics, camera   # noqa: F401

@@ -1,8 +1,11 @@
 """Dataset: construction, indexing and filters, concatenate, crop, drift, render / FRC, files (hdf5, Picasso, csv)."""
+import json
+
+import h5py
 import numpy as np
 import pytest
 import torch
-from torch_psf import Dataset
+from torch_psf import Dataset, Drift
 
 
 def make(n=500, D=3, seed=0):
@@ -46,24 +49,61 @@ def test_indexing_filters_concatenate():
     assert bool((fr.frame >= 100).all()) and bool((fr.end_frame < 500).all())
 
 
-def test_drift_apply_undo():
-    ds = make()
-    drift = torch.stack([torch.linspace(0, 1, 1010), torch.linspace(0, -2, 1010)], 1)
-    p0 = ds.pos.clone()
-    ds.set_drift(drift).apply_drift()
-    t = (ds.frame + 3).long()
-    assert torch.allclose(ds.pos[:, :2], p0[:, :2] - drift[t].double())
-    ds.undo_drift()
-    assert torch.allclose(ds.pos, p0)
+def test_drift_corrected():
+    ds = Dataset.from_arrays([[5, 6, 7]] * 3, [-2, 0, 9], n_frames=[1, 2, 1])
+    drift = Drift([[1, 2], [3, 4], [5, 6]], {'method': 'given'})
+    corrected = ds.drift_corrected(drift)
+    assert corrected.pos.tolist() == [[4, 4, 7], [2, 2, 7], [0, 0, 7]]
+    assert corrected.meta['drift'] == drift.info
+    assert ds.pos.tolist() == [[5, 6, 7]] * 3 and 'drift' not in ds.meta
+    with pytest.raises(ValueError, match='already drift corrected'):
+        corrected.drift_corrected(drift)
+    second = Drift([[1]], {'method': 'residual'})
+    twice = corrected.drift_corrected(second, force=True)
+    assert torch.equal(twice.pos[:, 0], corrected.pos[:, 0] - 1)
+    assert twice.meta['drift'] == second.info
+
+
+def test_drift_roundtrip(tmp_path):
+    drift = Drift([[1, 2], [3, 4]], {'parameters': {'dims': 2}})
+    path = tmp_path / 'drift.npz'
+    drift.save(path)
+    loaded = Drift.load(path)
+    assert loaded.curve.dtype == torch.float64
+    assert torch.equal(loaded.curve, drift.curve) and loaded.info == drift.info
+
+
+@pytest.mark.parametrize('applied', [True, False])
+def test_legacy_drift(tmp_path, applied):
+    path = tmp_path / 'v1.h5'
+    info = {'method': 'given'}
+    with h5py.File(path, 'w') as f:
+        f.attrs.update(format='torch-psf dataset', format_version=1)
+        f['localizations/pos'] = [[4., 5.]]
+        f['localizations/frame'] = [0]
+        f.create_group('metadata').attrs['drift'] = 'json:' + json.dumps(info)
+        d = f.create_dataset('drift', data=[[1., 2.]])
+        d.attrs.update(applied=applied, info=json.dumps(info))
+    if applied:
+        ds = Dataset.load(path)
+        assert ds.meta['drift'] == info
+    else:
+        with pytest.warns(UserWarning, match=r'unapplied drift curve.*tp\.Drift\.load'):
+            ds = Dataset.load(path)
+        assert 'drift' not in ds.meta
+    assert ds.pos.tolist() == [[4., 5.]]
+    drift = Drift.load(path)
+    assert drift.curve.tolist() == [[1., 2.]] and drift.info == info
 
 
 def test_files_roundtrip(tmp_path):
-    ds = make()
-    ds.set_drift(torch.zeros(1006, 2))
+    ds = make().drift_corrected(Drift([[1, 2]], {'method': 'given'}))
     ds.save(tmp_path / 'a.hdf5')
     b = Dataset.load(tmp_path / 'a.hdf5')
     assert set(b.keys()) == set(ds.keys()) and all(torch.equal(b[k], ds[k]) for k in ds.keys())
-    assert b.meta['image_size'] == [80, 100] and b.pixel_nm == 108.0 and b.drift.shape == (1006, 2)
+    assert b.meta['image_size'] == [80, 100] and b.pixel_nm == 108.0 and b.meta['drift'] == ds.meta['drift']
+    with h5py.File(tmp_path / 'a.hdf5') as f:
+        assert 'drift' not in f and f.attrs['format_version'] == 2
     ds.save_picasso(tmp_path / 'p.hdf5')
     p = Dataset.load(tmp_path / 'p.hdf5')
     assert torch.allclose(p.pos, ds.pos, atol=1e-4) and p.meta['image_size'] == [80, 100] and torch.allclose(p.score, ds.score)
@@ -107,9 +147,12 @@ def test_estimate_drift():
     true = torch.stack([torch.linspace(0, 1.5, F), torch.linspace(0, -1.0, F)], 1).double()
     ds = Dataset.from_arrays(sites[k] + true[fr] + 0.05 * torch.randn(n, 2, generator=g, dtype=torch.float64), fr,
                              crlb=torch.full((n, 2), 0.05), meta=dict(pixel_nm=100.0, n_frames=F))
-    d, rec = ds.estimate_drift(return_info=True)
+    before = ds.copy()
+    drift = ds.estimate_drift(device='cpu')
+    assert ds.meta == before.meta and all(torch.equal(ds[k], before[k]) for k in ds.keys())
+    d, rec = drift.curve, drift.info
     assert float((d - d.mean(0) - (true - true.mean(0))).abs().max()) < 0.05
-    assert ds.meta['drift'] is rec and rec['method'] == 'DME v2' and rec['parameters']['n_rows'] == n
+    assert rec['method'] == 'DME v2' and rec['parameters']['n_rows'] == n
     assert len(rec['result']['ptp_px']) == 2 and abs(rec['result']['ptp_px'][0] - 1.5) < 0.1
 
 
@@ -126,12 +169,15 @@ def test_fit_needs_a_pixel_size_for_3d():
     assert g.fit(torch.poisson(g.expected(th))).n_dims == 2                          # 2D: no pixel size needed
 
 
-def test_drift_record():
+def test_concatenate_drift_records():
     ds = make()
-    ds.set_drift(torch.zeros(1006, 2), info=dict(method='given'))
-    assert ds.meta['drift'] == dict(method='given')
-    p = ds.copy()
-    assert p.meta['drift']['method'] == 'given'
+    corrected = ds.drift_corrected(Drift([[1., 2.]], {}))
+    joined = corrected[:3] + corrected[3:]
+    assert joined.meta['drift'] == {} and torch.equal(joined.pos, corrected.pos)
+    other = ds.drift_corrected(Drift([[1., 2.]], {'method': 'given'}))
+    for first, second in [(ds, corrected), (corrected, ds), (corrected, other)]:
+        with pytest.raises(ValueError, match='different drift correction records'):
+            Dataset.concatenate([first, second])
 
 
 def test_picasso_3d_z_in_nm(tmp_path):

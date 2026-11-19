@@ -1,5 +1,5 @@
 """Dataset: the localizations of one acquisition, as a dictionary of torch tensors (CPU by default) that all have the
-same first dimension n, plus metadata and an optional drift.
+same first dimension n, plus metadata.
 
     ds = psf.localize('movie.tif', camera)          # PSF.fit / PSF.localize return a Dataset
     ds['pos'], ds.photons, len(ds)                  # fields by key or attribute
@@ -21,9 +21,9 @@ Fields (every field has its own dtype and shape [n, ...]):
   bg        [n] float32      background (photons / px / frame)
   optional: chi2, score, group, cov ([n, 3] = xy, xz, yz covariances, px^2), and any other field (add_fields); all are
   carried through indexing, filters, crop, concatenate, save and load.
-Metadata (dict meta): pixel_nm, image_size [h, w], n_frames (of the movie), method, n_dims, drift (the record of the
-drift estimate), ... (free; JSON-serializable).
-Drift: [F, D] px per movie frame; the drift of a localization is drift[frame + n_frames // 2] (its centre frame).
+Metadata (dict meta): pixel_nm, image_size [h, w], n_frames (of the movie), method, n_dims, drift (the record of an
+applied correction), ... (free; JSON-serializable).
+Drift is a separate result. drift.at(ds.center_frame) samples its curve in px at each localization.
 
 Files: .hdf5 / .h5 (this class's format: docs/DATASET_FORMAT.md), Picasso hdf5 export / import (save_picasso /
 load_picasso), ThunderSTORM csv (save_csv / load_csv: nm, frames from 1, first pixel centre at 0.5 px).
@@ -34,13 +34,14 @@ import importlib
 import json
 import os
 import sys
+import warnings
 import zipfile
 import h5py
 import numpy as np
 import torch
 from scipy.ndimage import gaussian_filter
 
-FORMAT, FORMAT_VERSION = 'torch-psf dataset', 1
+FORMAT, FORMAT_VERSION = 'torch-psf dataset', 2
 CORE = ('id', 'frame', 'n_frames', 'pos', 'crlb', 'photons', 'bg')
 _DTYPES = dict(id=torch.int64, frame=torch.int32, n_frames=torch.int32, pos=torch.float64, crlb=torch.float32,
                photons=torch.float32, bg=torch.float32, chi2=torch.float32, score=torch.float32, group=torch.int64,
@@ -80,10 +81,40 @@ def _plain(o):
     return str(o)
 
 
-class Dataset:
-    """Localizations: fields (dict name -> tensor [n, ...]), meta (dict), drift ([F, D] px or None), drift_applied."""
+class Drift:
+    """Per-frame displacement in pixels and the JSON record describing its estimation."""
 
-    def __init__(self, fields, meta=None, drift=None, drift_applied=False):
+    def __init__(self, curve, info=None):
+        self.curve = _tensor(curve, torch.float64)
+        if self.curve.ndim != 2 or self.curve.numel() == 0:
+            raise ValueError('curve must have shape [frames, axes] with at least one frame and axis')
+        self.info = _plain(info if info is not None else {})
+
+    def at(self, center_frame):
+        """Sample the curve at centre frames, clipping to the first and last movie frame."""
+        frames = torch.as_tensor(center_frame, device=self.curve.device, dtype=torch.long)
+        return self.curve[frames.clamp(0, len(self.curve) - 1)]
+
+    def save(self, path):
+        """Save the curve and JSON info in a standalone NPZ archive."""
+        with open(path, 'wb') as f:
+            np.savez(f, curve=self.curve.cpu().numpy(), info=json.dumps(self.info))
+
+    @classmethod
+    def load(cls, path):
+        """Read a standalone archive or the drift from a version 1 localization HDF5 file."""
+        if h5py.is_hdf5(path):
+            with h5py.File(path, 'r') as f:
+                d = f['drift']
+                return cls(d[...], json.loads(d.attrs.get('info', '{}')))
+        with np.load(path, allow_pickle=False) as f:
+            return cls(f['curve'], json.loads(f['info'].item()))
+
+
+class Dataset:
+    """Localization fields (name -> tensor [n, ...]) and metadata."""
+
+    def __init__(self, fields, meta=None):
         """fields: dict with at least pos [n, D] and frame [n]; id defaults to 0..n-1, n_frames to 1. Known fields are cast
         to their dtypes; arrays (numpy / lists) are converted to tensors."""
         f = {}
@@ -103,8 +134,6 @@ class Dataset:
         object.__setattr__(self, 'fields', f)
         self.meta = dict(meta or {})
         self.meta.setdefault('n_dims', int(f['pos'].shape[1]))
-        self.drift = None if drift is None else _tensor(drift, torch.float64)
-        self.drift_applied = bool(drift_applied)
 
     # ------------------------------------------------------------------ construction
     @classmethod
@@ -133,8 +162,7 @@ class Dataset:
         return list(self.fields)
 
     def __getitem__(self, idx):
-        """ds['name'] -> the field; ds[mask] / ds[slice] / ds[indices] / ds[int] -> a new Dataset with those rows (metadata
-        and drift carried along)."""
+        """ds['name'] returns a field. A mask, slice, indices or integer selects rows and carries the metadata."""
         if isinstance(idx, str):
             return self.fields[idx]
         if isinstance(idx, (int, np.integer)):
@@ -143,7 +171,7 @@ class Dataset:
             idx = _tensor(idx)
             if idx.dtype == torch.bool and len(idx) != len(self):
                 raise IndexError(f'mask of {len(idx)} rows for {len(self)} localizations')
-        return type(self)({k: v[idx] for k, v in self.fields.items()}, dict(self.meta), self.drift, self.drift_applied)
+        return type(self)({k: v[idx] for k, v in self.fields.items()}, dict(self.meta))
 
     def __setitem__(self, name, value):
         """ds['name'] = tensor / array: add or replace a field (first dimension n)."""
@@ -161,13 +189,11 @@ class Dataset:
         return self
 
     def copy(self):
-        return type(self)({k: v.clone() for k, v in self.fields.items()}, json.loads(json.dumps(self.meta, default=_jsonable)),
-                          None if self.drift is None else self.drift.clone(), self.drift_applied)
+        return type(self)({k: v.clone() for k, v in self.fields.items()}, json.loads(json.dumps(self.meta, default=_jsonable)))
 
     def to(self, device):
-        """The fields on another device (a new object; the drift moves along)."""
-        return type(self)({k: v.to(device) for k, v in self.fields.items()}, dict(self.meta),
-                          None if self.drift is None else self.drift.to(device), self.drift_applied)
+        """The fields on another device (a new object)."""
+        return type(self)({k: v.to(device) for k, v in self.fields.items()}, dict(self.meta))
 
     def numpy(self):
         """dict of numpy arrays (views of the CPU tensors)."""
@@ -297,12 +323,14 @@ class Dataset:
     @classmethod
     def concatenate(cls, items, set_group=False):
         """Rows of several datasets: the fields they all have, metadata of the first (n_frames = the largest);
-        set_group: field `group` = index of the source. Ids are kept (they may repeat)."""
+        set_group: field `group` = index of the source. Ids are kept (they may repeat). Drift correction records must match."""
         items = list(items)
         if not items:
             raise ValueError('nothing to concatenate')
-        if len({d.drift_applied for d in items}) > 1:
-            raise ValueError('some datasets are drift corrected and some are not')
+        missing = object()
+        record = items[0].meta.get('drift', missing)
+        if any(d.meta.get('drift', missing) != record for d in items[1:]):
+            raise ValueError('datasets have different drift correction records')
         keys = [k for k in items[0].fields if all(k in d.fields for d in items)]
         F = {k: torch.cat([d.fields[k] for d in items]) for k in keys}
         if set_group:
@@ -310,67 +338,31 @@ class Dataset:
         meta = dict(items[0].meta)
         if any(d.meta.get('n_frames') for d in items):
             meta['n_frames'] = max(d.num_frames for d in items)
-        d0 = items[0].drift
-        same = all((d.drift is None and d0 is None) or (d.drift is not None and d0 is not None
-                                                          and torch.equal(d.drift, d0)) for d in items)
-        return cls(F, meta, d0 if same else None, items[0].drift_applied)
+        return cls(F, meta)
 
     def __add__(self, other):
         return type(self).concatenate([self, other])
 
     # ------------------------------------------------------------------ drift
-    def drift_at(self):
-        """Drift [n, D'] (px) at each localization's centre frame (clipped to the drift's frame range)."""
-        if self.drift is None:
-            raise ValueError('no drift: estimate_drift() or set_drift() first')
-        t = self.center_frame.long().clamp(0, len(self.drift) - 1)
-        return self.drift[t]
-
-    def set_drift(self, drift, info=None):
-        """Store a drift [F, D'] (px per movie frame, D' <= D) without applying it. Returns self."""
-        if self.drift_applied:
-            raise ValueError('positions are drift corrected: undo_drift() first')
-        self.drift = _tensor(drift, torch.float64)
-        if info is not None:
-            self.meta['drift'] = info
-        return self
-
-    def apply_drift(self, drift=None):
-        """pos -= drift[centre frame] (the stored drift, or `drift`). Returns self."""
-        if self.drift_applied:
+    def drift_corrected(self, drift: Drift, *, force=False) -> 'Dataset':
+        """Return corrected positions with drift.info in metadata. Keep the original for raw positions.
+        force=True subtracts again and replaces the previous correction record."""
+        if 'drift' in self.meta and not force:
             raise ValueError('positions are already drift corrected')
-        if drift is not None:
-            self.drift = _tensor(drift, torch.float64)
-        d = self.drift_at()
-        p = self.fields['pos'].clone()
-        p[:, :d.shape[1]] -= d.to(p)
-        self.fields['pos'] = p
-        self.drift_applied = True
-        return self
+        dims = drift.curve.shape[1]
+        if dims > self.n_dims:
+            raise ValueError('drift has more axes than the positions')
+        pos = self.pos.clone()
+        pos[:, :dims] -= drift.at(self.center_frame).to(pos)
+        return type(self)({**self.fields, 'pos': pos}, {**self.meta, 'drift': _plain(drift.info)})
 
-    def undo_drift(self):
-        """Add the applied drift back. Returns self."""
-        if not self.drift_applied:
-            raise ValueError('no drift correction has been applied')
-        d = self.drift_at()
-        p = self.fields['pos'].clone()
-        p[:, :d.shape[1]] += d.to(p)
-        self.fields['pos'] = p
-        self.drift_applied = False
-        return self
-
-    def estimate_drift(self, n_frames=None, rows=None, dims=2, apply=False, device=None, return_info=False):
+    def estimate_drift(self, n_frames=None, rows=None, dims=2, device=None) -> Drift:
         """Drift with DME v2 (package `dme`, github.com/jcnossen/drift-estimation, version >= 2; entry point
         dme.dme_prior.dme_prior_estimate). The package is found as follows: a checkout named by the environment
         variable DME_PATH (the directory that holds dme/) if set, else the installed package
         (pip install git+https://github.com/jcnossen/drift-estimation).
         Rows: `rows` (mask) or all, always only rows with finite positions and 0 < crlb < 1 px. Time = centre frame.
-        dims: 2 (lateral) or 3. Stores the drift [F, dims] px in self.drift and the run record in meta['drift']
-        (method, entry point, version, package path, parameters: n_frames / dims / n_rows / time, the choices DME made
-        (its info dict), and per-axis results: peak-to-peak and rms drift in px); returns the drift (and the record with
-        return_info). apply=True also subtracts it."""
-        if self.drift_applied:
-            raise ValueError('positions are already drift corrected: undo_drift() first')
+        Returns a Drift with the per-frame curve (2 lateral axes or 3 spatial axes) and run record."""
         p = os.environ.get('DME_PATH')
         if p:
             p = os.path.abspath(os.path.expanduser(p))
@@ -396,7 +388,6 @@ class Dataset:
         d, info = dme_prior_estimate(pos[ok], t[ok], crlb[ok], numframes=F, device=default_device(device),
                                      verbose=False, return_info=True)
         d = np.asarray(d)[:F, :dims]
-        self.drift = torch.as_tensor(d, dtype=torch.float64)
         rec = dict(method='DME v2', entry_point='dme.dme_prior.dme_prior_estimate', version=version,
                    package=os.path.dirname(os.path.abspath(dme.__file__)),
                    parameters=dict(n_frames=F, dims=dims, n_rows=int(ok.sum()), time='frame + n_frames // 2',
@@ -404,10 +395,7 @@ class Dataset:
                    dme_info=_plain(info),
                    result=dict(axes='xyz'[:dims], ptp_px=np.ptp(d, 0).round(5).tolist(),
                                rms_px=np.sqrt(((d - d.mean(0)) ** 2).mean(0)).round(5).tolist()))
-        self.meta['drift'] = rec
-        if apply:
-            self.apply_drift()
-        return (self.drift, rec) if return_info else self.drift
+        return Drift(d, rec)
 
     # ------------------------------------------------------------------ render, FRC
     def region(self):
@@ -487,8 +475,7 @@ class Dataset:
     # ------------------------------------------------------------------ summary
     def info(self):
         R = dict(n=len(self), n_dims=self.n_dims, n_frames=self.num_frames, fields=self.keys(),
-                 pixel_nm=self.pixel_nm, drift='none' if self.drift is None else
-                 ('applied' if self.drift_applied else 'stored, not applied'))
+                 pixel_nm=self.pixel_nm, drift='applied' if 'drift' in self.meta else 'none')
         for k in ('image_size', 'method', 'region', 'source'):
             if self.meta.get(k) is not None:
                 R[k] = self.meta[k]
@@ -537,7 +524,7 @@ class Dataset:
 
     def save_hdf5(self, path):
         """docs/DATASET_FORMAT.md: /localizations/<field> (one dataset per field, its dtype and shape), /metadata
-        (attributes; dicts / lists as JSON strings), /drift (optional, attributes applied, info). Returns the path."""
+        (attributes; dicts / lists as JSON strings). Returns the path."""
         tmp = str(path) + '.tmp'
         with h5py.File(tmp, 'w') as f:
             f.attrs['format'] = FORMAT
@@ -552,10 +539,6 @@ class Dataset:
                     m.attrs[k] = v
                 else:
                     m.attrs[k] = 'json:' + json.dumps(v, default=_jsonable)
-            if self.drift is not None:
-                d = f.create_dataset('drift', data=self.drift.cpu().numpy())
-                d.attrs['applied'] = self.drift_applied
-                d.attrs['info'] = json.dumps(self.meta.get('drift', {}), default=_jsonable)
         os.replace(tmp, path)
         return path
 
@@ -572,12 +555,16 @@ class Dataset:
                 elif isinstance(v, np.generic):
                     v = v.item()
                 meta[k] = v
-            drift, applied = None, False
             if 'drift' in f:
-                drift = torch.from_numpy(f['drift'][...])
-                applied = bool(f['drift'].attrs.get('applied', False))
+                attrs = f['drift'].attrs
+                if attrs.get('applied', False):
+                    meta['drift'] = json.loads(attrs.get('info', '{}'))
+                else:
+                    meta.pop('drift', None)
+                    warnings.warn('File holds an unapplied drift curve. Read it with tp.Drift.load(path).',
+                                  UserWarning, stacklevel=2)
         meta.setdefault('source', os.path.abspath(str(path)))
-        return cls(F, meta, drift, applied)
+        return cls(F, meta)
 
     def save_picasso(self, path, psf_sigma_px=1.3):
         """Picasso hdf5 (dataset 'locs': frame u4, x, y, photons, sx, sy (PSF width: field psf_sx / psf_sy, else

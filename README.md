@@ -13,7 +13,7 @@ a cubic spline.
   spline evaluated with one strided, grouped `conv2d` per batch of spots), `GaussianPSF` (2D),
   `AstigmaticGaussianPSF` (3D calibration curves) and `FourPiPSF` / `FourPiSplinePSF` (two-objective interference);
 - **fitting**: Poisson maximum likelihood (Levenberg-Marquardt, optional sCMOS read noise) and the Cramer-Rao bound;
-- **pipeline**: spot detection on movies, ROI extraction, and the localizations as a `Dataset` (filters, drift, rendering,
+- **pipeline**: spot detection on movies, ROI extraction, and the localizations as a `Dataset` (filters, DME v2 drift estimation, rendering,
   FRC, HDF5 / Picasso / ThunderSTORM files);
 - **PSF estimation**: from bead z-stacks and *in situ* from the blinking emitters themselves. The in-situ fit evaluates
   every emitter on the spline and passes the likelihood gradient from the spline knots to the pupil parameters with one
@@ -104,6 +104,8 @@ python -m torch_psf insitu movie.tif --psf beads.json --focus-um 0.45 --isolatio
 returns a `Dataset`: fields `pos` [n, 3] and `crlb` [n, 3] in px (z in px of the lateral pixel size), `frame`,
 `photons`, `bg`, `chi2`, `loglik`, `at_limit`, ... with filters, drift correction, rendering, FRC and files
 ([docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)); `psf.fit(rois)` does the same for ROIs you cut yourself.
+Estimate a per-frame curve with `drift = locs.estimate_drift()`. Use `corrected = locs.drift_corrected(drift)`
+to keep both sets of positions, and `drift.save(path)` to save the curve separately.
 
 ```python
 locs = tp.PSF.load('insitu.json').to_spline(13).localize('movie.tif', camera)
