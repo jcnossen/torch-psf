@@ -101,13 +101,13 @@ def check_spectral_oversample(fc, os_):
                          f"{spectral_min_oversample(fc)}")
 
 
-def pixel_box_spectral(I, os_, pad, R, fc, cov=None):
+def pixel_box_spectral(I, os_, pad, R, fc, cov=None, *, integrate=True):
     """Exact pixel means of a band-limited density from its point samples I [B, n, n] on the uniform grid with os_
     samples per px, n = (R + 2 pad) os_ (sample j at (j - (n - 1) / 2) / os_ px from the ROI centre): FFT, times the
     pixel-box transfer function sinc(fx) sinc(fy), the optional Gaussian blur exp(-2 pi^2 f^T C f) (cov = [sxx, syy, sxy]
     px^2, [3] or [B, 3]; gain capped as gauss_blur_os) and a raised-cosine taper from the band limit fc (cycles / px)
     to the Nyquist frequency os_ / 2, shifted onto the pixel centres; inverse FFT, every os_-th sample, cropped by pad
-    -> [B, R, R] (the density averaged over each pixel). ValueError when fc >= os_ / 2 (the samples alias)."""
+    -> [B, R, R] (pixel means, or centre densities when integrate=False). ValueError when fc >= os_ / 2."""
     check_spectral_oversample(fc, os_)
     n = I.shape[-1]
     f = torch.fft.fftfreq(n, d=1.0 / os_, device=I.device)            # cycles / px
@@ -120,8 +120,8 @@ def pixel_box_spectral(I, os_, pad, R, fc, cov=None):
         return 0.5 * (1 + torch.cos(math.pi * a))
 
     d = (os_ - 1) / (2 * os_)                                          # sample p os_ -> pixel centre p: shift by d px
-    Ty = taper(f) * torch.sinc(f) * torch.exp(2j * math.pi * f * d)
-    Tx = taper(fr) * torch.sinc(fr) * torch.exp(2j * math.pi * fr * d)
+    Ty = taper(f) * (torch.sinc(f) if integrate else 1) * torch.exp(2j * math.pi * f * d)
+    Tx = taper(fr) * (torch.sinc(fr) if integrate else 1) * torch.exp(2j * math.pi * fr * d)
     H = Ty[:, None] * Tx[None, :]
     if cov is not None:
         cov = torch.as_tensor(cov, device=I.device, dtype=torch.float32).reshape(-1, 3)

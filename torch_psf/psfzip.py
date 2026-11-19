@@ -260,7 +260,9 @@ def legacy(meta, arrays, channel=None):
     types = {c['type'] for c in chans}
     src = meta.get('source')
     if types == {'phase_spline'}:
-        g = dict(chans[0]['model']['spline'], n_channels=len(chans), tau=[c['model'].get('tau') for c in chans])
+        model = chans[0]['model']
+        grid = model['integrated_spline'] if 'integrated_spline' in model else model['spline']
+        g = dict(grid, n_channels=len(chans), tau=[c['model'].get('tau') for c in chans])
         if any(t is None for t in g['tau']):
             g['tau'] = None
         if all(c.get('arrays') for c in chans):
@@ -307,9 +309,10 @@ def _rebuild_knots(meta, g, device=None):
     if src.get('type') != 'fourpi' or not (src.get('model') or {}).get('fourpi'):
         raise ValueError('phase_spline channels without knots need the FourPiPSF source to rebuild them')
     reb = meta['channels'][0].get('rebuild') or {}
-    src_psf = FourPiPSF.from_state(src['model']['fourpi'], device=device or reb.get('device'))
+    src_psf = FourPiPSF._from_file(src['model'], {}, device=device or reb.get('device'))
     sp = src_psf.to_spline(roisize=g['roisize'], z_range=tuple(g['z_range']), oversample=g['oversample'],
-                           dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'])
+                           dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
+                           kind='integrated' if 'basis' in g else 'cubic')
     return sp.knots.detach().cpu().numpy().astype(np.float32)
 
 
@@ -467,7 +470,9 @@ def _zip_version(meta):
         if not b:
             continue
         m = b.get('model') or {}
-        if b.get('type') == 'integrated_spline' or m.get('pixel_integration', 'box') not in (None, 'box'):
+        if (m.get('fourpi') or {}).get('meta', {}).get('pixel_integration', 'box') != 'box':
+            return ZIP_VERSION_NEW
+        if 'integrated_spline' in m or m.get('pixel_integration', 'box') not in (None, 'box'):
             return ZIP_VERSION_NEW
     return ZIP_VERSION
 
@@ -636,7 +641,8 @@ def _channel_blocks(psf, source, names, spline_knots='float32'):
         chans = []
         for c in range(psf.n_channels):
             g = dict(psf.luts[0][c].to_dict(), pixel_um=psf.pixel_um)
-            ch = dict(name=names(c), type='phase_spline', model=_plain(dict(spline=g, tau=float(psf.tau[c].detach()))),
+            grid_key = 'integrated_spline' if 'basis' in g else 'spline'
+            ch = dict(name=names(c), type='phase_spline', model=_plain({grid_key: g, 'tau': float(psf.tau[c].detach())}),
                       phase_param='phi')
             if spline_knots == 'rebuild':
                 ch['rebuild'] = dict(method='FourPiPSF.to_spline', note='knots not stored: tabulate the source on '
