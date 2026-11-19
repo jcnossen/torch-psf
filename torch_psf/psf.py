@@ -259,7 +259,8 @@ class PSF:
     def _has_angle_terms(psf):
         """True if the model has per-pattern-angle terms that PSF.load(angle=a) selects: VectorialPSF psf_dipole_M_angle /
         psf_blur_angle_px2, IntegratedSplinePSF coefs_angle."""
-        return any(getattr(psf, k, None) is not None for k in ('dipM_angle', 'blur_angle', 'coefs_angle'))
+        return bool(getattr(psf, 'n_angles', 0)) or any(getattr(psf, k, None) is not None
+                                                        for k in ('dipM_angle', 'blur_angle', 'coefs_angle'))
 
     @staticmethod
     def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):

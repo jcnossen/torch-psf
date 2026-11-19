@@ -1,4 +1,4 @@
-"""psf.zip: the shared PSF export (format 'torch-psf', version 0.2.0; the specification is docs/PSF_FORMAT.md).
+"""psf.zip: the shared PSF export (format 'torch-psf', versions 0.2.x to 0.4.x; see docs/PSF_FORMAT.md).
 
 One zip holds every channel of a setup:
     psf.json         format / version, optics, camera, provenance, emitter_params, channels (model, arrays, mapping to
@@ -27,11 +27,9 @@ from torch_psf.psf import PSF, FORMAT
 from torch_psf.dataset import _plain
 
 ZIP_VERSION = '0.2.0'
-# 0.3.0: written only for files that a 0.2 reader would render wrongly without noticing (it ignores unknown keys): a
-# non-box pixel integration, an 'integrated_spline' grid or dipole component tables (docs/PSF_FORMAT.md, Versioning);
-# every 0.2 / 0.3 reader checks the minor version and refuses a newer one. Other files stay 0.2.0, byte for byte.
-ZIP_VERSION_NEW = '0.3.0'
-READ_VERSIONS = ((0, 2), (0, 3))
+ZIP_VERSION_3 = '0.3.0'
+ZIP_VERSION_4 = '0.4.0'
+READ_VERSIONS = ((0, 2), (0, 3), (0, 4))
 JSON_NAME, ZSTACK_NAME, PREVIEW_NAME, REPORT_NAME = 'psf.json', 'zstack.tif', 'preview.png', 'fit_report.pdf'
 COUPLED = ('fourpi', 'fourpi_spline')
 UNITS = dict(x='px', y='px', z='um', I='photons', bg='photons / px', phi='rad')
@@ -230,7 +228,8 @@ def _check_version(meta):
     v = str(meta.get('version', '0'))
     major_minor = tuple(int(p) for p in v.split('.')[:2])
     if major_minor not in READ_VERSIONS:
-        raise ValueError(f'psf.zip version {v}: this reader supports 0.2.x and 0.3.x')
+        supported = ', '.join(f'{major}.{minor}.x' for major, minor in READ_VERSIONS)
+        raise ValueError(f'psf.zip version {v}: this reader supports {supported}')
 
 
 def read_zip(path):
@@ -469,20 +468,23 @@ class PSFZip:
 
 # ====================================================================================================== rendering
 def _zip_version(meta):
-    """ZIP_VERSION_NEW when a model block of the file (channel, its source, the top-level source) is an
-    integrated_spline, stores dipole components or has pixel_integration other than 'box', else ZIP_VERSION"""
+    """Smallest minor version that can interpret every channel and source block."""
+    version = ZIP_VERSION
     blocks = [meta.get('source')] + [b for c in meta['channels'] for b in (c, c.get('source'))]
     for b in blocks:
         if not b:
             continue
         m = b.get('model') or {}
-        if m.get('spline', {}).get('dipole_components'):
-            return ZIP_VERSION_NEW
+        integrated = 'integrated_spline' in m
+        if any(m.get(key, {}).get('dipole_components') for key in ('spline', 'integrated_spline')):
+            return ZIP_VERSION_4
+        if integrated and (b.get('type') == 'phase_spline' or (b.get('field') or {}).get('type') == 'zernike_poly'):
+            return ZIP_VERSION_4
         if (m.get('fourpi') or {}).get('meta', {}).get('pixel_integration', 'box') != 'box':
-            return ZIP_VERSION_NEW
-        if 'integrated_spline' in m or m.get('pixel_integration', 'box') not in (None, 'box'):
-            return ZIP_VERSION_NEW
-    return ZIP_VERSION
+            return ZIP_VERSION_4
+        if integrated or m.get('pixel_integration', 'box') not in (None, 'box'):
+            version = ZIP_VERSION_3
+    return version
 
 
 def _channel_models(psf):

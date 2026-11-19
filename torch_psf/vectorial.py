@@ -419,14 +419,15 @@ class VectorialPSF(torch.nn.Module, PSF):
         spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
                                  xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
         big = self.resized(spl.Pl) if self.roisize != spl.Pl or dipole_components else self
-        spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
         if dipole_components:
-            from torch_psf._dipole import unit_tensors
+            from torch_psf._dipole import default_weights, unit_tensors
             tables = []
             for M in unit_tensors(big.dev):
                 big.dipM = M
                 tables.append(spl.knots_from_vectorial(big, pos_fn, chunk=chunk))
-            spl._set_dipole_knots(torch.stack(tables))
+            spl._set_dipole_knots(torch.stack(tables), default_weights(self.dipM, self.dipw))
+        else:
+            spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
         return spl
 
     def _apply(self, fn, *args, **kwargs):

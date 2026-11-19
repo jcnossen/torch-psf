@@ -41,6 +41,7 @@ import numpy as np
 import torch
 from torch_psf.psf import PSF
 from torch_psf.dataset import Dataset
+from torch_psf.spline import spline_kind
 
 
 def feature_powers(order):
@@ -424,11 +425,7 @@ class TiledSplinePSF(PSF):
 
     def __init__(self, field_psf, tile=128, extent=None, roisize=None, z_range=None, lazy=True, kind=None, **grid):
         self.source = field_psf
-        if kind is None:
-            kind = 'integrated' if field_psf.base.pixel_integration != 'box' else 'cubic'
-        if kind not in ('cubic', 'integrated'):
-            raise ValueError("kind must be 'cubic' or 'integrated'")
-        self.kind = kind
+        self.kind = spline_kind(kind, field_psf.base.pixel_integration)
         f = field_psf.field
         if extent is None:
             cx, cy, sx, sy = f.norm

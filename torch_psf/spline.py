@@ -30,6 +30,14 @@ from torch_psf.psf import PSF
 from torch_psf._dipole import DipoleSpline
 
 
+def spline_kind(kind, pixel_integration):
+    if kind is None:
+        return 'cubic' if pixel_integration == 'box' else 'integrated'
+    if kind not in ('cubic', 'integrated'):
+        raise ValueError("kind must be 'cubic' or 'integrated'")
+    return kind
+
+
 def geometry_matrix(device, tau: float = 0.5, dtype=torch.float32):
     """Catmull-Rom basis: per-axis weights w = [1, t, t^2, t^3] @ G."""
     return torch.tensor([
@@ -129,7 +137,7 @@ class CubicSplinePSF(DipoleSpline, PSF):
 
     def __repr__(self):
         return (f'CubicSplinePSF(roisize={self.roisize}, z_range=({self.zlo}, {self.zhi}), oversample={self.S}, '
-                f'dz_um={self.hz}, zpad={self.zpad}, xy_limit={self.xmax}, knots {tuple(self.knots.shape)})')
+                f'dz_um={self.hz}, zpad={self.zpad}, xy_limit={self.xmax}, knots {(self.nz, self.nv, self.nu)})')
 
     # ------------------------------------------------------------------ evaluation
     def _axis(self, t, deriv):
@@ -182,10 +190,11 @@ class CubicSplinePSF(DipoleSpline, PSF):
         if dtype is not None:
             self.dtype = dtype
             self.G = self.G.to(dtype)
-        self.knots = self.knots.to(dev, self.dtype)
+        if self._knots is not None:
+            self.knots = self._knots.to(dev, self.dtype)
         self.pat, self.G, self.e = self.pat.to(dev), self.G.to(dev), self.e.to(dev)
-        self.dev = self.knots.device
-        self._set_dipole_knots(self.dipole_knots)
+        self.dev = self.pat.device
+        self._set_dipole_knots(self.dipole_knots, self.component_weights)
         return self
 
     def resized(self, roisize, device=None):
@@ -193,10 +202,11 @@ class CubicSplinePSF(DipoleSpline, PSF):
         independently of the ROI size; a larger ROI than the knots cover reduces the offset limit (xy_limit), a
         smaller one keeps it."""
         s = CubicSplinePSF(roisize, self.z_range, oversample=self.S, dz_um=self.hz, zpad=self.zpad, xy_limit=self.xmax,
-                           device=self.dev if device is None else device, dtype=self.dtype, knots=self.knots,
+                           device=self.dev if device is None else device, dtype=self.dtype,
+                           knots=self._knots if self._knots is not None else self.dipole_knots[0],
                            knot_u0_px=self.u0, knot_z0_um=self.z0, pixel_um=self.pixel_um)
         s.provenance = self.provenance
-        s._set_dipole_knots(self.dipole_knots)
+        s._set_dipole_knots(self.dipole_knots, self.component_weights)
         return s
 
     def to_spline(self, roisize=None, z_range=None, **kw):
@@ -299,7 +309,10 @@ class CubicSplinePSF(DipoleSpline, PSF):
         if source is not None:
             d, arrays = source._file_dict()
         d['spline'] = self.to_dict()
-        arrays['knots'] = self.knots.detach().cpu().numpy()
+        if self.component_weights is None:
+            arrays['knots'] = self.knots.detach().cpu().numpy()
+        else:
+            d['spline']['default_weights'] = self.component_weights.tolist()
         if self.dipole_knots is not None:
             arrays['dipole_knots'] = self.dipole_knots.detach().cpu().numpy()
         return d, arrays
@@ -309,10 +322,11 @@ class CubicSplinePSF(DipoleSpline, PSF):
         g = d['spline']
         px = g.get('pixel_um') or (d['optics'].get('pixel_um') if 'optics' in d else None)
         model = cls(g['roisize'], tuple(g['z_range']), oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'],
-                   xy_limit=g['xy_limit'], device=device, knots=torch.as_tensor(arrays['knots']),
+                   xy_limit=g['xy_limit'], device=device,
+                   knots=arrays['dipole_knots'][0] if 'default_weights' in g else arrays['knots'],
                    knot_u0_px=g.get('u0_px'), knot_z0_um=g.get('z0_um'), pixel_um=px)
         if g.get('dipole_components'):
-            model._set_dipole_knots(arrays['dipole_knots'])
+            model._set_dipole_knots(arrays['dipole_knots'], g.get('default_weights'))
         return model
 
     @staticmethod

@@ -25,15 +25,14 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
 
 ## Versioning
 
-- `format` is `"torch-psf"`; `version` is `"0.2.0"` or `"0.3.0"` for the zip. A reader accepts the minor versions it
-  knows (this one: every `0.2.x` and `0.3.x`; unknown keys are ignored) and refuses others.
-- `0.3.0` = `0.2.0` plus things a `0.2` reader would read wrongly without noticing (it ignores unknown keys): a model
-  with a `pixel_integration` other than `box` (a 0.2 reader renders `box`, up to ~0.6 % of the peak off), the
-  `integrated_spline` model type, and spline grids with `dipole_components: true`. A writer writes `0.3.0` exactly
-  when a model block of the file (a channel, its `source`, the top-level `source`) is one of these, and `0.2.0`
-  otherwise, so every file a 0.2 reader can read correctly stays a 0.2.0 file (byte for byte as before), and the
-  others are refused by 0.2 readers. The current Python and web readers accept both minor versions (the web app
-  refuses dipole-component splines with a named error).
+- Readers check the minor version before interpreting any model. Within a supported version they can ignore
+  unknown metadata. A feature that would change the rendered image or how a reader rebuilds a model requires
+  a newer minor version. For example, a 0.3 reader would silently render a spectral 4Pi source with box sampling.
+- Writers choose the highest requirement across every channel, channel source and top-level source.
+  Use **0.4.0** for a non-box 4Pi source, a phase spline with an integrated grid, dipole component tables on
+  any spline grid, or integrated field tiles. Use **0.3.0** for other non-box vectorial models or independent
+  integrated splines. All remaining files use **0.2.0**.
+- Python reads 0.2.x, 0.3.x and 0.4.x. The web reader accepts 0.2.x and 0.3.x and refuses 0.4.x at the version check.
 - The 0.1.0 files (one JSON with `type` at the top level plus a sidecar `.npz` named by `arrays`) are still written by
   `PSF.save` and read by `PSF.load`; so are plain SIMCODE calibration JSONs (no `format`, the vectorial keys at the top
   level). A 0.2.0 channel `model` block holds exactly the keys of the 0.1.0 JSON of that model type, so a 0.1.0 file
@@ -55,7 +54,7 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
 | key | type | required | meaning |
 |---|---|---|---|
 | `format` | str | yes | `"torch-psf"` |
-| `version` | str | yes | `"0.2.0"`, or `"0.3.0"` for the files that need it (Versioning) |
+| `version` | str | yes | `"0.2.0"`, `"0.3.0"` or `"0.4.0"` (Versioning) |
 | `psf_type` | str | yes | reader hint: the torch-psf type of the whole file: a model type (single channel or coupled) or `"channels"` (independent channels) |
 | `n_dims` | int | yes | 3, or 2 for models without a z axis (z ignored) |
 | `emitter_params` | [str] | yes | the parameters of one emitter, in order: `["x","y","z","I","bg"]`, 2D `["x","y","I","bg"]`, 4Pi `["x","y","z","I","bg","phi"]` |
@@ -104,7 +103,8 @@ Channel entry:
 | `intensity_ratio` | float | no | expected photons in this channel = `intensity_ratio` x `I` (default 1). For coupled models 1: the channel weights (4Pi `tau`) are inside the model |
 | `field` | dict | no | field dependence of this channel's PSF (below) |
 
-Any other key is kept (written as given, ignored by readers that do not know it).
+Writers preserve extra channel metadata. A reader may ignore unknown keys after checking that it supports the
+file's minor version. New keys that affect rendering or reconstruction follow the versioning rule above.
 
 ### Model types (`channels[c].model`, `source.model`)
 
@@ -125,7 +125,7 @@ float32 factor; pupil grid: sample i at (i - (npupil - 1) / 2) / (npupil / 2) of
 
 **spline** (`CubicSplinePSF`): `spline` {roisize, z_range [2] um, oversample S (knots per px), dz_um, zpad, xy_limit
 (px), c (stored half width, px), z0_um (z of knot plane 0), nz, u0_px (lateral offset of knot 0 from the PSF centre,
-px), pixel_um}. Array `knots` [nz, n, n] float32 (n = (2c + 1) S), Catmull-Rom knots of the pixel-integrated PSF
+px), pixel_um}. A scalar spline stores `knots` [nz, n, n] float32 (n = (2c + 1) S), Catmull-Rom knots of the pixel-integrated PSF
 g(u, v, z), knot (k, i, j) at z = z0_um + k dz_um, v = u0_px + i / S, u = u0_px + j / S. z: the coordinate the spline
 was tabulated in (emitter height for in-situ models; -focus for bead stacks).
 
@@ -135,8 +135,9 @@ its coefficients as `spline` knots. `integrated_spline` {basis `"cubic_bspline"`
 z_range [2] um (the heights it is accurate on), oversample S (knots per px), dz_um, zpad (knot planes outside z_range),
 xy_limit (px, at roisize), c (stored half width, px), z0_um, nz, u0_px, pixel_um, n_angles (0 = one model)}, the grid
 of `spline` (knot (k, i, j) at z = z0_um + k dz_um, v = u0_px + i / S, u = u0_px + j / S; u, v = offset of a point
-from the emitter, px). Arrays: `coefs` [nz, n, n] float32 (n = (2c + 1) S), or with per-pattern-angle terms
-`coefs_angle` [n_angles, nz, n, n] float32 (exactly one of the two). The coefficients c_kij are those of a
+from the emitter, px). A scalar model stores `coefs` [nz, n, n] float32 (n = (2c + 1) S), or with per-pattern-angle terms
+`coefs_angle` [n_angles, nz, n, n] float32. The [spline dipole components](#spline-dipole-components-040)
+section describes the component arrays for both spline kinds. The coefficients c_kij are those of a
 tensor-product cubic B-spline (kernel B(t) = 2/3 - t^2 + |t|^3 / 2 for |t| <= 1, (2 - |t|)^3 / 6 for 1 < |t| < 2,
 0 beyond) that interpolates the point density of the PSF (fraction of the photons per px^2) at the knots:
 f(u, v, z) = sum_kij c_kij B((z - z_k) / dz_um) B(S (v - v_i)) B(S (u - u_j)). The value of a pixel is the exact
@@ -166,7 +167,7 @@ round trip bit-exact)}; see `torch_psf/fourpi.py` for the physics. No arrays.
 
 The optional `fourpi.meta.pixel_integration` is `spectral` for exact integration of each coherent channel intensity.
 The same Fourier filter applies the Gaussian blur and pixel aperture. An absent field selects the legacy midpoint
-average (`box`). A spectral 4Pi source requires zip version 0.3.0.
+average (`box`). A spectral 4Pi source requires zip version 0.4.0.
 
 **source_output**: channel `index` of the top-level source model. `model` is informative only: {pol, phi_rad, tau} of
 that output.
@@ -183,17 +184,17 @@ stored grid (a 4Pi spline is ~100 MB of knots otherwise). The channel image is
 with phi the emitter parameter named by `phase_param` (the channel phase phi_c is inside cr / ci). All phase_spline
 channels of a file share the grid.
 
-In version 0.3.0, a `phase_spline` channel can use `model.integrated_spline` as its grid. It has the same
+In version 0.4.0, a `phase_spline` channel can use `model.integrated_spline` as its grid. It has the same
 `basis`, `value`, knot origins and spacing as an independent integrated spline. Each of `inc`, `cr` and `ci`
 then holds prefiltered coefficients of the blurred point density. Integrate each component over the pixel before
 combining them with the phase formula above. The grid selects the component representation when rebuilding.
 
 A tiled field spline stores the reference-point model as a channel, its vectorial source, and the
-`zernike_poly` field block. For an integrated tile grid the channel type is `integrated_spline` (version 0.3.0).
+`zernike_poly` field block. For an integrated tile grid the channel type is `integrated_spline` (version 0.4.0).
 Each tile uses the stored reference grid and basis with the Zernikes evaluated at its centre. Tile size and extent
 use the existing `provenance.field_tiles` metadata.
 
-### Spline dipole components (0.3.0)
+### Spline dipole components (0.4.0)
 
 A spline grid may declare `dipole_components: true`. The six component images are ordered
 `xx, yy, zz, xy, xz, yz`. For a symmetric emission-dipole tensor M, multiply each image by the corresponding
@@ -203,14 +204,17 @@ the image is the mean of the first three components.
 
 | Channel and grid | Additional or replacement arrays | Shape and meaning |
 |---|---|---|
-| `spline` | `dipole_knots` alongside `knots` | `[6,nz,n,n]` Catmull–Rom tables of pixel values |
-| `integrated_spline` | `dipole_coefs` alongside `coefs`, or `dipole_coefs_angle` alongside `coefs_angle` | `[6,nz,n,n]` or `[A,6,nz,n,n]` density coefficients, integrated over the pixel |
+| `spline` | `dipole_knots` | `[6,nz,n,n]` Catmull–Rom tables of pixel values |
+| `integrated_spline` | `dipole_coefs` or `dipole_coefs_angle` | `[6,nz,n,n]` or `[A,6,nz,n,n]` density coefficients, integrated over the pixel |
 | `phase_spline` with either grid | `dipole_inc`, `dipole_cr`, `dipole_ci` replace the three scalar phase arrays | Each is `[6,nz,n,n]`. Apply the same phase formula to each dipole component. |
 
-The ordinary independent-channel table preserves the source's default dipole response. A phase grid can store
+For an independent channel, the grid's `default_weights` holds the six tensor entries in basis order
+(one row per angle for angle tables). Their weighted sum gives the default table. Average angle-specific
+default responses after weighting. If the weights are absent, use the stored `knots`, `coefs` or
+`coefs_angle` default from the file. A phase grid can store
 `default_dipM` (a 3 × 3 tensor) for this purpose, with isotropic emission as the default when absent. Phase files
 using `rebuild` regenerate all six tables per phase component. The standalone `fourpi_spline` JSON/NPZ form
-stacks the phase arrays as `dipole_knots[3,C,6,nz,n,n]`. A zip with dipole components uses version 0.3.0,
+stacks the phase arrays as `dipole_knots[3,C,6,nz,n,n]`. A zip with dipole components uses version 0.4.0,
 including cubic grids built from a box-integrated source.
 
 ### Mapping (`channels[c].mapping`)

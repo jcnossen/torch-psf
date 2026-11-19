@@ -35,7 +35,7 @@ import numpy as np
 import torch
 from torch_psf.optics import resolve_device
 from torch_psf.psf import PSF
-from torch_psf._dipole import DipoleSpline, unit_tensors
+from torch_psf._dipole import DipoleSpline, combine_tables, default_weights, unit_tensors
 from torch_psf.spline import CubicSplinePSF
 from torch_psf.vectorial import dipole_tensor, spectral_min_oversample, check_spectral_oversample, _angle_index
 
@@ -392,14 +392,14 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
 
     def __init__(self, roisize, coefs, oversample, dz_um, z_range, zpad, knot_u0_px, knot_z0_um, pixel_um=None,
                  coefs_angle=None, angle=None, xy_limit=None, device=None, chunk_elems=2 ** 26,
-                 dipole_coefs=None, dipole_coefs_angle=None):
+                 dipole_coefs=None, dipole_coefs_angle=None, dtype=torch.float32):
         dev = resolve_device(device)
-        ca = None if coefs_angle is None else torch.as_tensor(coefs_angle).to(dev, torch.float32)
+        ca = None if coefs_angle is None else torch.as_tensor(coefs_angle).to(dev, dtype)
         if coefs is None:
             if ca is None:
                 raise ValueError('IntegratedSplinePSF: coefs or coefs_angle needed')
             coefs = ca.mean(0)
-        coefs = torch.as_tensor(coefs).to(dev, torch.float32).contiguous()
+        coefs = torch.as_tensor(coefs).to(dev, dtype).contiguous()
         if ca is not None:
             ca = ca.contiguous()
         if ca is not None and tuple(ca.shape[1:]) != tuple(coefs.shape):
@@ -408,11 +408,11 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
             angle = None                    # as VectorialPSF: a model without angle terms is the same for every angle
         if angle is not None:
             angle = _angle_index(angle, len(ca))      # refuses fractional / bool / out-of-range angles
-        self.coefs, self.coefs_angle, self.angle = coefs, ca, angle
+        self._fixed_coefs, self._fixed_coefs_angle, self.angle = coefs, ca, angle
         self.zpad, self.chunk_elems = int(zpad), int(chunk_elems)
         active = coefs if angle is None else ca[int(angle)]
         geo = CubicSplinePSF(roisize, z_range, oversample=oversample, dz_um=dz_um, zpad=zpad, xy_limit=1e9, device=dev,
-                             knots=active, knot_u0_px=knot_u0_px, knot_z0_um=knot_z0_um, pixel_um=pixel_um)
+                             knots=active, knot_u0_px=knot_u0_px, knot_z0_um=knot_z0_um, pixel_um=pixel_um, dtype=dtype)
         super().__init__(geo, None, kernel='bspline', integrate=True, backend='sep', coefs=active)
         self.dipole_coefs_angle = None
         if dipole_coefs_angle is not None:
@@ -420,12 +420,59 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
             if ca is None or tables.shape != (len(ca), 6, *active.shape):
                 raise ValueError('dipole_coefs_angle must contain six coefficient tables per angle')
             self.dipole_coefs_angle = tables
-            dipole_coefs = tables.mean(0) if angle is None else tables[angle]
+            dipole_coefs = None if angle is None else tables[angle]
         self._set_dipole_knots(dipole_coefs)
         if xy_limit is not None:
             self.xmax = min(self.xmax, float(xy_limit))
 
     # ------------------------------------------------------------------ construction
+    @classmethod
+    def _from_components(cls, tables, weights, angle=None, **geometry):
+        """One or A sets of six density volumes. Their first volume also supplies the grid geometry."""
+        tables = torch.as_tensor(tables, device=geometry['device'], dtype=geometry.get('dtype', torch.float32))
+        weights = torch.as_tensor(weights, device=tables.device, dtype=tables.dtype)
+        if tables.ndim not in (4, 5) or tables.shape[-4] != 6 or weights.shape != tables.shape[:-3]:
+            raise ValueError('expected six dipole coefficients and weights per angle')
+        per_angle = tables.ndim == 5
+        angle = None if angle is None or not per_angle else _angle_index(angle, len(tables))
+        first = tables[0, 0] if per_angle else tables[0]
+        model = cls(coefs=first, **geometry)
+        model.angle = angle
+        model._fixed_coefs = model._knots = None
+        model.dipole_coefs_angle = tables if per_angle else None
+        model._dipole_knots = None if per_angle else tables
+        model.component_weights = weights
+        return model
+
+    @property
+    def dipole_knots(self):
+        if self._dipole_knots is None and self.dipole_coefs_angle is not None:
+            return self.dipole_coefs_angle.mean(0) if self.angle is None else self.dipole_coefs_angle[self.angle]
+        return self._dipole_knots
+
+    @dipole_knots.setter
+    def dipole_knots(self, value):
+        self._dipole_knots = value
+
+    @property
+    def coefs_angle(self):
+        if self.component_weights is not None and self.dipole_coefs_angle is not None:
+            return combine_tables(self.component_weights, self.dipole_coefs_angle)
+        return self._fixed_coefs_angle
+
+    @property
+    def coefs(self):
+        if self._fixed_coefs is not None:
+            return self._fixed_coefs
+        if self.dipole_coefs_angle is not None:
+            return self.coefs_angle.mean(0)
+        return combine_tables(self.component_weights, self.dipole_knots)
+
+    def _default_knots(self):
+        if self.angle is None:
+            return self.coefs
+        return combine_tables(self.component_weights[self.angle], self.dipole_knots)
+
     @classmethod
     def from_vectorial(cls, vec, z_range, roisize=None, xy_limit=2.0, oversample=4, dz_um=0.01, zpad=6, chunk=4,
                        dipole_components=False):
@@ -447,22 +494,32 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
             K, bases = [], []
             for v in vecs:
                 big = v.resized(geo.Pl)
-                K.append(bspline_prefilter(point_knots(big, geo, v.focus_um, chunk=chunk)))
                 if dipole_components:
                     bases.append(torch.stack([bspline_prefilter(point_knots(big, geo, v.focus_um, dipM=M, chunk=chunk))
                                               for M in unit_tensors(big.dev)]))
+                else:
+                    K.append(bspline_prefilter(point_knots(big, geo, v.focus_um, chunk=chunk)))
+        if dipole_components:
+            weights = [default_weights(v.dipM, v.dipw).to(v0.dev) for v in vecs]
+            return cls._from_components(torch.stack(bases) if len(bases) > 1 else bases[0],
+                                        torch.stack(weights) if len(bases) > 1 else weights[0],
+                                        roisize=P, oversample=oversample, dz_um=dz_um, z_range=z_range, zpad=zpad,
+                                        knot_u0_px=geo.u0, knot_z0_um=geo.z0, pixel_um=v0.pixel_um,
+                                        xy_limit=xy_limit, device=v0.dev)
         multi = isinstance(vec, (list, tuple)) and len(K) > 1
         return cls(P, None if multi else K[0], oversample, dz_um, z_range, zpad, geo.u0, geo.z0, pixel_um=v0.pixel_um,
-                   coefs_angle=torch.stack(K) if multi else None, xy_limit=xy_limit, device=v0.dev,
-                   dipole_coefs=bases[0] if bases and not multi else None,
-                   dipole_coefs_angle=torch.stack(bases) if bases and multi else None)
+                   coefs_angle=torch.stack(K) if multi else None, xy_limit=xy_limit, device=v0.dev)
 
-    def _like(self, roisize=None, angle='same', xy_limit=None, device=None):
-        return IntegratedSplinePSF(self.roisize if roisize is None else roisize, self.coefs, self.S, self.hz, self.z_range,
-                                   self.zpad, self.geo.u0, self.z0, pixel_um=self.pixel_um, coefs_angle=self.coefs_angle,
-                                   angle=self.angle if angle == 'same' else angle, xy_limit=xy_limit,
-                                   device=self.dev if device is None else device, chunk_elems=self.chunk_elems,
-                                   dipole_coefs=self.dipole_knots, dipole_coefs_angle=self.dipole_coefs_angle)
+    def _like(self, roisize=None, angle='same', xy_limit=None, device=None, dtype=None):
+        geo = dict(roisize=self.roisize if roisize is None else roisize, oversample=self.S, dz_um=self.hz,
+                   z_range=self.z_range, zpad=self.zpad, knot_u0_px=self.geo.u0, knot_z0_um=self.z0, pixel_um=self.pixel_um,
+                   angle=self.angle if angle == 'same' else angle, xy_limit=xy_limit, chunk_elems=self.chunk_elems,
+                   device=self.dev if device is None else device, dtype=self.dtype if dtype is None else dtype)
+        if self.component_weights is not None:
+            tables = self.dipole_coefs_angle if self.dipole_coefs_angle is not None else self.dipole_knots
+            return self._from_components(tables, self.component_weights, **geo)
+        return IntegratedSplinePSF(coefs=self.coefs, coefs_angle=self.coefs_angle, dipole_coefs=self.dipole_knots,
+                                   dipole_coefs_angle=self.dipole_coefs_angle, **geo)
 
     def resized(self, roisize, xy_limit=None):
         """The same spline (shared coefficients) for roisize x roisize ROIs; offset limit = what the coefficients
@@ -479,10 +536,12 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
 
     @property
     def n_angles(self):
-        return 0 if self.coefs_angle is None else len(self.coefs_angle)
+        if self.dipole_coefs_angle is not None:
+            return len(self.dipole_coefs_angle)
+        return 0 if self._fixed_coefs_angle is None else len(self._fixed_coefs_angle)
 
-    def to(self, device):
-        new = self._like(xy_limit=self.xmax, device=device)
+    def to(self, device=None, dtype=None):
+        new = self._like(xy_limit=self.xmax, device=device, dtype=dtype)
         prov = self.provenance
         self.__dict__.update(new.__dict__)
         self.provenance = prov
@@ -500,7 +559,8 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
         n = max(1, self.chunk_elems // (4 * self.Lw * self.Lw))
         if pos.shape[0] <= n:
             return super().render(pos, grad, knots)
-        parts = [super(IntegratedSplinePSF, self).render(p, grad, knots) for p in pos.split(n)]
+        table = self.knots if knots is None else knots
+        parts = [super(IntegratedSplinePSF, self).render(p, grad, table) for p in pos.split(n)]
         if not grad:
             return torch.cat(parts)
         return tuple(torch.cat([p[k] for p in parts]) for k in range(4))
@@ -511,7 +571,7 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
         return dict(basis=self.BASIS, value='pixel_integral', roisize=self.roisize, z_range=list(self.z_range),
                     oversample=self.S, dz_um=self.hz, zpad=self.zpad, xy_limit=self.xmax, c=self.geo.c, z0_um=self.z0,
                     nz=self.nz, u0_px=self.geo.u0, pixel_um=self.pixel_um, n_angles=self.n_angles,
-                    **({'dipole_components': True} if self.dipole_knots is not None else {}))
+                    **({'dipole_components': True} if self.dipole_coefs_angle is not None or self.dipole_knots is not None else {}))
 
     def _file_dict(self, source=None):
         d, arrays = {}, {}
@@ -522,7 +582,9 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
             arrays['dipole_coefs_angle'] = self.dipole_coefs_angle.detach().cpu().numpy()
         elif self.dipole_knots is not None:
             arrays['dipole_coefs'] = self.dipole_knots.detach().cpu().numpy()
-        if self.coefs_angle is None:
+        if self.component_weights is not None:
+            d['integrated_spline']['default_weights'] = self.component_weights.tolist()
+        elif self.coefs_angle is None:
             arrays['coefs'] = self.coefs.detach().cpu().numpy()
         else:
             arrays['coefs_angle'] = self.coefs_angle.detach().cpu().numpy()
@@ -536,6 +598,15 @@ class IntegratedSplinePSF(DipoleSpline, PixelSplinePSF):
                              f"(this reader knows {cls.BASIS!r} / 'pixel_integral')")
         arrays = arrays or {}
         ca = arrays.get('coefs_angle')
+        if 'default_weights' in g:
+            key = 'dipole_coefs_angle' if g.get('n_angles') else 'dipole_coefs'
+            m = cls._from_components(arrays[key], g['default_weights'], angle=angle, roisize=g['roisize'],
+                                     oversample=g['oversample'], dz_um=g['dz_um'], z_range=g['z_range'], zpad=g['zpad'],
+                                     knot_u0_px=g['u0_px'], knot_z0_um=g['z0_um'], pixel_um=g.get('pixel_um'),
+                                     xy_limit=g.get('xy_limit'), device=resolve_device(device))
+            if (m.n_angles, m.nz, m.geo.c) != (g['n_angles'], g['nz'], g['c']):
+                raise ValueError('dipole coefficient arrays do not match the stored grid')
+            return m if roisize in (None, m.roisize) else m.resized(roisize)
         if (ca is None) == ('coefs' not in arrays):
             raise ValueError("integrated_spline: exactly one of the arrays 'coefs' / 'coefs_angle' expected")
         if ca is not None and int(g.get('n_angles', len(ca))) != len(ca):

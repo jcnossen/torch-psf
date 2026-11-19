@@ -68,6 +68,8 @@ def test_spline_dipoles_and_files(kind, integrated, tmp_path, monkeypatch):
     source = models(kind, 'spectral' if integrated else 'box')
     grid = dict(oversample=3, dz_um=.01, xy_limit=.75, dipole_components=True, zpad=3)
     pos, M = emitters()
+    if kind == 'fourpi':
+        source.dipM = M[0]
     if kind == 'channels' and integrated:
         tables = [IntegratedSplinePSF.from_vectorial(v, v.z_range, **grid) for v in source.models]
         model = ChannelsPSF(tables, source.channel_offsets, source.intensity_ratio)
@@ -90,32 +92,45 @@ def test_spline_dipoles_and_files(kind, integrated, tmp_path, monkeypatch):
         meta = io.save_zip(path, model.models, channels=entries, zstack_planes=3)
     else:
         meta = io.save_zip(path, model, zstack_planes=3)
-    assert meta['version'] == '0.3.0'
+    assert meta['version'] == '0.4.0'
     loaded = psfzip.PSFZip.read(path, device='cpu').multichannel()
     # Independent channel offsets are acquisition geometry and are supplied separately.
     if kind == 'channels':
         loaded.set_channel_offsets(source.channel_offsets)
+    else:
+        fixed = source.to_spline(**dict(grid, dipole_components=False)).render(pos, **kw)
+        for component_model in (model, loaded):
+            torch.testing.assert_close(component_model.render(pos, **kw), fixed, rtol=0, atol=1e-6 * fixed.max().item())
     check_image(loaded.render(pos, dipM=M, **kw), val)
-    monkeypatch.setattr(psfzip, 'READ_VERSIONS', ((0, 2),))
-    with pytest.raises(ValueError, match='version 0.3.0'):
+    monkeypatch.setattr(psfzip, 'READ_VERSIONS', ((0, 2), (0, 3)))
+    with pytest.raises(ValueError, match='version 0.4.0'):
         PSF.load(path)
 
 
 def test_integrated_basis_per_angle(tmp_path):
     arms = models('channels').models
+    pos, M = emitters()
+    arms[0].dipM, arms[1].dipM = M
     arms[1].blur = torch.tensor([.2, .1, .02])
     table = IntegratedSplinePSF.from_vectorial(arms, arms[0].z_range, oversample=2, dz_um=.02,
                                                xy_limit=1, dipole_components=True)
     path = tmp_path / 'angles.zip'
     io.save_zip(path, table, zstack_planes=3)
-    pos, M = emitters()
     by_angle = []
+    defaults = []
     for angle in range(2):
         ref = table.for_angle(angle)
         loaded = PSF.load(path, angle=angle, device='cpu')
         check_image(loaded.render(pos, dipM=M), ref.render(pos, dipM=M))
+        fixed = IntegratedSplinePSF.from_vectorial(arms[angle], arms[angle].z_range, oversample=2, dz_um=.02,
+                                                   xy_limit=1)
+        defaults.append(fixed.render(pos))
+        torch.testing.assert_close(loaded.render(pos), defaults[-1], rtol=0, atol=1e-6 * defaults[-1].max().item())
         by_angle.append(ref.render(pos, dipM=M))
     check_image(table.render(pos, dipM=M), torch.stack(by_angle).mean(0))
+    mean = torch.stack(defaults).mean(0)
+    torch.testing.assert_close(PSF.load(path, device='cpu').render(pos), mean,
+                               rtol=0, atol=1e-6 * mean.max().item())
 
 
 @pytest.mark.parametrize('offsets', [False, True])
@@ -139,6 +154,9 @@ def test_fourpi_basis_evaluates_each_pupil_once(monkeypatch, offsets):
 
 def test_channels_use_native_basis_when_available(monkeypatch):
     model = models('channels')
+    class Layered(VectorialPSF):
+        type_name = 'test_layered'
+    model.models[0] = Layered(7, npupil=16, device='cpu')
     pos, _ = emitters()
     expected = model.dipole_basis(pos)
     calls = []
@@ -179,3 +197,64 @@ def test_default_box_spline_keeps_old_layout(kind, tmp_path, monkeypatch):
     pos, M = emitters()
     with pytest.raises(ValueError, match='dipole_components=True'):
         loaded.render(pos, dipM=M)
+
+
+@pytest.mark.parametrize('integrated', [False, True])
+def test_component_build_and_default_response(tmp_path, monkeypatch, integrated):
+    from torch_psf import CubicSplinePSF, pixint
+
+    v = models('channels').models[0]
+    pos, tensors = emitters()
+    v.dipM = tensors[0]
+    grid = dict(oversample=2, dz_um=.02, xy_limit=1)
+    def build(components):
+        if integrated:
+            return IntegratedSplinePSF.from_vectorial(v, v.z_range, dipole_components=components, **grid)
+        return v.to_spline(dipole_components=components, **grid)
+    reference = build(False).render(pos)
+    owner, name = (pixint, 'point_knots') if integrated else (CubicSplinePSF, 'knots_from_vectorial')
+    original = getattr(owner, name)
+    calls = []
+    def count(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(owner, name, count)
+    model = build(True)
+    assert len(calls) == 6
+    path = tmp_path / 'components.zip'
+    channel = io.save_zip(path, model, zstack_planes=3)['channels'][0]
+    assert set(channel['arrays']) == {'dipole_coefs' if integrated else 'dipole_knots'}
+    for m in (model, PSF.load(path, device='cpu').resized(v.roisize)):
+        torch.testing.assert_close(m.render(pos), reference, rtol=0, atol=1e-6 * reference.max().item())
+        assert m._knots is None
+    # Pre-0.4 component files had an explicit default (possibly calibrated independently of the basis).
+    data, arrays = model._file_dict()
+    del data[model.type_name]['default_weights']
+    arrays['coefs' if integrated else 'knots'] = (.7 * model.knots).numpy()
+    previous = type(model)._from_file(data, arrays, device='cpu')
+    torch.testing.assert_close(previous.render(pos), .7 * reference, rtol=0, atol=1e-6 * reference.max().item())
+
+
+def test_highest_required_version_across_channels(tmp_path):
+    v = models('channels', 'spectral').models[0]
+    component = v.to_spline(oversample=2, dz_um=.02, dipole_components=True)
+    for channels in ([v, component], [component, v]):
+        assert io.save_zip(tmp_path / 'mixed.zip', channels, zstack_planes=3)['version'] == '0.4.0'
+
+
+def test_phase_and_integrated_component_dtype():
+    source = models('fourpi')
+    pos, M = emitters()
+    phase = torch.tensor([[.31], [.72]], dtype=torch.float64)
+    spline = source.to_spline(kind='integrated', oversample=2, dz_um=.02, xy_limit=1, dipole_components=True)
+    spline.to('cpu', torch.float64)
+    for row in spline.luts:
+        for lut in row:
+            assert lut._knots is None and lut.dipole_knots.dtype == torch.float64
+    for model in (source, spline):
+        pc = model.channel_positions(pos)
+        img = model.render_channels(pc, phase, dipM=M)
+        torch.testing.assert_close(img, model.render(pos, phi=phase[:, 0], dipM=M))
+    assert img.dtype == torch.float64
+    with pytest.raises(ValueError, match='kind'):
+        source.to_spline(kind='unknown')

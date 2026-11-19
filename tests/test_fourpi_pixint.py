@@ -58,25 +58,50 @@ def test_fourpi_integrated_round_trip(tmp_path, monkeypatch):
         assert torch.equal(PSF.load(json_path, device=DEV).render(pos, phi=phase), psf.render(pos, phi=phase))
         path = tmp_path / (psf.type_name + '.zip')
         meta = io.save_zip(path, psf, zstack_planes=3)
-        assert meta['version'] == '0.3.0'
+        assert meta['version'] == '0.4.0'
         if psf is spline:
             assert meta['channels'][0]['model']['integrated_spline']['value'] == 'pixel_integral'
         loaded = PSF.load(path, device=DEV)
         assert torch.equal(loaded.render(pos, phi=phase), psf.render(pos, phi=phase))
         with monkeypatch.context() as m:
-            m.setattr(psfzip, 'READ_VERSIONS', ((0, 2),))
-            with pytest.raises(ValueError, match='version 0.3.0'):
+            m.setattr(psfzip, 'READ_VERSIONS', ((0, 2), (0, 3)))
+            with pytest.raises(ValueError, match='version 0.4.0'):
                 PSF.load(path)
 
 
 @torch.no_grad()
-def test_integrated_phase_spline_rebuild_from_box_source(tmp_path):
+@pytest.mark.parametrize('kind', ['integrated', 'cubic'])
+@pytest.mark.parametrize('storage', ['float32', 'rebuild'])
+def test_phase_spline_dipole_from_box_source(tmp_path, monkeypatch, kind, storage):
     model = FourPiPSF(7, npupil=16, oversample=1, z_range=(-.02, .02), device=DEV)
     model.dipM = torch.diag(torch.tensor([.5, .2, .3], device=DEV))
-    spline = model.to_spline(kind='integrated', oversample=2, dz_um=.01, xy_limit=.5)
+    restored = FourPiPSF.from_state(model.state(), device=DEV)
+    torch.testing.assert_close(restored.dipM, model.dipM)
+    spline = model.to_spline(kind=kind, oversample=2, dz_um=.01, xy_limit=.5)
+    assert spline.zpad == (6 if kind == 'integrated' else 3)
     path = tmp_path / 'rebuild.zip'
-    meta = io.save_zip(path, spline, zstack_planes=3, spline_knots='rebuild')
-    assert meta['version'] == '0.3.0'
+    meta = io.save_zip(path, spline, zstack_planes=3, spline_knots=storage)
+    assert meta['version'] == ('0.4.0' if kind == 'integrated' else '0.2.0')
     assert 'pixel_integration' not in meta['source']['model']['fourpi']['meta']
     loaded = PSF.load(path, device=DEV)
     torch.testing.assert_close(loaded.knots, spline.knots, atol=1e-7, rtol=1e-5)
+    pos = torch.tensor([[.13, -.17, .007]], device=DEV)
+    ref = spline.render(pos, phi=.54)
+    assert (loaded.render(pos, phi=.54) - ref).abs().max() <= 1e-6 * ref.max()
+    if kind == 'integrated':
+        monkeypatch.setattr(psfzip, 'READ_VERSIONS', ((0, 2), (0, 3)))
+        with pytest.raises(ValueError, match='version 0.4.0'):
+            PSF.load(path)
+
+
+@torch.no_grad()
+def test_integrated_default_padding_near_axial_limits():
+    model = FourPiPSF(7, npupil=16, pol=(0, 1), device='cpu', pixel_integration='spectral', z_range=(-.05, .05))
+    z = torch.tensor([-.05, -.047, -.045, .045, .047, .05])
+    pos = torch.stack([torch.full_like(z, .17), torch.full_like(z, -.21), z], 1)
+    ref = model.render(pos, phi=.73)
+    def error(spline):
+        return ((spline.render(pos, phi=.73) - ref).abs().amax((-1, -2)) / ref.amax((-1, -2))).max()
+    default = error(model.to_spline(dz_um=.01, xy_limit=.6))
+    assert default < 1e-4
+    assert default < .2 * error(model.to_spline(dz_um=.01, xy_limit=.6, zpad=3))

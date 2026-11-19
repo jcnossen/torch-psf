@@ -116,8 +116,8 @@ def test_field_psf_render_fit_and_zip(tmp_path):
 
 
 @torch.no_grad()
-def test_integrated_field_tiles_and_channels(tmp_path):
-    from torch_psf import ChannelsPSF, IntegratedSplinePSF
+def test_integrated_field_tiles_and_channels(tmp_path, monkeypatch):
+    from torch_psf import ChannelsPSF, IntegratedSplinePSF, psfzip
 
     fp = FieldPSF(vec(11, pixel_integration='exact'), field())
     tiles = fp.to_tiled(tile=128, z_range=(.2, .3), xy_limit=1)
@@ -132,13 +132,18 @@ def test_integrated_field_tiles_and_channels(tmp_path):
     expected = tiles.render(pos, xy=xy)
     assert torch.all((expected - ref).abs().amax((-2, -1)) / ref.amax((-2, -1)) < 2e-5)
     path = tmp_path / 'tiles.zip'
-    assert io.save_zip(path, tiles, zstack_planes=3)['version'] == '0.3.0'
+    assert io.save_zip(path, tiles, zstack_planes=3)['version'] == '0.4.0'
     loaded = PSF.load(path, device=DEV)
     assert isinstance(loaded.reference_spline(), IntegratedSplinePSF)
     torch.testing.assert_close(loaded.render(pos, xy=xy), expected)
     models = [tiles.spline(0), tiles.spline(3)]
     channels = ChannelsPSF(models)
     assert torch.equal(channels.render(pos), torch.stack([s.render(pos) for s in models], 1))
+    monkeypatch.setattr(psfzip, 'READ_VERSIONS', ((0, 2), (0, 3)))
+    with pytest.raises(ValueError, match='version 0.4.0'):
+        PSF.load(path)
+    with pytest.raises(ValueError, match='kind'):
+        fp.to_tiled(kind='unknown')
 
 
 def test_tiled_spline_psf_fit_and_zip(tmp_path):

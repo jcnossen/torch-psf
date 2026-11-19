@@ -46,6 +46,7 @@ from torch_psf.psf import PSF
 from torch_psf.fit import lm_poisson, poisson_nll
 from torch_psf.dataset import Dataset
 from torch_psf._dipole import unit_tensors
+from torch_psf.vectorial import VectorialPSF
 
 
 def _as_t(v, dev, dtype=torch.float32):
@@ -613,7 +614,7 @@ class ChannelsPSF(MultiChannelPSF):
             p = pc[:, c]
             kw = dict(xy=field_xy[:, c]) if field_xy is not None and self.field_dependent[c] else {}
             if hasattr(model, 'dipole_basis'):
-                if getattr(model, 'type_name', None) == 'vectorial':
+                if isinstance(model, VectorialPSF):
                     kw['focus'] = model.focus_um
                 images.append(model.dipole_basis(p, **kw))
             else:
