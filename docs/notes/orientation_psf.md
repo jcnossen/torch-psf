@@ -587,3 +587,97 @@ The paper reports −0.99, g2 0.86 ± 0.03, and σ 2.3° / 1.8° against a CRLB 
 reproduce it only with n_med ≈ 1 and a grid of z starts. Remaining differences between our fit and their code:
 * single-start local minima (the n_med 1.0, z0 = 0 azimuth);
 * the paper's own molecule selection (21 molecules) and statistic (a mean), against the 40-brightest median here.
+
+### 8c. Baseline completed; acceptance test; Vortex work frozen
+
+**λ-DNA, full crop, per spot** (all 15 065 ROIs of their Octave table, frames 0–600, crop (400, 16, 256, 256);
+14 007 not flagged as outliers). Our exact model, best of their start and four z starts, against their fits:
+
+| quantity | value |
+|---|---|
+| axis angle, median / p90 | 0.14° / 1.28° |
+| spots within 2° | 91.5 % |
+| dxy, median | 0.23 nm |
+| dz | 0.14 ± 1.08 nm |
+| g2 median, ours / theirs | 0.7503 / 0.7506 |
+| N ratio | 0.998 |
+
+From their initial values alone, 77.7 % of the spots fall within 2°. The rest end in other local minima: our LM steps
+differ from theirs.
+
+**PMMA with the paper's statistic** (`pmma_paper_stat.py`): the per-molecule sd over the 11 slices, the MEAN over
+21 molecules.
+
+| table (n_med 1.0, z grid) | 21 brightest: σφ / σθ (CRLB) | ratio | slope | g2 | N (their convention) |
+|---|---|---|---|---|---|
+| their port | 4.00° / 3.21° (2.55° / 2.09°) | 1.57 / 1.54 | −0.91 | 0.84 ± 0.04 | 5.9e3–16e3 |
+| ours (exact model) | 5.47° / 3.57° (2.56° / 2.03°) | 2.14 / 1.76 | −0.87 | 0.82 ± 0.04 | 5.9e3–16e3 |
+| paper | 2.3° / 1.8° (1.8° / 1.5°) | 1.28 / 1.2 | −0.99 | 0.86 ± 0.03 | 4.4e3–45e3, mean 17e3 |
+
+* **The selection cannot be reconstructed.** The brightest molecules in the released stack (`..._YESvortex_YESqwp_3`,
+  the only one on 4TU) reach 16e3 photons, against 45e3 in the paper. The paper's 21 molecules are brighter, hence
+  its smaller CRLBs, and are probably from another stack.
+* **Medians against means.** On the top-40 medians, ours and their port agree within 10 % (3.48° / 2.84° against
+  3.15° / 2.76°). The means are pulled up by a few molecules whose single-start fits land in other minima: our LM steps
+  differ from theirs.
+
+**One drift-corrected strand with a spline axis** (`vortex_strand.py`):
+* **Data and steps.** The strand runs from (450, 124) to (650, 226) px and is 14.6 µm long, in stk_0001 frames
+  0–1980. The pipeline: their detection, our exact fits with a z grid, DME drift via `Dataset.estimate_drift` /
+  `drift_corrected`, then a smoothing-spline axis. Their hdf5 gets the same analysis.
+
+| localisations on the strand | n | Δφ median / MAD | g2 peak / median | FWHM across |
+|---|---|---|---|---|
+| ours, drift corrected | 4865 | 75° / 50° | 0.83 / 0.76 | 22 nm |
+| ours, no drift correction | 4951 | 70° / 47° | 0.83 / 0.76 | 40 nm |
+| theirs (hdf5, drift corrected) | 4240 | 76° / 49° | 0.83 / 0.76 | 38 nm |
+
+* **What matches the paper:** the FWHM across the strand after drift correction (22 nm against their 20 nm) and the
+  g2 peak (0.83 against 0.8).
+* **What does not:** Δφ on this strand is broad in their own localisations as in ours. With the image angle taken as
+  −azimuth, theirs gives 97° / 33–36°. The paper's 82° / 17° is a different, hand-picked strand, and their analysis
+  script and angle convention are not in the release. Crop-wide (PCA axis) the two agree as well: 99.9° / 29.5° for
+  ours against 95.7° / 35.7° for theirs.
+
+**Our in-situ model against their NAT model on the same ROIs** (`vortex_exact.py insitu_dna`):
+* **Agreement after a tilt flip.** Our in-situ calibrated model (in our own pupil convention, with the plate centre,
+  Zernikes and apodization fitted on the PMMA stack, n_med 1.333) agrees with their model within 3.6° per spot
+  (median), but only after flipping the tilt sign (μ_z → −μ_z, i.e. θ ↔ 180° − θ at the same azimuth). As is, the
+  median is 57°.
+* **What does not change:** the in-plane azimuth relative to the DNA (Δφ 99.4° / 28.0° against 99.9° / 29.5°) and the
+  polar angle |θ| (2.2° median difference).
+* **Cause.** The two pupil conventions differ in the phase of the supercritical (SAF) light: their cos θ_med = −i|.|
+  against our +i|.|. That phase sets which way an out-of-plane dipole tilts.
+* **Other differences:** z by −95 nm (the in-situ model has no immersion-mismatch / nominal-focus phase); N ratio 0.58
+  (normalisation and apodization).
+* **Open:** which tilt sign is physical needs a sample of known tilt. This matters for any 3D orientation result and
+  should be settled in the PSF refactor's test.
+
+**Acceptance test (one command; the refactor must keep these values):**
+
+    CUDA_VISIBLE_DEVICES=2 python -I study/orientation/vortex_exact.py acceptance
+
+It needs ~/vortex_ref (simcode2's port and tables) and ~/data/vortex_hulleman2021, and writes
+results/acceptance.json. Last run (commit after 82d06ef): all 13 values PASS, in 529 s on GPU 2 of qnano1.
+
+| value | expected | tolerance |
+|---|---|---|
+| image max relative difference vs their port (6 spots, n_med 1.333 and 1.0) | ≤ 0.02 | — |
+| λ-DNA crop: axis angle median | 0.145° | ± 0.06 |
+| λ-DNA crop: fraction within 2° | 0.915 | ± 0.02 |
+| λ-DNA crop: dxy median | 0.235 nm | ± 0.1 |
+| λ-DNA crop: dz median | 0.14 nm | ± 0.3 |
+| λ-DNA crop: dg2 median | 0.0003 | ± 0.002 |
+| λ-DNA crop: N ratio median | 0.998 | ± 0.003 |
+| PMMA (n_med 1.0, z grid, top 40): z slope median | −0.984 | ± 0.02 |
+| PMMA: sd azimuth / polar median | 3.48° / 2.84° | ± 0.4 / 0.3 |
+| PMMA: CRLB azimuth / polar median | 2.60° / 2.20° | ± 0.1 |
+| PMMA: g2 median | 0.839 | ± 0.02 |
+
+**Composed reference for the refactor.** `study/orientation/composed_reference.py` and
+`tests/data/orientation_composed_ref.json` hold a small deterministic reference of the whole composition in the current
+API: VectorialPSF + plate → Polychromatic → field Zernikes → FocusZ, with per-emitter dipM. It covers images, dipole
+bases and fits, and is checked by `tests/test_orientation.py::test_composed_vortex_reference` (CPU, ~20 s).
+
+**Frozen.** The Vortex work stops here until the PSF refactor. The spectral, polychromatic and other model
+improvements come after the refactor, as its test case.

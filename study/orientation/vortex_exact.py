@@ -213,6 +213,7 @@ def run_dna(zgrid=None, nmax=None):
                  their_x_px=f('x_px'), their_y_px=f('y_px'), their_azim=th_their[:, 5], their_pola=th_their[:, 6],
                  their_g2=th_their[:, 7], their_z_nm=th_their[:, 2], their_N=th_their[:, 3])
     json.dump(res, open(os.path.join(OUT, 'exact_dna.json'), 'w'), indent=1)
+    return res
 
 
 def _their_loglik(d, mu):
