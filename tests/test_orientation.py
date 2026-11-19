@@ -1,0 +1,150 @@
+"""torch_psf.orientation: dipole-orientation model, linear-M basis, excitation factor, CRLB and the MLE fit."""
+import math
+import torch
+from torch_psf import VectorialPSF
+from torch_psf.orientation import (angles, from_angles, unit, canonical, cone_to_g, g_to_cone, ensemble_gamma,
+                                   dipole_M, M_to_m6, m6_to_M, project_M, excitation_tensor, excitation_factor,
+                                   basis_images, solve_M, model_and_jacobian, crlb_orientation, fit_orientation,
+                                   angle_error, vortex_phase, tangent_basis)
+
+
+def small_model(R=11, npupil=32, aberr=True, **kw):
+    v = VectorialPSF(R, pixel_um=0.108, wavelength_um=0.7, npupil=npupil, oversample=2, device='cpu',
+                     focus_um=0.25, **kw)
+    if aberr:
+        g = torch.Generator().manual_seed(0)
+        with torch.no_grad():
+            v.zcoef.copy_(torch.randn(17, generator=g) * 0.02)
+    for p in v.parameters():
+        p.requires_grad_(False)
+    return v
+
+
+def test_angles_roundtrip_and_cone():
+    th = torch.tensor([0.0, 20.0, 45.0, 89.0, 60.0])
+    ph = torch.tensor([0.0, 300.0, 45.0, 170.0, 200.0])
+    mu = from_angles(th, ph)
+    t2, p2 = angles(-mu)                       # antipodal: same orientation
+    assert torch.allclose(t2, th, atol=1e-3)
+    assert torch.allclose(p2[1:], ph[1:], atol=1e-3)
+    _, pf = angles(mu, fold=True)
+    assert float(pf.max()) < 180
+    a = torch.tensor([0.0, 30.0, 60.0, 90.0])
+    assert torch.allclose(g_to_cone(cone_to_g(a)), a, atol=1e-2)
+    assert abs(float(cone_to_g(0.0)) - 1) < 1e-6 and abs(float(cone_to_g(90.0))) < 1e-6
+    e1, e2 = tangent_basis(mu)
+    assert float((e1 * mu).sum(-1).abs().max()) < 1e-5 and float((e2 * mu).sum(-1).abs().max()) < 1e-5
+
+
+def test_dipole_tensor_projection_and_m6():
+    g = torch.Generator().manual_seed(1)
+    v = torch.randn(20, 3, generator=g)
+    gg = torch.rand(20, generator=g) * 0.9 + 0.05
+    M = dipole_M(v, gg)
+    assert torch.allclose(torch.diagonal(M, dim1=1, dim2=2).sum(1), torch.ones(20), atol=1e-6)
+    assert torch.allclose(m6_to_M(M_to_m6(M)), M, atol=1e-7)
+    mu, g2 = project_M(M * 3.7)                # scale-free
+    assert float(angle_error(mu, unit(v)).max()) < 0.1     # deg (acos near 1 in float32)
+    assert torch.allclose(g2, gg, atol=1e-5)
+
+
+def test_ensemble_photoselection_gamma():
+    """<M (3 tr(M K))> over uniformly distributed axes = (1 - 0.4 g^2) I / 3 + 0.4 g^2 K."""
+    g = torch.Generator().manual_seed(2)
+    mu = unit(torch.randn(200000, 3, generator=g))
+    K = excitation_tensor((0.0, 1.0), eps=0.3, k_dir=(1.0, 0.0))
+    assert abs(float(torch.trace(K)) - 1) < 1e-6
+    for go in (1.0, 0.5):
+        M = dipole_M(mu, torch.full((len(mu),), go))
+        f = excitation_factor(M, K)
+        Me = (M * f[:, None, None]).mean(0) / f.mean()
+        gam = float(ensemble_gamma(go))
+        assert torch.allclose(Me, (1 - gam) * torch.eye(3) / 3 + gam * K, atol=4e-3)
+    assert abs(float(excitation_factor(torch.eye(3) / 3, K)) - 1) < 1e-6
+
+
+def test_basis_images_are_linear_in_M():
+    v = small_model()
+    v.blur = torch.tensor([0.2, 0.1, 0.05])
+    pos = torch.tensor([[0.3, -0.2, 0.05], [-0.4, 0.1, 0.15]])
+    B = basis_images(v, pos)
+    M = dipole_M(torch.tensor([[1.0, 2.0, 0.5], [0.2, -0.3, 1.0]]), torch.tensor([0.8, 0.4]))
+    a = v(pos, v.focus_um, dipM=M)
+    b = torch.einsum('nk,nkuv->nuv', M_to_m6(M), B)
+    assert float((a - b).abs().max() / a.max()) < 1e-5
+    iso = v(pos, v.focus_um)
+    assert float((iso - B[:, :3].sum(1) / 3).abs().max() / iso.max()) < 1e-5
+
+
+def test_solve_M_recovers_noise_free_tensor():
+    v = small_model()
+    pos = torch.tensor([[0.2, 0.1, 0.08]] * 3)
+    M = dipole_M(from_angles(torch.tensor([30.0, 70.0, 85.0]), torch.tensor([10.0, 120.0, 250.0])),
+                 torch.tensor([1.0, 0.7, 0.5]))
+    B = basis_images(v, pos)
+    d = 2000 * torch.einsum('nk,nkuv->nuv', M_to_m6(M), B) + 10
+    Me, I, bg = solve_M(B, d)
+    assert torch.allclose(Me, M, atol=1e-3)
+    assert torch.allclose(I, torch.full((3,), 2000.0), rtol=1e-3)
+    assert torch.allclose(bg, torch.full((3,), 10.0), rtol=1e-3)
+
+
+def test_jacobian_matches_finite_differences():
+    v = small_model()
+    K = torch.stack([excitation_tensor((0.0, 1.0), 0.3, (1.0, 0.0)), excitation_tensor((1.0, 0.0), 0.3, (0.0, 1.0))])
+    th = torch.tensor([[0.2, -0.1, 0.06, 1000.0, 10.0, *from_angles(50.0, 30.0).tolist(), 0.7]])
+    mu, J = model_and_jacobian(v, th, T=2, K=K)
+    for k in range(9):
+        e = 1e-3 * (1.0 if k != 3 else 100.0)
+        t1, t2 = th.clone(), th.clone()
+        t1[0, k] += e; t2[0, k] -= e
+        fd = (model_and_jacobian(v, t1, T=2, K=K)[0] - model_and_jacobian(v, t2, T=2, K=K)[0]) / (2 * e)
+        assert float((fd - J[:, k]).abs().max()) < 2e-2 * float(J[:, k].abs().max()) + 1e-4, k
+
+
+def test_crlb_finite_at_pole_and_excitation_helps():
+    v = small_model()
+    th = torch.tensor([[0.0, 0.0, 0.05, 2000.0, 10.0, 0.0, 0.0, 1.0, 1.0],
+                       [0.0, 0.0, 0.05, 2000.0, 10.0, *from_angles(80.0, 45.0).tolist(), 1.0]])
+    c = crlb_orientation(v, th)
+    assert torch.isfinite(c['theta']).all() and torch.isfinite(c['inplane']).all()
+    K = torch.stack([excitation_tensor((0.0, 1.0))] * 3 + [excitation_tensor((1.0, 0.0))] * 3)
+    c0 = crlb_orientation(v, th[1:], T=6)
+    c1 = crlb_orientation(v, th[1:], T=6, K=K)
+    assert float(c1['phi']) < float(c0['phi'])
+
+
+def test_vortex_phase_makes_a_donut_for_in_plane_dipoles():
+    v = small_model(R=15, aberr=False)
+    v.focus_um = 0.0
+    pos = torch.zeros(1, 3)
+    M = dipole_M(from_angles(90.0, 0.0)[None], torch.ones(1))
+    a = v(pos, 0.0, dipM=M)
+    vortex_phase(v)
+    b = v(pos, 0.0, dipM=M)
+    c = 7
+    assert float(a[0, c, c]) == float(a.max())           # standard PSF: peak in the centre
+    assert float(b[0, c, c]) < 0.2 * float(b.max())       # Vortex: dark centre
+
+
+def test_fit_spots_and_track():
+    torch.manual_seed(0)
+    v = small_model()
+    mus = from_angles(torch.tensor([60.0, 35.0]), torch.tensor([30.0, 200.0]))
+    n = 8
+    th = torch.cat([torch.tensor([[0.1, -0.2, 0.06, 20000.0, 10.0]]).repeat(2 * n, 1),
+                    mus.repeat_interleave(n, 0), torch.full((2 * n, 1), 0.9)], 1)
+    mu, _ = model_and_jacobian(v, th)
+    d = torch.poisson(mu[:, 0])
+    r = fit_orientation(v, d, iters=25, zstarts=2)
+    err = angle_error(r['theta'][:, 5:8], th[:, 5:8])
+    sd = torch.sqrt(r['crlb']['theta'] ** 2 + r['crlb']['inplane'] ** 2)
+    assert float(err.median()) < 3 * float(sd.median()) + 0.5
+    assert float((r['theta'][:, 2] - 0.06).abs().median()) < 0.03
+    # track: 4 frames, excitation K per frame, a shared orientation
+    K = torch.stack([excitation_tensor((0.0, 1.0))] * 2 + [excitation_tensor((1.0, 0.0))] * 2)
+    th2 = th[::n].clone(); th2[:, 3] = 5000.0
+    mu2, _ = model_and_jacobian(v, th2, T=4, K=K)
+    d2 = torch.poisson(mu2)
+    r2 = fit_orientation(v, d2, K=K, iters=25, zstarts=2)
+    assert float(angle_error(r2['theta'][:, 5:8], th2[:, 5:8]).max()) < 10

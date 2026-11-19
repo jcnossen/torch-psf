@@ -317,18 +317,12 @@ class VectorialPSF(torch.nn.Module, PSF):
         ky = k0 * NA * self.py
         return P, k0 * self.n_med * c_med, k0 * self.n_imm * c_imm, kx, ky
 
-    def forward(self, pos, focus, zcoef_offset=None, intensity=None, bg=None, blur=None, dipw=None, dipM=None):
-        """
-        pos: [B, 3] (x, y relative to the ROI centre in px, z_e emitter height in um)
-        focus: [B] (or a float) focal plane position in um relative to the coverslip
-        zcoef_offset: optional [B, nz] per-emitter Zernike offsets (field dependence)
-        blur / dipw / dipM: override the attributes of the same name for this call
-        Returns [B, roisize, roisize]: the normalized PSF (times intensity, plus bg, when given).
-        """
+    def _fields(self, pos, focus, zcoef_offset=None, blur=None):
+        """Image-plane fields of the three dipoles on the sample grid of the pixel integration: E [B, 6, ns, ns]
+        (channels Ex, Ey of the x, y, z dipoles), plus what _image needs (blur, padding, Gauss-Legendre weights,
+        energy normalization, |E|^2 scale)."""
         B = pos.shape[0]
         P, kz_med, kz_imm, kx, ky = self.pupil_fields()
-        Mt = dipole_tensor(dipM if dipM is not None else (None if dipw is not None else self.dipM),
-                           dipw if dipw is not None else self.dipw, self.dev)
         zc = self.zcoef[None].expand(B, -1)
         if zcoef_offset is not None:
             zc = zc + zcoef_offset
@@ -348,19 +342,19 @@ class VectorialPSF(torch.nn.Module, PSF):
         Fx = torch.exp(1j * u[:, None] * kx1[None, :])  # [ns, N]
         Fy = torch.exp(1j * u[:, None] * ky1[None, :])
         E = Fy @ Pb.to(torch.complex64) @ Fx.T  # [B, 6, ns, ns]
-        if Mt is None:
-            I = (E.real ** 2 + E.imag ** 2).sum(1) / 3
-        else:   # sum_ij M_ij Re[E_i . E_j*], E_i = (Ex, Ey) of dipole i = channels (2i, 2i + 1)
-            Ed = E.reshape(B, 3, 2, *E.shape[-2:])
-            Mc = Mt.to(Ed.real.dtype)
-            F = torch.einsum('ij,bjcuv->bicuv', Mc, Ed.real) + 1j * torch.einsum('ij,bjcuv->bicuv', Mc, Ed.imag) \
-                if Mc.dim() == 2 else torch.einsum('bij,bjcuv->bicuv', Mc, Ed.real) + 1j * torch.einsum('bij,bjcuv->bicuv', Mc, Ed.imag)
-            I = (Ed.real * F.real + Ed.imag * F.imag).sum((1, 2))
         # normalization: Parseval energy of an aberration-free emitter at z = 0 -> sum over the plane = 1
         dk = (kx1[1] - kx1[0]) * (ky1[1] - ky1[0])
         energy = (P.real ** 2 + P.imag ** 2).sum() / 3 * dk / (2 * math.pi) ** 2
         # continuous field E = sum(...) dk / (2 pi)^2, so |E|^2 gets that factor squared
-        I = I * (dk / (2 * math.pi) ** 2) ** 2
+        scale = (dk / (2 * math.pi) ** 2) ** 2
+        return E, dict(bl=bl, glw=glw, pad=pad, energy=energy, scale=scale)
+
+    def _image(self, I, aux):
+        """|E|^2 combination I [B, ns, ns] on the sample grid -> normalized PSF [B, R, R]: scale, pixel integration
+        (pixel_integration, with the optional blur), energy normalization."""
+        B = I.shape[0]
+        bl, glw, pad = aux['bl'], aux['glw'], aux['pad']
+        I = I * aux['scale']
         R, o = self.roisize, self.os
         if self.pixel_integration == 'spectral':     # exact pixel mean (and blur) in the Fourier domain
             I = pixel_box_spectral(I, o, pad, R, self.band_limit(), bl) * self.pixel_um ** 2
@@ -371,12 +365,52 @@ class VectorialPSF(torch.nn.Module, PSF):
                 I = gauss_blur_os(I, bl, self.os, pad)
             # pixel integration: average over the oversampled subpixels times the pixel area
             I = I.reshape(B, R, o, R, o).mean((2, 4)) * self.pixel_um ** 2
-        psf = I / energy
+        return I / aux['energy']
+
+    def forward(self, pos, focus, zcoef_offset=None, intensity=None, bg=None, blur=None, dipw=None, dipM=None):
+        """
+        pos: [B, 3] (x, y relative to the ROI centre in px, z_e emitter height in um)
+        focus: [B] (or a float) focal plane position in um relative to the coverslip
+        zcoef_offset: optional [B, nz] per-emitter Zernike offsets (field dependence)
+        blur / dipw / dipM: override the attributes of the same name for this call
+        Returns [B, roisize, roisize]: the normalized PSF (times intensity, plus bg, when given).
+        """
+        B = pos.shape[0]
+        Mt = dipole_tensor(dipM if dipM is not None else (None if dipw is not None else self.dipM),
+                           dipw if dipw is not None else self.dipw, self.dev)
+        E, aux = self._fields(pos, focus, zcoef_offset, blur)
+        if Mt is None:
+            I = (E.real ** 2 + E.imag ** 2).sum(1) / 3
+        else:   # sum_ij M_ij Re[E_i . E_j*], E_i = (Ex, Ey) of dipole i = channels (2i, 2i + 1)
+            Ed = E.reshape(B, 3, 2, *E.shape[-2:])
+            Mc = Mt.to(Ed.real.dtype)
+            F = torch.einsum('ij,bjcuv->bicuv', Mc, Ed.real) + 1j * torch.einsum('ij,bjcuv->bicuv', Mc, Ed.imag) \
+                if Mc.dim() == 2 else torch.einsum('bij,bjcuv->bicuv', Mc, Ed.real) + 1j * torch.einsum('bij,bjcuv->bicuv', Mc, Ed.imag)
+            I = (Ed.real * F.real + Ed.imag * F.imag).sum((1, 2))
+        psf = self._image(I, aux)
         if intensity is not None:
             psf = psf * intensity[:, None, None]
         if bg is not None:
             psf = psf + bg[:, None, None]
         return psf
+
+    def dipole_basis(self, pos, focus, zcoef_offset=None, blur=None):
+        """The six images the PSF is linear in, for a dipole second-moment tensor M: [B, 6, R, R] in the order
+        (xx, yy, zz, xy, xz, yz), forward(dipM=M) = sum_k m_k basis_k with m = (M_xx, M_yy, M_zz, M_xy, M_xz, M_yz):
+        basis_ii = |E_i|^2, basis_ij = 2 Re[E_i . E_j*] (i != j), normalized as forward (isotropic = (xx + yy + zz) / 3).
+        pos, focus, zcoef_offset, blur as forward (diat, pupil maps, pixel_integration etc. of the model apply: the
+        image is linear in M, so the pixel integration is applied to each basis image)."""
+        B = pos.shape[0]
+        E, aux = self._fields(pos, focus, zcoef_offset, blur)
+        Ed = E.reshape(B, 3, 2, *E.shape[-2:])
+        re, im = Ed.real, Ed.imag
+        dot = lambda i, j: (re[:, i] * re[:, j] + im[:, i] * im[:, j]).sum(1)
+        I = torch.stack([dot(0, 0), dot(1, 1), dot(2, 2), 2 * dot(0, 1), 2 * dot(0, 2), 2 * dot(1, 2)], 1)
+        ns = I.shape[-1]
+        bl = aux['bl']
+        if torch.is_tensor(bl) and bl.dim() == 2 and bl.shape[0] == B and B > 1:   # per-emitter blur
+            aux = dict(aux, bl=bl.repeat_interleave(6, 0))
+        return self._image(I.reshape(B * 6, ns, ns), aux).reshape(B, 6, self.roisize, self.roisize)
 
     @torch.no_grad()
     def forward_batched(self, pos, focus, nb=400):
