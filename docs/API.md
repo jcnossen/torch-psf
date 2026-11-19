@@ -9,16 +9,22 @@ for backgrounds. Defaults: `device=None` = cuda if available, else cpu; float32.
 
 ## Dataset (`torch_psf.dataset.Dataset`; format: docs/DATASET_FORMAT.md)
 
-`Dataset(fields, meta=None, drift=None, drift_applied=False)`, `Dataset.from_arrays(pos, frame, crlb, photons, bg,
+`Dataset(fields, meta=None)`, `Dataset.from_arrays(pos, frame, crlb, photons, bg,
 n_frames, meta, **fields)`; `ds['pos']` / `ds.pos`, `len(ds)`, `ds[mask | slice | indices | int]` (all fields),
 `ds['name'] = tensor`, `add_fields(**)`, `keys()`, `copy()`, `to(device)`, `numpy()`; `n_dims`, `end_frame`,
 `center_frame`, `pixel_nm`, `pos_nm`, `num_frames`, `indices_per_frame()`; filters returning a new object and in-place
 `_` variants: `filter(mask)`, `filter_finite()`, `filter_photons(min, max)`, `filter_crlb(max_px, max_nm)`,
 `filter_frames(start, stop)`, `crop(x0, y0, x1, y1, shift)`, `crop_from_edge(dist)`; `Dataset.concatenate(items,
-set_group)`, `+`; drift: `set_drift`, `drift_at`, `apply_drift`, `undo_drift`, `estimate_drift` (DME v2, optional
-dependency); `render(pixel_nm, region, sigma_nm, weights)` (2D histogram), `frc(block=300, pixel_nm=5)` (even / odd
+set_group)`, `+`; `render(pixel_nm, region, sigma_nm, weights)` (2D histogram), `frc(block=300, pixel_nm=5)` (even / odd
 blocks of frames, 5-ring smoothing, 1/7 threshold); files: `save` / `load` (.hdf5 / .h5 this format, .csv
 ThunderSTORM), `save_picasso` / `load_picasso`, `save_csv` / `load_csv`.
+
+`ds.estimate_drift(n_frames=None, rows=None, dims=2, device=None) -> Drift` estimates drift with DME v2
+(optional dependency). `tp.Drift(curve, info=None)` holds per-frame displacements in pixels and the run record.
+`drift.at(center_frame)` samples the curve with endpoint clipping. Use `drift.save(path)` and `tp.Drift.load(path)`
+to save and read the result. `ds.drift_corrected(drift, *, force=False) -> Dataset` returns corrected positions
+and records `drift.info` in metadata. With `force=True`, a further correction replaces the previous record.
+Concatenation raises if correction records differ, including a mix of raw and corrected inputs.
 
 ## Classes
 

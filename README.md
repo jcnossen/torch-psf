@@ -77,7 +77,7 @@ psf.save('insitu.json')
 
 - Read multipart TIFF movies and NumPy stacks with `tp.open_movie`.
 - Read and write psf.zip 0.2.x and 0.3.x calibrations with `tp.PSF.load` and `tp.io.save_zip`.
-- Filter, drift-correct and render localizations with `tp.Dataset`. Read and write HDF5, Picasso and ThunderSTORM CSV.
+- Filter and render localizations with `tp.Dataset`; estimate drift (DME v2) as a `tp.Drift` with `ds.estimate_drift` and apply it with `ds.drift_corrected`. Read and write HDF5, Picasso and ThunderSTORM CSV.
 - Read frames and camera metadata from a PSF grab recording with `torch_psf.auto.read_psfgrab`.
 
 **Browser apps**
@@ -147,6 +147,8 @@ python -m torch_psf insitu movie.tif --psf beads.json --focus-um 0.45 --isolatio
 returns a `Dataset`: fields `pos` [n, 3] and `crlb` [n, 3] in px (z in px of the lateral pixel size), `frame`,
 `photons`, `bg`, `chi2`, `loglik`, `at_limit`, ... with filters, drift correction, rendering, FRC and files
 ([docs/DATASET_FORMAT.md](docs/DATASET_FORMAT.md)); `psf.fit(rois)` does the same for ROIs you cut yourself.
+Estimate a per-frame curve with `drift = locs.estimate_drift()`. Use `corrected = locs.drift_corrected(drift)`
+to keep both sets of positions, and `drift.save(path)` to save the curve separately.
 
 ```python
 locs = tp.PSF.load('insitu.json').to_spline(13).localize('movie.tif', camera)

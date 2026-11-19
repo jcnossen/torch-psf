@@ -1,7 +1,7 @@
 # Dataset format
 
 `torch_psf.Dataset` holds the localizations of one acquisition: a dictionary of fields (torch tensors, CPU by
-default), each with its own dtype and shape and the same first dimension n, plus metadata and an optional drift.
+default), each with its own dtype and shape and the same first dimension n, plus metadata.
 This document specifies the fields and the HDF5 file written by `Dataset.save('name.hdf5')` and read by
 `Dataset.load`. Every program that writes the format with all fields can be read by every other one.
 
@@ -39,21 +39,34 @@ Any other field (any dtype, shape [n, ...], e.g. per-frame intensities [n, frame
 
 A free dictionary of JSON-serializable values. Common keys: `pixel_nm` (camera pixel size in the sample, nm),
 `image_size` [h, w] (px), `n_frames` (frames of the movie), `n_dims`,
-`method`, `source`, `region` / `origin` (set by crop), `drift` (the record of the drift estimate: method, version, parameters, per-axis result).
+`method`, `source`, `region` / `origin` (set by crop), `drift` (the estimation record for the correction applied to these positions).
 
 ## Drift
 
-Optional array [F, D'] (px per movie frame, D' <= D). The drift of a localization is `drift[frame + n_frames // 2]`
-(its centre frame); `apply_drift` subtracts it from `pos`, `undo_drift` adds it back.
+A `tp.Drift` holds a float64 curve [F, D'] in px per movie frame and its estimation record.
+For DME v2, the record includes the method, entry point, package path and version, parameters, DME
+diagnostics, and per-axis peak-to-peak and RMS displacement in pixels.
+`drift = ds.estimate_drift()` estimates it with DME v2. `corrected = ds.drift_corrected(drift)`
+subtracts the curve from the first D' position axes at each centre frame (`frame + n_frames // 2`,
+clipped to the curve's frame range). Keep `ds` for the raw positions. The corrected dataset carries
+`meta['drift'] = drift.info`. Correcting it again raises unless you pass `force=True`, which subtracts
+again and replaces the record. Concatenation requires all inputs to have matching correction records
+or all to lack a record.
+
+Use `drift.save(path)` and `tp.Drift.load(path)` for a standalone NPZ archive containing `curve` and
+JSON-encoded `info`.
 
 ## HDF5 container
 
 | path | content |
 |---|---|
-| file attributes | `format` = 'torch-psf dataset', `format_version` = 1 |
+| file attributes | `format` = 'torch-psf dataset', `format_version` = 2 |
 | `/localizations/<field>` | one dataset per field, with its dtype and shape |
 | `/metadata` | a group whose attributes are the metadata; strings and numbers as they are, other values (lists, dicts) as the string `'json:' + JSON` |
-| `/drift` | optional dataset [F, D'], attributes `applied` (bool) and `info` (JSON) |
+
+Version 1 files may also contain a `/drift` dataset. The reader preserves the stored positions.
+If `applied=True`, its JSON `info` becomes the correction record. If `applied=False`, the reader
+warns and omits the record. In either case, `tp.Drift.load(path)` retrieves the curve and info.
 
 ## Exports
 

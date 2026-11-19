@@ -37,7 +37,7 @@ torch_psf/
   fit.py           poisson_nll, lm_poisson, localize, fisher, crlb, solve_linear (variable projection)
   detect.py        detect_spots (band-pass, local maxima, threshold x noise, isolation, border)
   spots.py         Spots, extract_spots (streams over a movie), extract_rois, Tracks
-  dataset.py       Dataset (the localizations; csv / hdf5 / Picasso / .smlm, drift, FRC)
+  dataset.py       Dataset (the localizations; csv / hdf5 / Picasso / .smlm, FRC) and Drift (per-movie drift estimate)
   psf.py           PSF (base class; type registry used by PSF.load)
   vectorial.py     VectorialPSF (+ gauss_blur_os, dipole_tensor, photosel_tensor)
   spline.py        CubicSplinePSF (+ geometry_matrix, emitter_height_pos_fn, stage_scan_pos_fn)
