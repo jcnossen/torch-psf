@@ -33,6 +33,7 @@ alternatives and one spline representation are prototyped here:
 import math
 import numpy as np
 import torch
+from torch_psf.optics import resolve_device
 from torch_psf.psf import PSF
 from torch_psf.spline import CubicSplinePSF
 from torch_psf.vectorial import dipole_tensor, spectral_min_oversample, check_spectral_oversample
@@ -91,7 +92,7 @@ def bspline_prefilter(samples, dims=(0, 1, 2)):
         M[0, 1] = M[-1, -2] = 2 / 6            # mirror: c[-1] = c[1]
         Mi = torch.linalg.inv(M)
         c = torch.movedim(torch.tensordot(Mi, torch.movedim(c, d, 0), dims=([1], [0])), 0, d)
-    return c.to(samples.dtype)
+    return c.to(samples.dtype).contiguous()          # contiguous: the knot-block reads of render are 1.5x slower otherwise
 
 
 # ============================================================================================ exact vectorial
@@ -242,14 +243,19 @@ class PixelSplinePSF(PSF):
     backend 'sep': separable einsum contraction (z, x, y); 'conv': one grouped conv2d as CubicSplinePSF (cuDNN; uses
     TF32 on Ampere GPUs unless torch.backends.cudnn.allow_tf32 = False, ~2e-4 of the peak)."""
 
-    def __init__(self, geo, samples, kernel='catmull', integrate=True, backend='sep'):
+    def __init__(self, geo, samples, kernel='catmull', integrate=True, backend='sep', coefs=None):
+        """coefs: the spline coefficients themselves instead of samples (kernel 'bspline': already prefiltered; samples
+        is then None and not used)"""
         self.geo, self.kernel, self.integrate, self.backend = geo, kernel, integrate, backend
         g = geo
         self.roisize, self.S, self.hz, self.nz, self.nv, self.nu = g.roisize, g.S, g.hz, g.nz, g.nv, g.nu
         self.dev, self.dtype, self.pixel_um = g.dev, g.dtype, g.pixel_um
         self.z_range, self.z0 = g.z_range, g.z0
-        self.samples = samples.to(self.dev, self.dtype)
-        self.knots = bspline_prefilter(self.samples) if kernel == 'bspline' else self.samples
+        if coefs is not None:
+            self.samples, self.knots = None, coefs.to(self.dev, self.dtype)
+        else:
+            self.samples = samples.to(self.dev, self.dtype)
+            self.knots = bspline_prefilter(self.samples) if kernel == 'bspline' else self.samples
         P, S, h = self.roisize, self.S, g.h
         self.T = S + 4 if integrate else 4                     # taps per lateral axis
         self.Lw = (P - 1) * S + self.T
@@ -299,8 +305,14 @@ class PixelSplinePSF(PSF):
         ix = torch.floor(t)
         fr = t - ix
         i0 = ix.long() - 1
-        base = i0[:, 0] * self.nv * self.nu + i0[:, 1] * self.nu + i0[:, 2]
-        sub = K.reshape(-1).index_select(0, (base[:, None] + self.pat[None]).reshape(-1)).reshape(1, N * 4, Lw, Lw)
+        if K.requires_grad and torch.is_grad_enabled():
+            # index_select: its backward is a plain scatter-add onto the knots
+            base = i0[:, 0] * self.nv * self.nu + i0[:, 1] * self.nu + i0[:, 2]
+            sub = K.reshape(-1).index_select(0, (base[:, None] + self.pat[None]).reshape(-1)).reshape(1, N * 4, Lw, Lw)
+        else:
+            # the same blocks read through a strided window view of the knots (no index tensor: ~2.3x faster at P = 41)
+            V = K.unfold(0, 4, 1).unfold(1, Lw, 1).unfold(2, Lw, 1)            # [nz - 3, nv - Lw + 1, nu - Lw + 1, 4, Lw, Lw]
+            sub = V[i0[:, 0], i0[:, 1], i0[:, 2]].reshape(1, N * 4, Lw, Lw)
         wz, wy, wx = self._z_weights(fr[:, 0], False), self._lat_weights(fr[:, 1], False), self._lat_weights(fr[:, 2], False)
         if self.backend == 'sep':
             return self._render_sep(sub.view(N, 4, Lw, Lw), wz, wy, wx, fr, grad)
@@ -354,6 +366,170 @@ def build_pixel_spline(vec, roisize, z_range, S, dz_um=0.01, zpad=None, xy_limit
     spl = PixelSplinePSF(geo, samples, kernel=kernel, integrate=integrate, backend=backend)
     spl.xmax = min(spl.xmax, xy)
     return spl
+
+
+# ============================================================================================ the file model
+class IntegratedSplinePSF(PixelSplinePSF):
+    """The integrated cubic B-spline PSF as a model of its own (psf.json type 'integrated_spline', docs/PSF_FORMAT.md):
+    the coefficients c [nz, n, n] of a tensor-product cubic B-spline f(u, v, z) that interpolates point samples of the
+    continuous PSF density (per px^2) on the knot grid (spacing 1 / S px laterally, dz_um in z; the grid layout of
+    CubicSplinePSF: knot (k, i, j) at z = z0_um + k dz_um, v = u0_px + i / S, u = u0_px + j / S, u = pixel centre
+    offset from the emitter); a pixel value is the exact integral of f over the pixel (PixelSplinePSF integrate=True,
+    kernel 'bspline', backend 'sep': plain float32 arithmetic, the same pixel values on every device).
+
+    Per-pattern-angle models (SIMCODE photoselection; VectorialPSF psf_dipole_M_angle / psf_blur_angle_px2):
+    coefs_angle [A, nz, n, n], one coefficient set per angle; angle=None (the default) is the mean of the angle
+    coefficients, i.e. the mean of the angle images (the spline is linear in its coefficients). render uses the
+    coefficients of `angle`; for_angle(a) is the same model (shared tensors) for another angle.
+
+    roisize: the ROI it renders; the coefficients tabulate the PSF independently of it (resized(roisize) shares them).
+    xy_limit: the offset limit (px; the largest |x|, |y| the coefficients support for this ROI, or less when given).
+    z_range: the heights (um) the spline is accurate on (zpad planes outside it absorb the boundary of the prefilter;
+    z is clamped to the knot range beyond, and z_limits = z_range for the fitter). Build it with from_vectorial."""
+    type_name = 'integrated_spline'
+    BASIS = 'cubic_bspline'
+
+    def __init__(self, roisize, coefs, oversample, dz_um, z_range, zpad, knot_u0_px, knot_z0_um, pixel_um=None,
+                 coefs_angle=None, angle=None, xy_limit=None, device=None, chunk_elems=2 ** 26):
+        dev = resolve_device(device)
+        ca = None if coefs_angle is None else torch.as_tensor(coefs_angle).to(dev, torch.float32)
+        if coefs is None:
+            if ca is None:
+                raise ValueError('IntegratedSplinePSF: coefs or coefs_angle needed')
+            coefs = ca.mean(0)
+        coefs = torch.as_tensor(coefs).to(dev, torch.float32).contiguous()
+        if ca is not None:
+            ca = ca.contiguous()
+        if ca is not None and tuple(ca.shape[1:]) != tuple(coefs.shape):
+            raise ValueError(f'coefs_angle {tuple(ca.shape)} does not match coefs {tuple(coefs.shape)}')
+        if angle is not None and ca is None:
+            angle = None                    # as VectorialPSF: a model without angle terms is the same for every angle
+        if angle is not None and not 0 <= int(angle) < len(ca):
+            raise ValueError(f'angle {angle}: the model has {len(ca)} angles')
+        self.coefs, self.coefs_angle, self.angle = coefs, ca, None if angle is None else int(angle)
+        self.zpad, self.chunk_elems = int(zpad), int(chunk_elems)
+        active = coefs if angle is None else ca[int(angle)]
+        geo = CubicSplinePSF(roisize, z_range, oversample=oversample, dz_um=dz_um, zpad=zpad, xy_limit=1e9, device=dev,
+                             knots=active, knot_u0_px=knot_u0_px, knot_z0_um=knot_z0_um, pixel_um=pixel_um)
+        super().__init__(geo, None, kernel='bspline', integrate=True, backend='sep', coefs=active)
+        if xy_limit is not None:
+            self.xmax = min(self.xmax, float(xy_limit))
+
+    # ------------------------------------------------------------------ construction
+    @classmethod
+    def from_vectorial(cls, vec, z_range, roisize=None, xy_limit=2.0, oversample=4, dz_um=0.01, zpad=6, chunk=4):
+        """The integrated spline of a VectorialPSF (its parameters, blur and dipole terms as they are), or of a list
+        of per-angle VectorialPSFs (e.g. [PSF.load(calib, angle=a) for a in range(A)]: coefs_angle, one set per
+        angle). Point-density knots of the exact band-limited image (ExactVectorialPSF 'point', point_knots),
+        interpolated by the cubic B-spline (bspline_prefilter), on the knot grid of
+        CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit + 1) (roisize default vec.roisize). Knot
+        z = emitter height at vec.focus_um. Accuracy (v4 in-situ PSFs, NA 1.49, 108 nm px, 0 - 0.4 um, offsets
+        <= 2 px): max |spline - VectorialPSF 'spectral'| = 1.7e-5 of the peak at oversample 4, 5.3e-5 at 3, 8e-6
+        at 5; dz_um 0.01 -> 0.005 changes it by < 1e-6."""
+        vecs = list(vec) if isinstance(vec, (list, tuple)) else [vec]
+        v0 = vecs[0]
+        P = int(v0.roisize if roisize is None else roisize)
+        geo = CubicSplinePSF(P, z_range, oversample=oversample, dz_um=dz_um, zpad=zpad, xy_limit=float(xy_limit) + 1.0,
+                             device=v0.dev, pixel_um=v0.pixel_um)
+        with torch.no_grad():
+            K = [bspline_prefilter(point_knots(v.resized(geo.Pl), geo, v.focus_um, chunk=chunk)) for v in vecs]
+        multi = isinstance(vec, (list, tuple)) and len(K) > 1
+        return cls(P, None if multi else K[0], oversample, dz_um, z_range, zpad, geo.u0, geo.z0, pixel_um=v0.pixel_um,
+                   coefs_angle=torch.stack(K) if multi else None, xy_limit=xy_limit, device=v0.dev)
+
+    def _like(self, roisize=None, angle='same', xy_limit=None, device=None):
+        return IntegratedSplinePSF(self.roisize if roisize is None else roisize, self.coefs, self.S, self.hz, self.z_range,
+                                   self.zpad, self.geo.u0, self.z0, pixel_um=self.pixel_um, coefs_angle=self.coefs_angle,
+                                   angle=self.angle if angle == 'same' else angle, xy_limit=xy_limit,
+                                   device=self.dev if device is None else device, chunk_elems=self.chunk_elems)
+
+    def resized(self, roisize, xy_limit=None):
+        """The same spline (shared coefficients) for roisize x roisize ROIs; offset limit = what the coefficients
+        support for that ROI (or xy_limit when smaller)."""
+        s = self._like(roisize, xy_limit=xy_limit)
+        s.provenance = self.provenance
+        return s
+
+    def for_angle(self, angle):
+        """The model of another pattern angle (None = the angle average), shared coefficients."""
+        s = self._like(angle=angle, xy_limit=self.xmax)
+        s.provenance = self.provenance
+        return s
+
+    @property
+    def n_angles(self):
+        return 0 if self.coefs_angle is None else len(self.coefs_angle)
+
+    def to(self, device):
+        new = self._like(xy_limit=self.xmax, device=device)
+        prov = self.provenance
+        self.__dict__.update(new.__dict__)
+        self.provenance = prov
+        return self
+
+    @property
+    def z_limits(self):
+        return self.z_range
+
+    def render(self, pos, grad=False, knots=None):
+        """PixelSplinePSF.render in chunks of emitters (the knot block of one emitter is 4 (P - 1) S + S + 4)^2
+        floats: chunk_elems of them per chunk)"""
+        n = max(1, self.chunk_elems // (4 * self.Lw * self.Lw))
+        if pos.shape[0] <= n:
+            return super().render(pos, grad, knots)
+        parts = [super(IntegratedSplinePSF, self).render(p, grad, knots) for p in pos.split(n)]
+        if not grad:
+            return torch.cat(parts)
+        return tuple(torch.cat([p[k] for p in parts]) for k in range(4))
+
+    # ------------------------------------------------------------------ files
+    def to_dict(self):
+        """Grid description (without the coefficients) for the PSF file."""
+        return dict(basis=self.BASIS, value='pixel_integral', roisize=self.roisize, z_range=list(self.z_range),
+                    oversample=self.S, dz_um=self.hz, zpad=self.zpad, xy_limit=self.xmax, c=self.geo.c, z0_um=self.z0,
+                    nz=self.nz, u0_px=self.geo.u0, pixel_um=self.pixel_um, n_angles=self.n_angles)
+
+    def _file_dict(self, source=None):
+        d, arrays = {}, {}
+        if source is not None:
+            d, arrays = source._file_dict()
+        d['integrated_spline'] = self.to_dict()
+        if self.coefs_angle is None:
+            arrays['coefs'] = self.coefs.detach().cpu().numpy()
+        else:
+            arrays['coefs_angle'] = self.coefs_angle.detach().cpu().numpy()
+        return d, arrays
+
+    @classmethod
+    def _from_file(cls, d, arrays, roisize=None, device=None, angle=None, **kw):
+        g = d['integrated_spline']
+        if g.get('basis') != cls.BASIS or g.get('value') != 'pixel_integral':
+            raise ValueError(f"integrated_spline: unknown basis / value {g.get('basis')!r} / {g.get('value')!r} "
+                             f"(this reader knows {cls.BASIS!r} / 'pixel_integral')")
+        arrays = arrays or {}
+        ca = arrays.get('coefs_angle')
+        if (ca is None) == ('coefs' not in arrays):
+            raise ValueError("integrated_spline: exactly one of the arrays 'coefs' / 'coefs_angle' expected")
+        if ca is not None and int(g.get('n_angles', len(ca))) != len(ca):
+            raise ValueError(f"integrated_spline: n_angles {g.get('n_angles')} but coefs_angle has {len(ca)}")
+        px = g.get('pixel_um') or (d['optics'].get('pixel_um') if d.get('optics') else None)
+        m = cls(g['roisize'], arrays.get('coefs'), g['oversample'], g['dz_um'], tuple(g['z_range']), g['zpad'],
+                g['u0_px'], g['z0_um'], pixel_um=px, coefs_angle=ca, angle=angle, xy_limit=g.get('xy_limit'), device=device)
+        if m.nz != int(g['nz']) or m.geo.c != int(g['c']):
+            raise ValueError(f"integrated_spline: coefficient array {tuple(m.coefs.shape)} does not match the grid "
+                             f"(nz {g['nz']}, c {g['c']}, oversample {g['oversample']})")
+        if roisize is not None and int(roisize) != m.roisize:
+            m = m.resized(int(roisize))
+        return m
+
+    @staticmethod
+    def load_source(path, roisize=None, device=None, angle=None):
+        """The vectorial model the spline was built from (stored as its source), or None."""
+        d, arrays, _ = PSF.read_file(path)
+        if 'zernike_waves' not in d:
+            return None
+        return PSF._registry['vectorial']._from_file(d, arrays, roisize=roisize or d.get('roisize', 15), device=device,
+                                                     angle=angle)
 
 
 # ============================================================================================ spline-rendered track fit
