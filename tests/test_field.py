@@ -115,6 +115,32 @@ def test_field_psf_render_fit_and_zip(tmp_path):
     assert float((zf - pp[:, 2]).abs().median()) < 0.03
 
 
+@torch.no_grad()
+def test_integrated_field_tiles_and_channels(tmp_path):
+    from torch_psf import ChannelsPSF, IntegratedSplinePSF
+
+    fp = FieldPSF(vec(11, pixel_integration='exact'), field())
+    tiles = fp.to_tiled(tile=128, z_range=(.2, .3), xy_limit=1)
+    xy = torch.tensor(tiles.centers[[0, 3]], device=DEV, dtype=torch.float32)
+    pos = torch.tensor([[.19, -.31, .241], [-.33, .12, .264]], device=DEV)
+    ref = fp.render(pos, xy=xy)
+    for i, point in enumerate(xy):
+        vec_at = fp.at(*point.tolist())
+        torch.testing.assert_close(ref[i], vec_at.render(pos[i:i+1])[0], atol=1e-7, rtol=0)
+        vec_at.pixel_integration = 'box'
+        assert (ref[i] - vec_at.render(pos[i:i+1])[0]).abs().max() > 1e-4 * ref[i].max()
+    expected = tiles.render(pos, xy=xy)
+    assert torch.all((expected - ref).abs().amax((-2, -1)) / ref.amax((-2, -1)) < 2e-5)
+    path = tmp_path / 'tiles.zip'
+    assert io.save_zip(path, tiles, zstack_planes=3)['version'] == '0.3.0'
+    loaded = PSF.load(path, device=DEV)
+    assert isinstance(loaded.reference_spline(), IntegratedSplinePSF)
+    torch.testing.assert_close(loaded.render(pos, xy=xy), expected)
+    models = [tiles.spline(0), tiles.spline(3)]
+    channels = ChannelsPSF(models)
+    assert torch.equal(channels.render(pos), torch.stack([s.render(pos) for s in models], 1))
+
+
 def test_tiled_spline_psf_fit_and_zip(tmp_path):
     fp = FieldPSF(vec(11), field())
     tp = fp.to_tiled(tile=64, roisize=11, oversample=2, dz_um=0.04, zpad=2, xy_limit=2.0)

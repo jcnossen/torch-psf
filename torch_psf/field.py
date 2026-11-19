@@ -397,8 +397,8 @@ class FieldPSF(PSF):
 
     def to_tiled(self, tile=128, extent=None, roisize=None, z_range=None, lazy=True, **grid):
         """TiledSplinePSF: tiles of `tile` px over extent (x0, y0, x1, y1) px (default the field box
-        cx -+ sx, cy -+ sy), each a CubicSplinePSF of the model at the tile centre (grid: oversample, dz_um, zpad,
-        xy_limit of to_spline; default the stored spline grid of a file, else the to_spline defaults)."""
+        cx -+ sx, cy -+ sy). kind='cubic' tabulates pixel values, kind='integrated' integrates the density spline.
+        Defaults to integrated for a non-box base. Grid options include oversample, dz_um, zpad and xy_limit."""
         g = dict(self.spline_grid or {})
         g.update(grid)
         r0, z0 = g.pop('roisize', None), g.pop('z_range', None)
@@ -422,8 +422,13 @@ class TiledSplinePSF(PSF):
     render(pos, grad=False, xy=None) (xy None: the reference-point spline), tile_index(xy), spline(t), fit(rois,
     corners=..., xy=None): every ROI fitted with its tile's spline (input order kept)."""
 
-    def __init__(self, field_psf, tile=128, extent=None, roisize=None, z_range=None, lazy=True, **grid):
+    def __init__(self, field_psf, tile=128, extent=None, roisize=None, z_range=None, lazy=True, kind=None, **grid):
         self.source = field_psf
+        if kind is None:
+            kind = 'integrated' if field_psf.base.pixel_integration != 'box' else 'cubic'
+        if kind not in ('cubic', 'integrated'):
+            raise ValueError("kind must be 'cubic' or 'integrated'")
+        self.kind = kind
         f = field_psf.field
         if extent is None:
             cx, cy, sx, sy = f.norm
@@ -468,10 +473,13 @@ class TiledSplinePSF(PSF):
         return iy * self.nx + ix
 
     def _build(self, vec):
+        if self.kind == 'integrated':
+            from torch_psf.pixint import IntegratedSplinePSF
+            return IntegratedSplinePSF.from_vectorial(vec, self._zr, roisize=self.roisize, **self.grid)
         return vec.to_spline(self.roisize, self._zr, **self.grid)
 
     def spline(self, t):
-        """the CubicSplinePSF of tile t"""
+        """The spline at the centre of tile t."""
         if t not in self._splines:
             c = self.centers[t]
             self._splines[t] = self._build(self.source.at(c[0], c[1]))
@@ -539,7 +547,7 @@ class TiledSplinePSF(PSF):
         return ds
 
     def resized(self, roisize):
-        t = TiledSplinePSF(self.source, self.tile, self.extent, roisize, self._zr, True, **self.grid)
+        t = TiledSplinePSF(self.source, self.tile, self.extent, roisize, self._zr, True, kind=self.kind, **self.grid)
         t._splines = {k: s.resized(roisize) for k, s in self._splines.items()}
         return t
 
@@ -605,7 +613,8 @@ def field_psf_from_file(model, source, block, arrays=None, crop=None, tiles=None
     if hasattr(model, 'zidx'):
         return fp
     g = model.to_dict()
-    fp.spline_grid = dict(oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
+    fp.spline_grid = dict(kind='integrated' if model.type_name == 'integrated_spline' else 'cubic',
+                          oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
                           roisize=g['roisize'], z_range=tuple(g['z_range']))
     t = dict(tiles or {})
     tp = fp.to_tiled(tile=t.get('tile_px', 128), extent=t.get('extent'))
