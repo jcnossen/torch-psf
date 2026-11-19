@@ -92,7 +92,7 @@ def bspline_prefilter(samples, dims=(0, 1, 2)):
         M[0, 1] = M[-1, -2] = 2 / 6            # mirror: c[-1] = c[1]
         Mi = torch.linalg.inv(M)
         c = torch.movedim(torch.tensordot(Mi, torch.movedim(c, d, 0), dims=([1], [0])), 0, d)
-    return c.to(samples.dtype)
+    return c.to(samples.dtype).contiguous()          # contiguous: the knot-block reads of render are 1.5x slower otherwise
 
 
 # ============================================================================================ exact vectorial
@@ -397,7 +397,9 @@ class IntegratedSplinePSF(PixelSplinePSF):
             if ca is None:
                 raise ValueError('IntegratedSplinePSF: coefs or coefs_angle needed')
             coefs = ca.mean(0)
-        coefs = torch.as_tensor(coefs).to(dev, torch.float32)
+        coefs = torch.as_tensor(coefs).to(dev, torch.float32).contiguous()
+        if ca is not None:
+            ca = ca.contiguous()
         if ca is not None and tuple(ca.shape[1:]) != tuple(coefs.shape):
             raise ValueError(f'coefs_angle {tuple(ca.shape)} does not match coefs {tuple(coefs.shape)}')
         if angle is not None and ca is None:
