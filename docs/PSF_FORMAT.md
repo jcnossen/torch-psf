@@ -105,7 +105,11 @@ Any other key is kept (written as given, ignored by readers that do not know it)
 indices), `zernike_waves` [nz], `apod` [3] (radial amplitude exp(sum_n c_n rho^(2n))), `saf` [4] (supercritical annulus
 tilt x / y, amplitude x / y), `focus_um` (focal plane relative to the coverslip), `psf_blur_px2` [3] or null (image
 blur covariance sxx, syy, sxy in px^2), `psf_dipole_M` [3, 3] or null (emission dipole tensor), optional
-`psf_dipole_w` [3], `diattenuation` or null, `npupil`, `oversample`, `roisize`, `z_range_um` [2] or null; the SIMCODE
+`psf_dipole_w` [3], `diattenuation` or null, `npupil`, `oversample`, `roisize`, `z_range_um` [2] or null, optional
+`pixel_integration` (`box` = the mean of oversample x oversample point samples per pixel, the default when absent;
+`spectral` = the exact pixel integral of the band-limited image; `gauss_legendre` = oversample Gauss-Legendre nodes
+per axis; a reader must refuse a value it does not know instead of rendering `box`; readers written before the key
+existed ignore it and render `box`: off by up to ~0.6 % of the peak at oversample 3, 108 nm pixels); the SIMCODE
 calibration names `pixelsize_um`, `wavelength_um`, `NA`, `n_imm`, `n_med` (duplicates of `optics`, so SIMCODE reads the
 block as a calibration). Optional per-pattern-angle terms (SIMCODE): `psf_dipole_M_angle` [A, 3, 3],
 `psf_blur_angle_px2` [A, 3]. z = emitter height above the coverslip (um) at focus `focus_um`.

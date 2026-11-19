@@ -14,7 +14,20 @@ Physics:
  - Defocus: focal-plane position f relative to the coverslip, in the sample's coordinate:
    phase = k0 (n_med cos(theta_med) z_e - n_imm cos(theta_imm) f).
  - Image: matrix Fourier transform (chirp-z) from the pupil to an oversampled pixel grid, optional image-plane Gaussian
-   blur (covariance in px^2, e.g. a line blur v v^T), integration over the pixels.
+   blur (covariance in px^2, e.g. a line blur v v^T), integration over the pixels (pixel_integration):
+   'box'            the mean of the oversample x oversample point samples of each pixel (midpoint rule; the default).
+                    Its error is mostly a missing isotropic blur of 1 / (12 oversample^2) px^2 (1.4 % of the peak at
+                    oversample 2, NA 1.49, 700 nm, 108 nm pixels).
+   'spectral'       exact: |E|^2 is band-limited (no spatial frequency above fc = 2 NA / lambda), so its point samples on
+                    a uniform grid with oversample > 2 fc pixel_um per px (>= 2; 2 suffices for pixels < lambda / (2 NA),
+                    otherwise ValueError) (padded by PIX_PAD px per side) determine it; one FFT,
+                    times the transfer function of the pixel box sinc(fx) sinc(fy) and of the optional blur, inverse
+                    FFT, sampled at the pixel centres (a raised-cosine taper between the band limit and the grid's
+                    Nyquist frequency keeps the kernel compact). Exact up to float32 round-off and the wrap at the
+                    padded border (~1e-5 of the peak at oversample 2); costs about oversample 3 of 'box'.
+   'gauss_legendre' Gauss-Legendre quadrature with oversample nodes per axis (error ~1e-5 of the peak at 3 nodes;
+                    the cost of 'box' at the same oversample); no image-plane blur.
+   ('exact' = 'spectral'.)
  - Normalization: the PSF integrates to 1 over the whole image plane for an aberration-free emitter at z_e = 0, i.e.
    `intensity` = detected photons of an emitter at the coverslip.
 
@@ -59,6 +72,66 @@ def gauss_blur_os(I, cov, os_, pad):
     return J[:, c:n - c, c:n - c] if c > 0 else J
 
 
+PIXEL_INTEGRATIONS = ('box', 'spectral', 'gauss_legendre')
+
+
+def pixel_integration_mode(mode):
+    """Validated pixel-integration name (VectorialPSF.pixel_integration); 'exact' = 'spectral', None = 'box'. Any other
+    value (another string, a number, ...) raises ValueError: a model never silently falls back to 'box'."""
+    if mode is None:
+        return 'box'
+    m = {'exact': 'spectral', 'gauss': 'gauss_legendre', 'midpoint': 'box'}.get(mode, mode) if isinstance(mode, str) else None
+    if m not in PIXEL_INTEGRATIONS:
+        raise ValueError(f"unknown pixel_integration {mode!r}: one of {PIXEL_INTEGRATIONS} (or 'exact')")
+    return m
+
+
+def spectral_min_oversample(fc):
+    """Smallest oversample (>= 2) whose grid Nyquist frequency oversample / 2 is above the band limit fc (cycles / px) of
+    |E|^2, so that its point samples do not alias (pixel_integration 'spectral')."""
+    return max(2, int(math.floor(2 * float(fc))) + 1)
+
+
+def check_spectral_oversample(fc, os_):
+    """ValueError when the point samples of a density band-limited to fc (cycles / px) alias at os_ samples / px."""
+    if float(fc) >= 0.5 * os_:
+        raise ValueError(f"pixel_integration 'spectral': the band limit of |E|^2 (2 NA / wavelength x pixel size = "
+                         f"{float(fc):.3f} cycles / px) is not below the Nyquist frequency of oversample {os_} "
+                         f"({0.5 * os_:g} cycles / px), so the point samples alias; use oversample >= "
+                         f"{spectral_min_oversample(fc)}")
+
+
+def pixel_box_spectral(I, os_, pad, R, fc, cov=None):
+    """Exact pixel means of a band-limited density from its point samples I [B, n, n] on the uniform grid with os_
+    samples per px, n = (R + 2 pad) os_ (sample j at (j - (n - 1) / 2) / os_ px from the ROI centre): FFT, times the
+    pixel-box transfer function sinc(fx) sinc(fy), the optional Gaussian blur exp(-2 pi^2 f^T C f) (cov = [sxx, syy, sxy]
+    px^2, [3] or [B, 3]; gain capped as gauss_blur_os) and a raised-cosine taper from the band limit fc (cycles / px)
+    to the Nyquist frequency os_ / 2, shifted onto the pixel centres; inverse FFT, every os_-th sample, cropped by pad
+    -> [B, R, R] (the density averaged over each pixel). ValueError when fc >= os_ / 2 (the samples alias)."""
+    check_spectral_oversample(fc, os_)
+    n = I.shape[-1]
+    f = torch.fft.fftfreq(n, d=1.0 / os_, device=I.device)            # cycles / px
+    fr = torch.fft.rfftfreq(n, d=1.0 / os_, device=I.device)
+    fn = 0.5 * os_
+    fc = min(float(fc) * 1.02, fn - 0.05)
+
+    def taper(q):
+        a = ((q.abs() - fc) / (fn - fc)).clamp(0, 1)
+        return 0.5 * (1 + torch.cos(math.pi * a))
+
+    d = (os_ - 1) / (2 * os_)                                          # sample p os_ -> pixel centre p: shift by d px
+    Ty = taper(f) * torch.sinc(f) * torch.exp(2j * math.pi * f * d)
+    Tx = taper(fr) * torch.sinc(fr) * torch.exp(2j * math.pi * fr * d)
+    H = Ty[:, None] * Tx[None, :]
+    if cov is not None:
+        cov = torch.as_tensor(cov, device=I.device, dtype=torch.float32).reshape(-1, 3)
+        q = cov[:, 0, None, None] * fr[None, :] ** 2 + cov[:, 1, None, None] * f[:, None] ** 2 \
+            + 2 * cov[:, 2, None, None] * fr[None, :] * f[:, None]
+        H = H * torch.exp((-2 * math.pi ** 2 * q).clamp(max=3.0))
+    J = torch.fft.irfft2(torch.fft.rfft2(I) * H, s=(n, n))
+    return J[:, ::os_, ::os_][:, pad:pad + R, pad:pad + R]
+
+
 def dipole_tensor(M=None, w=None, dev=None):
     """Emission-dipole second-moment tensor (trace 1) from M ([3, 3] or [B, 3, 3]) or diagonal weights w ([3], mean 1);
     None if both are None (isotropic emitter)."""
@@ -90,22 +163,26 @@ class VectorialPSF(torch.nn.Module, PSF):
     Constructor: roisize (px), pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices (Noll), npupil (pupil
     samples per side), oversample (image samples per px per side), device (default: cuda if available); fit_NA / fit_nmed make NA / n_med trainable.
     focus_um (focal plane position used by render) and z_range (um, the emitter heights the model is meant for).
+    pixel_integration: 'box' (default) | 'spectral' (= 'exact') | 'gauss_legendre' (module docstring; an attribute,
+    copied by resized() and stored in the file when not 'box').
 
     Parameters / buffers: zcoef [nz] (waves rms), NA, n_med, apod [3], saf [4]; buffers pupil_phase [npupil, npupil]
     (waves, 0) and pupil_amp [npupil, npupil] (1). Optional plain attributes: blur (covariance [3] px^2), diat (Ex / Ey
     diattenuation), dipM (3 x 3 dipole tensor) or dipw (its diagonal, mean 1); None = not applied.
     """
     BLUR_PAD = 3   # px of padding per side for the image-plane blur (kernel sd <~ 0.7 px)
+    PIX_PAD = 3    # px of padding per side of pixel_integration 'spectral' (also covers the blur)
     type_name = 'vectorial'
 
     def __init__(self, roisize, pixel_um=0.10833, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68,
                  zernike_indices=tuple(range(5, 22)), npupil=64, oversample=3, device=None, fit_NA=False,
-                 fit_nmed=False, focus_um=0.0, z_range=(0.0, 1.0)):
+                 fit_nmed=False, focus_um=0.0, z_range=(0.0, 1.0), pixel_integration='box'):
         super().__init__()
         self.roisize = roisize
         self.pixel_um = pixel_um
         self.npupil = npupil
         self.os = oversample
+        self.pixel_integration = pixel_integration
         self.zidx = list(zernike_indices)
         self.n_imm, self.wavelength_um = n_imm, wavelength_um
         self.dev = torch.device(default_device() if device is None else device)
@@ -143,6 +220,46 @@ class VectorialPSF(torch.nn.Module, PSF):
         ns = roisize * oversample
         u = (torch.arange(ns, device=self.dev) - (ns - 1) / 2) / oversample * pixel_um
         self.register_buffer('u', u)
+        self._check_spectral()
+
+    @property
+    def pixel_integration(self):
+        return self._pixint
+
+    @pixel_integration.setter
+    def pixel_integration(self, mode):
+        m = pixel_integration_mode(mode)
+        if m == 'spectral' and self.os < 2:
+            raise ValueError("pixel_integration 'spectral' needs oversample >= 2 (alias-free point samples of |E|^2)")
+        if m == 'spectral' and hasattr(self, 'NA'):            # (in __init__: checked once NA exists)
+            check_spectral_oversample(self.band_limit(), self.os)
+        self._pixint = m
+
+    def _check_spectral(self):
+        """'spectral': the oversampled grid must resolve the band limit of |E|^2 (ValueError otherwise)."""
+        if self._pixint == 'spectral':
+            check_spectral_oversample(self.band_limit(), self.os)
+
+    def band_limit(self):
+        """Highest spatial frequency of |E|^2 (cycles / px): 2 NA / lambda * pixel size."""
+        return 2 * float(self.NA.detach()) / self.wavelength_um * self.pixel_um
+
+    def _image_grid(self, blur):
+        """(1D image sample positions in um from the ROI centre, Gauss-Legendre weights or None, padding px) of the
+        pixel integration"""
+        R, o, mode = self.roisize, self.os, self.pixel_integration
+        if mode == 'gauss_legendre':
+            if blur is not None:
+                raise ValueError("pixel_integration 'gauss_legendre' does not support an image-plane blur; use 'spectral'")
+            x, w = np.polynomial.legendre.leggauss(o)
+            uc = (np.arange(R) - (R - 1) / 2)[:, None] + x[None] / 2
+            t = lambda a: torch.tensor(a, dtype=torch.float32, device=self.dev)
+            return t(uc.reshape(-1)) * self.pixel_um, t(w / 2), 0
+        pad = self.PIX_PAD if mode == 'spectral' else (self.BLUR_PAD if blur is not None else 0)
+        if pad == 0:
+            return self.u, None, 0
+        ns_p = (R + 2 * pad) * o
+        return (torch.arange(ns_p, device=self.dev) - (ns_p - 1) / 2) / o * self.pixel_um, None, pad
 
     # ------------------------------------------------------------------ physics
     def pupil_fields(self):
@@ -215,11 +332,7 @@ class VectorialPSF(torch.nn.Module, PSF):
         kx1 = kx[0]  # [N]
         ky1 = ky[:, 0]
         bl = blur if blur is not None else self.blur
-        u, pad = self.u, 0
-        if bl is not None:   # blur: evaluate on a grid padded by `pad` px per side
-            pad = self.BLUR_PAD
-            ns_p = (self.roisize + 2 * pad) * self.os
-            u = (torch.arange(ns_p, device=self.dev) - (ns_p - 1) / 2) / self.os * self.pixel_um
+        u, glw, pad = self._image_grid(bl)   # blur / 'spectral': a grid padded by `pad` px per side
         Fx = torch.exp(1j * u[:, None] * kx1[None, :])  # [ns, N]
         Fy = torch.exp(1j * u[:, None] * ky1[None, :])
         E = Fy @ Pb.to(torch.complex64) @ Fx.T  # [B, 6, ns, ns]
@@ -236,11 +349,16 @@ class VectorialPSF(torch.nn.Module, PSF):
         energy = (P.real ** 2 + P.imag ** 2).sum() / 3 * dk / (2 * math.pi) ** 2
         # continuous field E = sum(...) dk / (2 pi)^2, so |E|^2 gets that factor squared
         I = I * (dk / (2 * math.pi) ** 2) ** 2
-        if bl is not None:
-            I = gauss_blur_os(I, bl, self.os, pad)
-        # pixel integration: average over the oversampled subpixels times the pixel area
         R, o = self.roisize, self.os
-        I = I.reshape(B, R, o, R, o).mean((2, 4)) * self.pixel_um ** 2
+        if self.pixel_integration == 'spectral':     # exact pixel mean (and blur) in the Fourier domain
+            I = pixel_box_spectral(I, o, pad, R, self.band_limit(), bl) * self.pixel_um ** 2
+        elif self.pixel_integration == 'gauss_legendre':
+            I = torch.einsum('biajn,a,n->bij', I.reshape(B, R, o, R, o), glw, glw) * self.pixel_um ** 2
+        else:
+            if bl is not None:
+                I = gauss_blur_os(I, bl, self.os, pad)
+            # pixel integration: average over the oversampled subpixels times the pixel area
+            I = I.reshape(B, R, o, R, o).mean((2, 4)) * self.pixel_um ** 2
         psf = I / energy
         if intensity is not None:
             psf = psf * intensity[:, None, None]
@@ -306,7 +424,8 @@ class VectorialPSF(torch.nn.Module, PSF):
     def __repr__(self):
         return (f'VectorialPSF(roisize={self.roisize}, pixel_um={self.pixel_um}, NA={float(self.NA):.3f}, '
                 f'n_imm={self.n_imm}, n_med={float(self.n_med):.3f}, wavelength_um={self.wavelength_um}, '
-                f'npupil={self.npupil}, oversample={self.os}, focus_um={self.focus_um})')
+                f'npupil={self.npupil}, oversample={self.os}, focus_um={self.focus_um}'
+                + (f', pixel_integration={self.pixel_integration!r}' if self.pixel_integration != 'box' else '') + ')')
 
     # ------------------------------------------------------------------ files
     def _file_dict(self, source=None):
@@ -318,6 +437,8 @@ class VectorialPSF(torch.nn.Module, PSF):
                  z_range_um=None if self.z_range is None else list(self.z_range))
         if self.dipw is not None:
             d['psf_dipole_w'] = _list(self.dipw)
+        if self.pixel_integration != 'box':
+            d['pixel_integration'] = self.pixel_integration
         d.update(pixelsize_um=o.pixel_um, wavelength_um=o.wavelength_um, NA=o.NA, n_imm=o.n_imm, n_med=o.n_med)
         arrays = {}
         if bool((self.pupil_phase != 0).any()):
@@ -327,16 +448,22 @@ class VectorialPSF(torch.nn.Module, PSF):
         return d, arrays
 
     @classmethod
-    def _from_file(cls, d, arrays, roisize=None, device=None, angle=None, npupil=None, oversample=None, **kw):
+    def _from_file(cls, d, arrays, roisize=None, device=None, angle=None, npupil=None, oversample=None,
+                   pixel_integration=None, **kw):
         """From a torch-psf json or a plain calibration json (the optics and Zernikes at the top level; optional terms
         psf_blur_px2, psf_dipole_M, psf_dipole_w, diattenuation, and per illumination angle psf_dipole_M_angle /
         psf_blur_angle_px2: angle 0 / 1 = that angle, None = the average)."""
         o = Optics.from_dict(d['optics'] if 'optics' in d else d)
         zr = d.get('z_range_um')
+        pixint = pixel_integration if pixel_integration is not None else d.get('pixel_integration')
+        try:
+            pixint = pixel_integration_mode(pixint)
+        except ValueError as e:
+            raise ValueError(f'PSF file: {e}') from None
         vec = cls(roisize or d.get('roisize', 15), zernike_indices=tuple(d.get('zernike_noll', range(5, 22))),
                   npupil=npupil or d.get('npupil', 64), oversample=oversample or d.get('oversample', 3), device=device,
                   focus_um=float(d.get('focus_um', 0.0) or 0.0), z_range=tuple(zr) if zr else (0.0, 1.0),
-                  **o.vectorial_kwargs())
+                  pixel_integration=pixint, **o.vectorial_kwargs())
         t = lambda v: torch.tensor(v, device=vec.dev, dtype=torch.float32)
         with torch.no_grad():
             if d.get('zernike_waves') is not None:
@@ -377,14 +504,16 @@ class VectorialPSF(torch.nn.Module, PSF):
         return Optics(pixel_um=self.pixel_um, NA=float(self.NA), wavelength_um=self.wavelength_um, n_imm=self.n_imm,
                       n_med=float(self.n_med))
 
-    def resized(self, roisize, npupil=None, oversample=None, device=None):
-        """A copy with another ROI size (and optionally pupil sampling / oversampling / device): same optics, Zernikes,
-        apodization, SAF, pupil maps (resampled if npupil changes) and optional terms."""
+    def resized(self, roisize, npupil=None, oversample=None, device=None, pixel_integration=None):
+        """A copy with another ROI size (and optionally pupil sampling / oversampling / device / pixel integration):
+        same optics, Zernikes, apodization, SAF, pupil maps (resampled if npupil changes), optional terms and (default)
+        pixel integration."""
         npupil = self.npupil if npupil is None else npupil
         new = VectorialPSF(roisize, pixel_um=self.pixel_um, NA=float(self.NA), n_imm=self.n_imm,
                            n_med=float(self.n_med), wavelength_um=self.wavelength_um, zernike_indices=self.zidx,
                            npupil=npupil, oversample=self.os if oversample is None else oversample,
-                           device=self.dev if device is None else device, focus_um=self.focus_um, z_range=self.z_range)
+                           device=self.dev if device is None else device, focus_um=self.focus_um, z_range=self.z_range,
+                           pixel_integration=self.pixel_integration if pixel_integration is None else pixel_integration)
         new.NA.requires_grad_(self.NA.requires_grad)
         new.n_med.requires_grad_(self.n_med.requires_grad)
         with torch.no_grad():
