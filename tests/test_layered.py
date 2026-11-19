@@ -45,3 +45,24 @@ def test_resized_and_file_roundtrip(tmp_path):
     assert isinstance(M, LayeredVectorialPSF) and abs(float(M.n_top) - 1.0) < 1e-7
     with torch.no_grad():
         assert torch.allclose(M(POS, 0.0), L(POS, 0.0), atol=1e-7)
+
+
+def test_layered_channel_in_channels_psf():
+    """a LayeredVectorialPSF channel (type_name 'vectorial_layered') in a ChannelsPSF: dipole_basis without an
+    explicit focus (VectorialPSF.dipole_basis defaults to focus_um) combines to render(dipM)"""
+    from torch_psf import ChannelsPSF
+    from torch_psf.orientation import M_to_m6
+    kw = dict(roisize=7, npupil=16, oversample=2, device='cpu', z_range=(0.0, 0.03), focus_um=0.05,
+              pixel_um=0.065, NA=1.47, n_imm=1.518, wavelength_um=0.6)
+    arms = [LayeredVectorialPSF(n_med=1.49, n_top=1.0, film_um=0.03, **kw), VectorialPSF(n_med=1.33, **kw)]
+    m = ChannelsPSF(arms, channel_offsets=[[0.1, -0.2], [-0.2, 0.1]])
+    pos = torch.tensor([[0.17, -0.23, 0.01], [-0.32, 0.24, 0.02]])
+    a = torch.randn(2, 3, 3, generator=torch.Generator().manual_seed(3))
+    M = a @ a.transpose(1, 2)
+    M = M / M.diagonal(dim1=1, dim2=2).sum(1)[:, None, None]
+    with torch.no_grad():
+        B = m.dipole_basis(pos)
+        ref = m.render(pos, dipM=M)
+        assert torch.allclose(arms[0].dipole_basis(pos), arms[0].dipole_basis(pos, arms[0].focus_um))
+    comb = torch.einsum('nk,nckuv->ncuv', M_to_m6(M), B)
+    assert float((comb - ref).abs().max()) <= 1e-5 * float(ref.abs().max())

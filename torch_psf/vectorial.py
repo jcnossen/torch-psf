@@ -398,13 +398,14 @@ class VectorialPSF(torch.nn.Module, PSF):
             psf = psf + bg[:, None, None]
         return psf
 
-    def dipole_basis(self, pos, focus, zcoef_offset=None, blur=None):
+    def dipole_basis(self, pos, focus=None, zcoef_offset=None, blur=None):
         """The six images the PSF is linear in, for a dipole second-moment tensor M: [B, 6, R, R] in the order
         (xx, yy, zz, xy, xz, yz), forward(dipM=M) = sum_k m_k basis_k with m = (M_xx, M_yy, M_zz, M_xy, M_xz, M_yz):
         basis_ii = |E_i|^2, basis_ij = 2 Re[E_i . E_j*] (i != j), normalized as forward (isotropic = (xx + yy + zz) / 3).
         pos, focus, zcoef_offset, blur as forward (diat, pupil maps, pixel_integration etc. of the model apply: the
-        image is linear in M, so the pixel integration is applied to each basis image)."""
+        image is linear in M, so the pixel integration is applied to each basis image). focus None: self.focus_um."""
         B = pos.shape[0]
+        focus = self.focus_um if focus is None else focus
         E, aux = self._fields(pos, focus, zcoef_offset, blur)
         Ed = E.reshape(B, 3, 2, *E.shape[-2:])
         re, im = Ed.real, Ed.imag
