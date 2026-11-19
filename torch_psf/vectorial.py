@@ -18,8 +18,9 @@ Physics:
    'box'            the mean of the oversample x oversample point samples of each pixel (midpoint rule; the default).
                     Its error is mostly a missing isotropic blur of 1 / (12 oversample^2) px^2 (1.4 % of the peak at
                     oversample 2, NA 1.49, 700 nm, 108 nm pixels).
-   'spectral'       exact: |E|^2 is band-limited (no spatial frequency above 2 NA / lambda), so its point samples on a
-                    uniform grid with oversample >= 2 per px (padded by PIX_PAD px per side) determine it; one FFT,
+   'spectral'       exact: |E|^2 is band-limited (no spatial frequency above fc = 2 NA / lambda), so its point samples on
+                    a uniform grid with oversample > 2 fc pixel_um per px (>= 2; 2 suffices for pixels < lambda / (2 NA),
+                    otherwise ValueError) (padded by PIX_PAD px per side) determine it; one FFT,
                     times the transfer function of the pixel box sinc(fx) sinc(fy) and of the optional blur, inverse
                     FFT, sampled at the pixel centres (a raised-cosine taper between the band limit and the grid's
                     Nyquist frequency keeps the kernel compact). Exact up to float32 round-off and the wrap at the
@@ -85,13 +86,29 @@ def pixel_integration_mode(mode):
     return m
 
 
+def spectral_min_oversample(fc):
+    """Smallest oversample (>= 2) whose grid Nyquist frequency oversample / 2 is above the band limit fc (cycles / px) of
+    |E|^2, so that its point samples do not alias (pixel_integration 'spectral')."""
+    return max(2, int(math.floor(2 * float(fc))) + 1)
+
+
+def check_spectral_oversample(fc, os_):
+    """ValueError when the point samples of a density band-limited to fc (cycles / px) alias at os_ samples / px."""
+    if float(fc) >= 0.5 * os_:
+        raise ValueError(f"pixel_integration 'spectral': the band limit of |E|^2 (2 NA / wavelength x pixel size = "
+                         f"{float(fc):.3f} cycles / px) is not below the Nyquist frequency of oversample {os_} "
+                         f"({0.5 * os_:g} cycles / px), so the point samples alias; use oversample >= "
+                         f"{spectral_min_oversample(fc)}")
+
+
 def pixel_box_spectral(I, os_, pad, R, fc, cov=None):
     """Exact pixel means of a band-limited density from its point samples I [B, n, n] on the uniform grid with os_
     samples per px, n = (R + 2 pad) os_ (sample j at (j - (n - 1) / 2) / os_ px from the ROI centre): FFT, times the
     pixel-box transfer function sinc(fx) sinc(fy), the optional Gaussian blur exp(-2 pi^2 f^T C f) (cov = [sxx, syy, sxy]
     px^2, [3] or [B, 3]; gain capped as gauss_blur_os) and a raised-cosine taper from the band limit fc (cycles / px)
     to the Nyquist frequency os_ / 2, shifted onto the pixel centres; inverse FFT, every os_-th sample, cropped by pad
-    -> [B, R, R] (the density averaged over each pixel)."""
+    -> [B, R, R] (the density averaged over each pixel). ValueError when fc >= os_ / 2 (the samples alias)."""
+    check_spectral_oversample(fc, os_)
     n = I.shape[-1]
     f = torch.fft.fftfreq(n, d=1.0 / os_, device=I.device)            # cycles / px
     fr = torch.fft.rfftfreq(n, d=1.0 / os_, device=I.device)
@@ -203,6 +220,7 @@ class VectorialPSF(torch.nn.Module, PSF):
         ns = roisize * oversample
         u = (torch.arange(ns, device=self.dev) - (ns - 1) / 2) / oversample * pixel_um
         self.register_buffer('u', u)
+        self._check_spectral()
 
     @property
     def pixel_integration(self):
@@ -213,7 +231,14 @@ class VectorialPSF(torch.nn.Module, PSF):
         m = pixel_integration_mode(mode)
         if m == 'spectral' and self.os < 2:
             raise ValueError("pixel_integration 'spectral' needs oversample >= 2 (alias-free point samples of |E|^2)")
+        if m == 'spectral' and hasattr(self, 'NA'):            # (in __init__: checked once NA exists)
+            check_spectral_oversample(self.band_limit(), self.os)
         self._pixint = m
+
+    def _check_spectral(self):
+        """'spectral': the oversampled grid must resolve the band limit of |E|^2 (ValueError otherwise)."""
+        if self._pixint == 'spectral':
+            check_spectral_oversample(self.band_limit(), self.os)
 
     def band_limit(self):
         """Highest spatial frequency of |E|^2 (cycles / px): 2 NA / lambda * pixel size."""

@@ -299,3 +299,27 @@ def test_pixel_integration_refuses_unknown(tmp_path):
             z.writestr(n, b)
     with pytest.raises(ValueError, match='unknown pixel_integration'):
         PSF.load(tmp_path / 'bad.zip', device='cpu')
+
+
+def test_spectral_refuses_aliasing_oversample():
+    """'spectral' is exact only when the oversampled grid resolves the band limit 2 NA / lambda of |E|^2: large pixels
+    at oversample 2 are refused (they gave errors up to 4e-2 of the peak), the oversample it suggests works"""
+    from torch_psf.vectorial import spectral_min_oversample
+    kw = dict(pixel_um=0.35, wavelength_um=0.5, npupil=32, device='cpu')
+    fc = 2 * 1.49 / 0.5 * 0.35                                          # 2.09 cycles / px
+    assert spectral_min_oversample(fc) == 5 and spectral_min_oversample(0.47) == 2
+    with pytest.raises(ValueError, match='alias'):
+        VectorialPSF(9, oversample=2, pixel_integration='spectral', **kw)
+    with pytest.raises(ValueError, match='alias'):
+        VectorialPSF(9, oversample=4, **kw).resized(9, pixel_integration='exact')
+    v = VectorialPSF(9, oversample=4, **kw)
+    with pytest.raises(ValueError, match='alias'):
+        v.pixel_integration = 'spectral'
+    assert v.pixel_integration == 'box'
+    pos = torch.tensor([[0.2, -0.1, 0.05]])
+    with torch.no_grad():
+        a = VectorialPSF(9, oversample=5, pixel_integration='spectral', **kw).render(pos)
+        ref = VectorialPSF(9, oversample=8, pixel_integration='gauss_legendre', **kw).render(pos)
+    assert float((a - ref).abs().max() / ref.max()) < 1e-5
+    with pytest.raises(ValueError, match='alias'):
+        ExactVectorialPSF(VectorialPSF(9, oversample=2, **kw), 'spectral', os=2)

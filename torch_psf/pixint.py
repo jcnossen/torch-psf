@@ -35,7 +35,7 @@ import numpy as np
 import torch
 from torch_psf.psf import PSF
 from torch_psf.spline import CubicSplinePSF
-from torch_psf.vectorial import dipole_tensor
+from torch_psf.vectorial import dipole_tensor, spectral_min_oversample, check_spectral_oversample
 
 
 # ============================================================================================ cubic kernels
@@ -115,6 +115,7 @@ class ExactVectorialPSF(PSF):
             raise ValueError("mode 'gauss' does not support an image-plane blur; use 'spectral'")
         if mode in ('spectral', 'point'):
             assert self.os >= 2, 'the spectral modes need os >= 2 (alias-free sampling of |E|^2)'
+            check_spectral_oversample(self.band_limit(), self.os)
 
     def resized(self, roisize):
         return ExactVectorialPSF(self.vec.resized(roisize), self.mode, self.os, self.pad)
@@ -178,6 +179,7 @@ class ExactVectorialPSF(PSF):
         n = D.shape[-1]
         f = torch.fft.fftfreq(n, d=1.0 / os_, device=D.device)           # cycles / px
         fr = torch.fft.rfftfreq(n, d=1.0 / os_, device=D.device)
+        check_spectral_oversample(self.band_limit(), os_)
         fc = min(self.band_limit() * 1.02, 0.5 * os_ - 0.05)
         fn = 0.5 * os_
 
@@ -344,9 +346,10 @@ def build_pixel_spline(vec, roisize, z_range, S, dz_um=0.01, zpad=None, xy_limit
                          pixel_um=vec.pixel_um)
     big = vec.resized(geo.Pl)
     if integrate:
-        model = ExactVectorialPSF(big, 'point', os=2, pad=3)
+        model = ExactVectorialPSF(big, 'point', os=spectral_min_oversample(big.band_limit()), pad=3)
     else:
-        model = sample_model(big) if sample_model is not None else ExactVectorialPSF(big, 'spectral', os=2, pad=3)
+        model = sample_model(big) if sample_model is not None else \
+            ExactVectorialPSF(big, 'spectral', os=spectral_min_oversample(big.band_limit()), pad=3)
     samples = geo.knots_from_model(model, chunk=chunk)
     spl = PixelSplinePSF(geo, samples, kernel=kernel, integrate=integrate, backend=backend)
     spl.xmax = min(spl.xmax, xy)
@@ -367,7 +370,7 @@ def point_knots(big, geo, focus, blur=None, dipM=None, chunk=None):
     if dipM is not None:
         big.dipM = dipM
     try:
-        ex = ExactVectorialPSF(big, 'point', os=2, pad=3)
+        ex = ExactVectorialPSF(big, 'point', os=spectral_min_oversample(big.band_limit()), pad=3)
         out = []
         step = geo.nz if chunk is None else chunk
         for z0 in range(0, geo.nz, step):
