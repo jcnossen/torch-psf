@@ -176,7 +176,9 @@ def vortex_phase(model, charge=1, offset=0.0, apply=True, center=(0.0, 0.0), lev
     c = center (a lateral offset of the plate, pupil radii; a tensor makes the map differentiable in it). levels > 0:
     the spiral quantised to that many steps (the plate V-593-10-1 has 64); depth: the full phase step in waves
     (design wavelength / emission wavelength, e.g. 593 / 597.5; 1 = an exact 2 pi). Their MATLAB code
-    (vecfitcpu_vortex, doevortexflip = 1) has the pupil x along the image rows, which is charge -1 here.
+    (vecfitcpu_vortex, doevortexflip = 1, phase +atan2(y, x) with x the first array index = the image column in
+    the DIPimage convention) is charge +1 here; their real data (4TU 10.4121/13031837) prefer charge +1 by the
+    likelihood (study/orientation/vortex_real.py).
     Returns the phase map in waves ([npupil, npupil], inside the pupil); apply=True also writes it to
     model.pupil_phase (replacing the free phase map)."""
     c = torch.as_tensor(center, dtype=model.px.dtype, device=model.px.device)
@@ -343,7 +345,7 @@ def _track_dims(rois):
 
 @torch.no_grad()
 def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, theta0=None, z_limits=(0.0, 0.4),
-                    g_limits=(0.0, 1.0), batch=500, mirror=True, iso_iters=30, zstarts=4):
+                    g_limits=(0.0, 1.0), batch=500, mirror=True, iso_iters=30, zstarts=4, zgrid=None):
     """Poisson MLE of theta = (x px, y px, z um, I, bg, v_x, v_y, v_z, g) per spot (rois [N, R, R]) or per track
     (rois [N, T, R, R]: frames sharing position, orientation, I and bg; per-frame known factors h [N, T] / [T] and
     optional excitation tensors K [T, 3, 3] or [N, T, 3, 3], see model_and_jacobian).
@@ -351,6 +353,8 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
     Start (theta0 None): isotropic-PSF fit of the (summed) frames (torch_psf.fit.localize, zstarts heights) ->
     x, y, z, then the linear-M solution at that position (solve_M) -> (mu, g) (g clamped to [0.1, 0.9]); with
     mirror=True also the mirror start (mu_z -> -mu_z, the other tilt sign); the best likelihood wins.
+    zgrid: extra starts at these heights (um; x, y, I, bg from the isotropic fit, (mu, g) from the linear-M
+    solution at each height, each with its mirror): for PSFs whose isotropic fit is a poor guide to z (Vortex).
     Returns dict: theta [N, 9] (v unit, canonical mu_z >= 0), nll [N], theta_deg / phi_deg [N] (angles(mu)), g [N],
     crlb (crlb_orientation at the estimate), M_lin [N, 3, 3] (the linear solution)."""
     d, single = _track_dims(rois)
@@ -388,9 +392,16 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
             bg0 = th_iso[:, 4] / T
             base = torch.cat([th_iso[:, :3], I0[:, None], bg0[:, None], mu0, g0[:, None]], 1)
             starts = [base]
+            for zg in (zgrid or ()):
+                pz = th_iso[:, :3].clone(); pz[:, 2] = float(zg)
+                Mz, _, _ = solve_M(basis_images(psf, pz, focus), db, h=hm)
+                mz, gz = project_M(Mz)
+                st = base.clone(); st[:, 2] = float(zg); st[:, 5:8] = mz; st[:, 8] = gz.clamp(0.1, 0.9)
+                starts.append(st)
             if mirror:
-                alt = base.clone(); alt[:, 7] = -alt[:, 7]
-                starts.append(alt)
+                for st in list(starts):
+                    alt = st.clone(); alt[:, 7] = -alt[:, 7]
+                    starts.append(alt)
         best, bnll = None, None
         for st in starts:
             th, nll = lm_poisson(lambda t: model_and_jacobian(psf, t, T, focus, hb, Kb), db, st, var=var,
@@ -416,6 +427,54 @@ def angle_error(mu_est, mu_true, deg=True):
     return torch.rad2deg(a) if deg else a
 
 
+# ------------------------------------------------------------------ z as defocus
+class FocusZ:
+    """A VectorialPSF seen with z = the emitter's axial position relative to the nominal focal plane, at a fixed
+    emitter height above the coverslip: the model is psf(pos (x, y, height), focus = psf.focus_um - z). Use it when
+    the emitters sit at a known height (on the coverslip, in a thin film) and z only measures defocus, e.g. with
+    supercritical-angle light (n_med < NA), where moving the emitter itself below the interface is unphysical. Every
+    function of this module (and torch_psf.fit.localize) accepts it in place of the VectorialPSF."""
+
+    def __init__(self, psf, height=0.0, z_range=None):
+        self.psf, self.height = psf, float(height)
+        self.z_range = tuple(z_range) if z_range is not None else tuple(psf.z_range)
+
+    roisize = property(lambda self: self.psf.roisize)
+    pixel_um = property(lambda self: self.psf.pixel_um)
+    dev = property(lambda self: self.psf.dev)
+    focus_um = property(lambda self: self.psf.focus_um)
+    xy_limit = property(lambda self: self.psf.xy_limit)
+    z_limits = property(lambda self: self.z_range)
+    n_dims = 3
+    vortex = property(lambda self: getattr(self.psf, 'vortex', None))
+
+    def _map(self, pos, focus):
+        f = self.psf.focus_um if focus is None else focus
+        p2 = torch.cat([pos[:, :2], torch.full_like(pos[:, 2:3], self.height)], 1)
+        return p2, f - pos[:, 2]
+
+    def dipole_basis(self, pos, focus=None, zcoef_offset=None):
+        p2, fe = self._map(pos, focus)
+        return self.psf.dipole_basis(p2, fe, zcoef_offset)
+
+    def __call__(self, pos, focus=None, **kw):
+        p2, fe = self._map(pos, focus)
+        return self.psf(p2, fe, **kw)
+
+    def render(self, pos, grad=False, focus=None):
+        fn = lambda p: self(p, focus)
+        if not grad:
+            return fn(pos)
+        out, val = [], None
+        for k in range(3):
+            t = torch.zeros_like(pos)
+            t[:, k] = 1
+            v, d = torch.func.jvp(fn, (pos,), (t,))
+            val = v if val is None else val
+            out.append(d)
+        return val, out[0], out[1], out[2]
+
+
 # ------------------------------------------------------------------ pipeline
 class OrientationEstimator:
     """Orientation + 3D localization of sparse single molecules with a calibrated (e.g. Vortex) VectorialPSF.
@@ -426,7 +485,7 @@ class OrientationEstimator:
     psf: VectorialPSF (its focus_um is the focal plane of the fits; z = emitter height in the model's coordinate).
     camera: Camera / calibration json / None (data in photons). z_limits (um): the fitted z range (default
     psf.z_range); g_limits; iters (LM iterations per start); mirror (also the mirrored-tilt start); batch (spots per
-    GPU batch); threshold and detect_kw: detection (see PSF.localize). progress(done, total, n) / stop() hooks.
+    GPU batch); zgrid (extra z starts, see fit_orientation); threshold and detect_kw: detection (see PSF.localize). progress(done, total, n) / stop() hooks.
 
     estimate(data, frames=None) -> Dataset. data: a movie (path / array [T, H, W] / reader) or Spots;
     fit_rois(rois, corners=None, frame_ids=None) for ROIs [N, P, P] in photons (corners [N, 2] = (x0, y0)).
@@ -438,10 +497,11 @@ class OrientationEstimator:
     (d - mu)^2 / mu per pixel), at_limit (x / y at the offset limit)."""
 
     def __init__(self, psf, camera=None, threshold=6.0, iters=40, z_limits=None, g_limits=(0.0, 1.0), mirror=True,
-                 batch=500, zstarts=4, device=None, progress=None, stop=None, **detect_kw):
+                 batch=500, zstarts=4, zgrid=None, device=None, progress=None, stop=None, **detect_kw):
         from torch_psf.estimators import _camera
         self.psf, self.camera = psf, _camera(camera)
         self.threshold, self.iters, self.mirror, self.batch, self.zstarts = threshold, iters, mirror, batch, zstarts
+        self.zgrid = zgrid
         self.z_limits = tuple(z_limits) if z_limits is not None else tuple(psf.z_range)
         self.g_limits = tuple(g_limits)
         self.dev = psf.dev if device is None else torch.device(device)
@@ -460,7 +520,7 @@ class OrientationEstimator:
         for s in range(0, N, self.batch):
             d = rois[s:s + self.batch]
             r = fit_orientation(psf, d, iters=self.iters, z_limits=self.z_limits, g_limits=self.g_limits,
-                                batch=self.batch, mirror=self.mirror, zstarts=self.zstarts)
+                                batch=self.batch, mirror=self.mirror, zstarts=self.zstarts, zgrid=self.zgrid)
             th = r['theta']
             mu, _ = model_and_jacobian(psf, th)
             mu = mu[:, 0]

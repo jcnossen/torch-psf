@@ -200,3 +200,18 @@ def test_vortex_bead_calibration_finds_the_charge():
     assert rep['charge'] == -1
     assert rep['nll_per_px'][-1] < rep['nll_per_px'][1]
     assert abs(float(psf.zcoef[0]) - 0.03) < 0.01
+
+
+def test_focus_z_wrapper_matches_defocus():
+    from torch_psf.orientation import FocusZ
+    v = small_model()
+    w = FocusZ(v, height=0.02, z_range=(-0.4, 0.4))
+    pos = torch.tensor([[0.1, -0.2, 0.15]])
+    M = dipole_M(from_angles(40.0, 20.0)[None], torch.tensor([0.8]))
+    a = w(pos, dipM=M)
+    b = v(torch.tensor([[0.1, -0.2, 0.02]]), v.focus_um - 0.15, dipM=M)
+    assert torch.allclose(a, b)
+    B = basis_images(w, pos)
+    assert torch.allclose(torch.einsum('nk,nkuv->nuv', M_to_m6(M), B), a, atol=1e-6)
+    th = torch.tensor([[0.1, -0.2, 0.15, 2000.0, 10.0, *from_angles(40.0, 20.0).tolist(), 0.8]])
+    assert torch.isfinite(crlb_orientation(w, th)['z']).all()
