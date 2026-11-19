@@ -49,8 +49,7 @@ from torch_psf.orientation import (fit_orientation, FocusZ, model_and_jacobian, 
 
 OUT = VR.OUT
 DEV = VR.DEV
-VF = os.environ.get('VECFIT_DIR', '/tmp/claude-1002/-home-jc-dme/5cf206a0-27ef-444b-88a3-c3d67d4aebd5/scratchpad/'
-                    'orient/vfcode/vecfitcpu_vortex-master')
+VF = os.environ.get('VECFIT_DIR', os.path.join(VR.DATA, 'code', 'vecfitcpu_vortex-master'))   # their MATLAB code
 OPT = dict(NA=1.47, n_imm=1.518, wavelength_um=0.5975, pixel_um=0.065)
 NOLL = tuple(range(5, 23))
 NAT_NOLL = (5, 6, 7, 8, 9, 10, 11, 13, 12, 17, 16, 22)
