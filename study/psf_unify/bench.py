@@ -1,4 +1,4 @@
-"""Single-PSF benchmark: accuracy and speed of the vectorial model (box / spectral / Gauss-Legendre pixel
+"""Single-PSF benchmark: accuracy and speed of the vectorial model (midpoint / exact / Gauss-Legendre pixel
 integration), the 2D and astigmatic Gaussians fitted to it, and the spline definitions. From the repository root run
 python study/psf_unify/bench.py, then python study/psf_unify/report.py. --phase timing updates an existing precision run.
 GPU utilization is sampled around each timing group. Desktop-active times are marked separately.
@@ -26,14 +26,16 @@ from torch_psf import fit
 from torch_psf.gaussian import _axis
 from torch_psf.spline import to_spline
 
+from results import load_results
+
 OUT = Path(__file__).resolve().parent / 'out'
 MODEL = Path('C:/dev/simcode2-inspect/models/m1809/calib_1809_2_psf_v2.psf.zip')
 P, ZR, DZ, XL = 13, (0., .4), .01, 2.
 N, BG, REPEATS = 3000, 10., 10
 PHOTONS = (1000, 5000, 20000)
 TABLES = [(name, s) for s in (2, 1, 3, 4) for name in ('cr_int', 'bs_int', 'cr_pix')]
-OPTICS = [(name, s) for s in (3, 2, 4) for name in ('box', 'spectral', 'gauss_legendre')]   # s = samples / pixel
-OPTICS.append(('box', 1))   # point sampling: the PSF value at the pixel centre
+OPTICS = [(name, s) for s in (3, 2, 4) for name in ('midpoint', 'exact', 'gauss_legendre')]   # s = samples / pixel
+OPTICS.append(('midpoint', 1))   # point sampling: the PSF value at the pixel centre
 GAUSS = [('astig', None), ('gauss2d', None)]
 GAUSS_PARAMS = {}      # fitted Gaussian parameters (accuracy run), passed to the timing workers through the JSON
 BATCHES = (1000, 10000, 100000)
@@ -186,14 +188,14 @@ def model(ref, name, s):
         return GaussianPSF(P, tuple(GAUSS_PARAMS['gauss2d']['sigma_px']), device='cuda', pixel_um=ref.pixel_um)
     if name in ('bs_int', 'cr_int'):
         # The five-tap integral at S=1 needs another pixel of lateral padding.
-        m = to_spline(ref, ZR, roisize=P, oversample=s, dz_um=DZ, value='density', zpad=6, xy_limit=XL + (s == 1),
+        m = to_spline(ref, ZR, roisize=P, oversample=s, dz_um=DZ, integrated=True, zpad=6, xy_limit=XL + (s == 1),
                                kernel='bspline' if name == 'bs_int' else 'catmull', chunk=2)
         assert m.xmax >= XL
         m.xmax = XL
         return m
     if name == 'cr_pix':
-        # explicit kernel / value: the plain default of to_spline is the integrated B-spline
-        return ref.to_spline(P, ZR, kernel='catmull', value='pixel', oversample=s, dz_um=DZ, zpad=3, xy_limit=XL,
+        # explicit kernel / integrated: the plain default of to_spline is the integrated B-spline
+        return ref.to_spline(P, ZR, kernel='catmull', integrated=False, oversample=s, dz_um=DZ, zpad=3, xy_limit=XL,
                              chunk=2)
     return ref.resampled(P, oversample=s, pixel_integration=name)
 
@@ -265,7 +267,7 @@ def accuracy_run(ref, data, out):
     for photons in PHOTONS:
         sd = torch.cat([fit.crlb(ref, theta(q, photons)) for q in p.split(24)])
         data['crlb_nm'][str(photons)] = (sd[:, :3] * nm).median(0).values.tolist()
-    # the reference (spectral pixel integral) against an independent quadrature without FFTs
+    # the reference (exact pixel integral) against an independent quadrature without FFTs
     with torch.no_grad():
         gl = ref.resampled(P, oversample=6, pixel_integration='gauss_legendre')
         q = p[:300]
@@ -311,16 +313,16 @@ def timing_grid():
 
 def operation(m, p, op):
     # One native batch per call. An OOM is a result for this batch size.
-    table = hasattr(m, 'knots')
+    spline = hasattr(m, 'knots')
     if op == 'backward':
-        if table:
+        if spline:
             params = [m.knots.detach().requires_grad_()]
         else:
             params = [m.zcoef.requires_grad_()]
 
     def run():
         if op == 'backward':
-            images = m.render_tables(p, knots=params[0]) if table else m.render(p)
+            images = m.render_splines(p, knots=params[0]) if spline else m.render(p)
             torch.autograd.grad(images.square().sum(), params)
         else:
             with torch.no_grad():
@@ -469,12 +471,12 @@ def main():
     mem_args = [] if MAX_MEM_GB is None else ['--max-mem-gb', str(MAX_MEM_GB)]
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.timing_worker or args.phase == 'paired':
-        data = json.loads(args.out.read_text())
+        data = load_results(args.out)
         if (data['sha256'] != hashlib.sha256(args.model.read_bytes()).hexdigest()
                 or data['gpu'] != torch.cuda.get_device_name() or data['torch'] != str(torch.__version__)):
             raise ValueError('Timing requires the same calibration, device and PyTorch build')
         GAUSS_PARAMS.update(data.get('gaussian_fit', {}))
-        ref = PSF.load(args.model, roisize=P, device='cuda').resampled(P, pixel_integration='spectral')
+        ref = PSF.load(args.model, roisize=P, device='cuda').resampled(P, pixel_integration='exact')
         if args.timing_worker:
             timing_run(ref, data, args.out, args.timing_worker == 'on', retry=args.phase == 'retry')
         else:
@@ -487,7 +489,7 @@ def main():
                             '--phase', 'retry', '--timing-worker', tune] + mem_args, check=True)
         return
     model_sha = hashlib.sha256(args.model.read_bytes()).hexdigest()
-    ref = PSF.load(args.model, roisize=P, device='cuda').resampled(P, pixel_integration='spectral')
+    ref = PSF.load(args.model, roisize=P, device='cuda').resampled(P, pixel_integration='exact')
     try:
         revision = subprocess.check_output(['git', '-c', f'safe.directory={ROOT.as_posix()}',
                                             'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
@@ -500,7 +502,7 @@ def main():
                 gpu_total_MiB=torch.cuda.get_device_properties(0).total_memory / 2**20,
                 cudnn=torch.backends.cudnn.version(), repeats=REPEATS, preflight=gpu_sample())
     if args.phase in ('timing', 'precision') and args.out.exists():
-        prev = json.loads(args.out.read_text())
+        prev = load_results(args.out)
         if prev['sha256'] != model_sha or prev.get('revision', revision) != revision:
             raise ValueError('Existing results belong to a different calibration or revision; use --phase all')
         keep = ('accuracy', 'crlb_nm', 'crlb_nm_focus', 'gaussian_fit', 'reference_check') if args.phase == 'timing' else (

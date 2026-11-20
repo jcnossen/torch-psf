@@ -1,6 +1,5 @@
 """Render the single-PSF comparison PDF from benchmark JSON; no model, CUDA or retiming required."""
 import argparse
-import json
 from pathlib import Path
 import textwrap
 
@@ -10,11 +9,13 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 
+from results import load_results
+
 OUT = Path(__file__).resolve().parent / 'out'
-LABEL = dict(spectral='Vectorial, exact (spectral)', box='Vectorial, midpoint', gauss_legendre='Vectorial, Gauss–Legendre',
+LABEL = dict(exact='Vectorial, exact (spectral)', midpoint='Vectorial, midpoint', gauss_legendre='Vectorial, Gauss–Legendre',
              astig='Astigmatic Gaussian', gauss2d='2D Gaussian (in focus)',
              cr_int='Integrated Catmull–Rom', bs_int='Integrated B-spline', cr_pix='Catmull–Rom')
-OPTICS = ['spectral', 'gauss_legendre', 'box']
+OPTICS = ['exact', 'gauss_legendre', 'midpoint']
 GAUSS = ['astig', 'gauss2d']
 TABLES = ['cr_int', 'bs_int', 'cr_pix']     # spline definitions
 COLORS = ['#176878', '#c25c32', '#6955a1', '#526579', '#9c7233']
@@ -28,7 +29,7 @@ FOOTER = 'torch-psf   /   single-PSF models'
 
 
 def label(name, s=None):
-    return 'Point sampling (pixel centre)' if name == 'box' and s == 1 else LABEL[name]
+    return 'Point sampling (pixel centre)' if name == 'midpoint' and s == 1 else LABEL[name]
 
 
 def primary(row):
@@ -161,10 +162,10 @@ def at_a_glance(pdf, data):
     f = page(pdf, 'Single-PSF models in torch-psf', f"At a glance   /   {data['model']}   /   {data['gpu']}")
     crlb = data['crlb_nm']['5000']
     heading(f, .80, f"10,000 spots; bias at 5,000 photons (CRLB {fmt3(crlb)} nm in x / y / z)")
-    picks = [('spectral', os_, 'Vectorial, exact', f'{os_} samples / px'),
+    picks = [('exact', os_, 'Vectorial, exact', f'{os_} samples / px'),
              ('gauss_legendre', os_, 'Vectorial, Gauss–Legendre', f'{os_} nodes / px'),
-             ('box', os_, 'Vectorial, midpoint', f'{os_} samples / px'),
-             ('box', 1, 'Point sampling (what most codes do)', '1 sample / px'),
+             ('midpoint', os_, 'Vectorial, midpoint', f'{os_} samples / px'),
+             ('midpoint', 1, 'Point sampling (what most codes do)', '1 sample / px'),
              ('bs_int', 2, 'Integrated B-spline (default)', '2 knots / px'),
              ('cr_pix', 2, 'Catmull–Rom spline', '2 knots / px'),
              ('astig', None, 'Astigmatic Gaussian', 'fitted')]
@@ -175,7 +176,7 @@ def at_a_glance(pdf, data):
             continue
         got[(name, s)] = r
         z = r['bias_nm']['5000']['rms'][2]
-        err = 'reference' if name == 'spectral' else '—' if name == 'astig' else f"{r['value']['max']:.2g}"
+        err = 'reference' if name == 'exact' else '—' if name == 'astig' else f"{r['value']['max']:.2g}"
         rows.append([title, setting, err, '≈ 0' if z < .005 else f'{z:.3g} nm' if z >= 1 else f'{z:.2g} nm',
                      speed_cells(data, name, s, ops=OPS[:2])])
     table(f, .44, .32, ['Model', 'Setting', 'Max error / peak', 'RMS z bias', 'Forward / value + derivatives (k spots/s)'],
@@ -186,13 +187,13 @@ def at_a_glance(pdf, data):
         r = headline_timing(data, name, op) if name in TABLES else selected_timing(data, name, op, 10000, s)
         return r['spots_s'] if r and 'spots_s' in r else None
     notes = []
-    pt, bs, ex, ast = got.get(('box', 1)), got.get(('bs_int', 2)), got.get(('spectral', os_)), got.get(('astig', None))
+    pt, bs, ex, ast = got.get(('midpoint', 1)), got.get(('bs_int', 2)), got.get(('exact', os_)), got.get(('astig', None))
     if pt:
         notes.append(f"Point sampling, the usual choice elsewhere, biases z by {pt['bias_nm']['5000']['rms'][2]:.2g} nm RMS, "
                      f"{pt['bias_nm']['5000']['rms'][2] / crlb[2]:.0%} of the CRLB: integrating over the pixel matters.")
-    if bs and ex and sp('bs_int', 2, 'forward') and sp('spectral', os_, 'forward') and sp('spectral', os_, 'grad'):
-        notes.append(f"The integrated B-spline is {sp('bs_int', 2, 'forward') / sp('spectral', os_, 'forward'):.0f}× "
-                     f"faster than the exact model forward and {sp('bs_int', 2, 'grad') / sp('spectral', os_, 'grad'):.0f}× "
+    if bs and ex and sp('bs_int', 2, 'forward') and sp('exact', os_, 'forward') and sp('exact', os_, 'grad'):
+        notes.append(f"The integrated B-spline is {sp('bs_int', 2, 'forward') / sp('exact', os_, 'forward'):.0f}× "
+                     f"faster than the exact model forward and {sp('bs_int', 2, 'grad') / sp('exact', os_, 'grad'):.0f}× "
                      f"for value plus derivatives (what fitting needs), with its z bias "
                      f"{crlb[2] / max(bs['bias_nm']['5000']['rms'][2], 1e-9):,.0f}× below the CRLB.")
     notes.append(f'Gauss–Legendre at {os_} nodes per pixel is as accurate as exact integration and needs no FFT; midpoint '
@@ -255,7 +256,7 @@ def vectorial(pdf, data):
         ax = f.add_axes([x, y, .36, .24])
         for i, name in enumerate(OPTICS):
             rows = sorted((r for r in data['accuracy'] if r['name'] == name and primary(r)), key=lambda r: r['S'])
-            pts = [(r['S'], metric(r)) for r in rows if not (name == 'spectral' and r['S'] == data['optical_os'])]
+            pts = [(r['S'], metric(r)) for r in rows if not (name == 'exact' and r['S'] == data['optical_os'])]
             if pts:
                 ax.semilogy(*zip(*[(s, max(v, 1e-9)) for s, v in pts]), marker='o', ms=4, color=COLORS[i],
                             label=LABEL[name])
@@ -263,14 +264,14 @@ def vectorial(pdf, data):
         ax.set_title(title, loc='left', fontsize=11, weight='bold')
         ax.grid(alpha=.2)
     handles, names = ax.get_legend_handles_labels()
-    names = [n + ' (1 sample = point sampling)' if n == LABEL['box'] else n for n in names]
+    names = [n + ' (1 sample = point sampling)' if n == LABEL['midpoint'] else n for n in names]
     f.legend(handles, names, loc='center', bbox_to_anchor=(.5, .345), ncol=3, frameon=False, fontsize=8)
     rows = []
     for name in OPTICS:
         for s in (1, 2, 3, 4):
             r = acc_row(data, name, s)
             if r:
-                ref = name == 'spectral' and s == data['optical_os']
+                ref = name == 'exact' and s == data['optical_os']
                 rows.append([label(name, s), s, 'reference' if ref else f"{r['value']['max']:.2g}", fmt3(bias(r)),
                              speed_cells(data, name, s, n=1000)])
     table(f, .065, .25, ['Model', 'Samples / px', 'Max error', 'RMS bias 5k ph, x / y / z (nm)',
@@ -405,15 +406,15 @@ def summary(pdf, data):
              'bias at 5,000 photons')
     os_ = data['optical_os']
     rows = []
-    for name, s, setting in [('spectral', os_, f'{os_} samples / px'), ('gauss_legendre', os_, f'{os_} samples / px'),
-                             ('box', os_, f'{os_} samples / px'), ('box', 1, '1 sample / px'),
+    for name, s, setting in [('exact', os_, f'{os_} samples / px'), ('gauss_legendre', os_, f'{os_} samples / px'),
+                             ('midpoint', os_, f'{os_} samples / px'), ('midpoint', 1, '1 sample / px'),
                              ('bs_int', 2, '2 knots / px'),
                              ('cr_int', 2, '2 knots / px'), ('cr_pix', 2, '2 knots / px'),
                              ('astig', None, 'fitted'), ('gauss2d', None, 'fitted, z fixed')]:
         r = acc_row(data, name, s)
         if not r:
             continue
-        err = 'reference' if name == 'spectral' else f"{r['value']['max']:.2g}"
+        err = 'reference' if name == 'exact' else f"{r['value']['max']:.2g}"
         rows.append([label(name, s), setting, err, fmt3(bias(r)), speed_cells(data, name, s)])
     table(f, .44, .33, ['Model', 'Setting', 'Max error / peak', 'RMS bias x / y / z (nm)',
                         'Fwd / grad / back, 10,000 spots (k/s)'], rows, [.24, .14, .13, .22, .27], size=8.6)
@@ -439,7 +440,7 @@ def main():
     parser.add_argument('--input', type=Path, default=latest)
     parser.add_argument('--output', type=Path, default=None)
     args = parser.parse_args()
-    data = json.loads(args.input.read_text())
+    data = load_results(args.input)
     if not data.get('accuracy') or 'gaussian_fit' not in data:
         raise ValueError('Complete the precision sweep (bench.py of the single-PSF comparison) before the report')
     if not data.get('timing') or any('spots_s' not in r and 'unavailable' not in r for r in data['timing']):
