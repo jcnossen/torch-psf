@@ -509,7 +509,8 @@ def zstack_tif_bytes(stack, z_um, sample_um=None, info=None):
         md['spacing'] = float(z_um[1] - z_um[0])
     if info is not None:
         md['Info'] = json.dumps(_plain(info))
-    kw = {} if not sample_um else dict(resolution=(1.0 / sample_um, 1.0 / sample_um))
+    sx, sy = (sample_um if isinstance(sample_um, (list, tuple)) else (sample_um, sample_um)) if sample_um else (0, 0)
+    kw = {} if not sample_um else dict(resolution=(1.0 / sx, 1.0 / sy))      # per axis for non-square pixels
     bio = _io.BytesIO()
     tifffile.imwrite(bio, np.ascontiguousarray(stack, np.float32), imagej=True, metadata=md, **kw)
     return bio.getvalue()

@@ -156,3 +156,27 @@ def test_bead_fit_recovers_the_aspect():
     px, py = r['psf'].pixel_um
     assert np.sqrt(px * py) == pytest.approx(np.sqrt(0.112 * 0.122), rel=1e-6)
     assert all(isinstance(v, float) for v in r['psf'].pixel_um)
+
+
+@pytest.mark.parametrize('kind', ['vectorial', 'fourpi', 'spline'])
+def test_save_zip_round_trip(tmp_path, kind):
+    import tifffile
+    import zipfile
+    from torch_psf.io import save_zip
+    if kind == 'vectorial':
+        m = vec(13, (0.117, 0.127), 'exact', 3)
+    elif kind == 'fourpi':
+        m = FourPiPSF(13, pixel_um=(0.117, 0.127), device='cpu', z_range=(-0.4, 0.4))
+    else:
+        m = to_spline(vec(13, (0.117, 0.127), 'exact', 3), (-0.4, 0.4), roisize=13)
+    path = tmp_path / f'{kind}.psf.zip'
+    meta = save_zip(path, m)
+    assert meta['version'] == '0.6.0'
+    w = PSF.load(path, device='cpu')
+    assert w.pixel_um == (0.117, 0.127)
+    p = POS * torch.tensor([1.0, 1.0, 0.5])
+    torch.testing.assert_close(w.render(p), m.render(p), rtol=0, atol=1e-6)
+    with zipfile.ZipFile(path) as z, tifffile.TiffFile(z.open('zstack.tif')) as t:
+        tags = t.pages[0].tags
+        rx, ry = tags['XResolution'].value, tags['YResolution'].value
+    assert rx[0] / rx[1] == pytest.approx(1 / 0.117, rel=1e-4) and ry[0] / ry[1] == pytest.approx(1 / 0.127, rel=1e-4)

@@ -25,7 +25,7 @@ from torch_psf.fit import solve_linear_grad, readnoise_variance
 def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmup=100, focus_um=0.0, blur='none',
                groups=None, ngroups=1, group_psf_kwargs=None, extra_params=(), batch=2000, lr_xyz=0.03,
                lr_focus=0.005, lr_zernike=0.002, lr_blur=0.003, lr_extra=0.003, fix_zernike=False, fix_focus=False,
-               log=None, stop=None, pixel_integration=None):
+               log=None, stop=None, pixel_integration=None, zstarts=None):
     """tracks: Tracks (rois [B, T, R, R] in photons, mask, xy_init). vectorial: starting VectorialPSF (copied;
     roisize = R). readnoise_e: read noise (e- rms): a scalar, or per pixel of every sample [B, R, R] (an sCMOS
     read-noise map cut at each sample's crop; the variance model is then mu + rn^2 per pixel). zmax_um: emitter heights 0..zmax_um. focus_um: starting
@@ -35,7 +35,9 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     PSF hook (module docstring). fix_zernike / fix_focus: hold the Zernikes / the focus at their starting values.
     pixel_integration: the pixel integration of the fitted model (VectorialPSF.pixel_integration: 'midpoint' = the midpoint
     rule with the model's oversample, 'exact' = the exact pixel integral, 'gauss_legendre'); None = that
-    of `vectorial`. The returned psf keeps it.
+    of `vectorial`. The returned psf keeps it. zstarts: None = every sample starts at zmax_um / 2; an int n > 1 = each
+    sample starts at the best of n heights ((k + 0.5) zmax_um / n, lowest NLL under the starting PSF; for astigmatic
+    data with samples on both sides of the focus).
     Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
     (variance of the normalized residuals, 1 for a perfect model), nll_per_px, focus_um; data: xy [B, 2] px rel. to
     the ROI centre, z [B] um, I [B, T] photons, bg [B, ngroups]."""
@@ -80,7 +82,7 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
             out.append(model(pos, focus.expand(b), **kw))
         return torch.stack(out, 1)                        # [b, ngroups, R, R]
 
-    def loss(sl):
+    def loss(sl, per_sample=False):
         data = tracks.rois[sl]
         b = data.shape[0]
         g_ = grp[sl]
@@ -97,10 +99,26 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
         mu = (mu + torch.gather(bg, 1, g_)[..., None, None]).clamp(min=1e-3)
         var = mu + (r2.reshape(b, 1, R, R) if pix else r2)
         nll = 0.5 * (data - mu) ** 2 / var + 0.5 * torch.log(2 * math.pi * var)
-        nll = torch.where(mask[sl][..., None, None], nll, torch.zeros_like(nll)).sum()
-        return nll, I, bg, mu, var, data
+        nll = torch.where(mask[sl][..., None, None], nll, torch.zeros_like(nll))
+        if per_sample:
+            return nll.sum((1, 2, 3))
+        return nll.sum(), I, bg, mu, var, data
 
     chunks = torch.arange(B, device=dev).split(batch)
+    if zstarts is not None and int(zstarts) > 1:       # per-sample start height: the best of zstarts heights
+        n = int(zstarts)
+        best = torch.full((B,), float('inf'), device=dev)
+        bz = torch.zeros(B, device=dev)
+        with torch.no_grad():
+            for k in range(n):
+                zk = math.log((k + 0.5) / (n - k - 0.5))                 # logit of (k + 0.5) / n
+                zr.fill_(zk)
+                for ch in chunks:
+                    l_ = loss(ch, per_sample=True)
+                    better = l_ < best[ch]
+                    best[ch] = torch.where(better, l_, best[ch])
+                    bz[ch] = torch.where(better, torch.full_like(l_, zk), bz[ch])
+            zr.copy_(bz)
     hist = []
     t0 = time.time()
     tot = float('nan')
