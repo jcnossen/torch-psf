@@ -64,7 +64,7 @@ class Exact:
         lam = p['lambda']
         v = VectorialPSF(p['Mx'], pixel_um=p['pixelsize'] / 1e3, NA=p['NA'], n_imm=p['refimm'], n_med=p['refmed'],
                          wavelength_um=lam / 1e3, npupil=p['Npupil'], oversample=1, device=DEV,
-                         zernike_indices=NOLL, focus_um=0.0, z_range=(-1.1, 1.1))
+                         zernike_indices=NOLL, focus_um=0.0, z_range=(-1.1, 1.1), pixel_integration='midpoint')  # their code samples the pixel centre
         for q in v.parameters():
             q.requires_grad_(False)
         W = (np.real(st['W0']) + np.real(st['Wfocus'])) / lam * st['ApertureMask']
