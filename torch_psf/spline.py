@@ -262,6 +262,15 @@ class SplinePSF(PSF):
             return (_kernel(s + S, k) - _kernel(s, k)) / S
         return (_qkernel(s + S, k) - _qkernel(s, k)) / S
 
+    def _weights(self, fr, deriv):
+        """(z, y, x) weights [N, taps] (or their d/dt) for the fractional knot offsets fr [N, 3]. Catmull-Rom pixel
+        tables evaluate the three axes in ONE matmul ([N, 3, 4] @ [4, 4]), as the earlier CubicSplinePSF did: cuBLAS
+        picks its kernel by the batch shape, so per-axis products differ in the last bit for small N on CUDA."""
+        if self.kernel == 'catmull' and self.value == 'pixel':
+            w = self._axis(fr, deriv)
+            return w[:, 0], w[:, 1], w[:, 2]
+        return self._z_weights(fr[:, 0], deriv), self._lat_weights(fr[:, 1], deriv), self._lat_weights(fr[:, 2], deriv)
+
     def _z_weights(self, fr, deriv):
         if self.kernel == 'catmull' and self.value == 'pixel':
             return self._axis(fr, deriv)
@@ -275,37 +284,56 @@ class SplinePSF(PSF):
         indices = torch.as_tensor(indices, device=self.dev)
         batch = torch.broadcast_shapes(pos.shape[:-1], indices.shape)
         shape = (*batch, self.roisize, self.roisize)
+        # Kernel weights are computed once per distinct position (before broadcasting to the tables) and gathered:
+        # the weight matmul then has the shape of a per-table evaluation, so results do not depend on how many
+        # tables share a position (cuBLAS picks its kernel by the batch shape).
+        src = pos.reshape(-1, 3).to(self.dtype)
+        rows = torch.arange(len(src), device=src.device).reshape(pos.shape[:-1]).expand(batch).reshape(-1)
+        fr_src = self._knot_coords(src)[0]
+        w_src = self._weights(fr_src, False)
+        d_src = self._weights(fr_src, True) if grad else None
         pos = pos.expand(*batch, 3).reshape(-1, 3)
         ids = indices.expand(batch).reshape(-1)
         chunk = max(1, self.chunk_elems // (4 * self.Lw ** 2))
-        parts = [self._evaluate_block(p, i, grad, K) for p, i in zip(pos.split(chunk), ids.split(chunk))]
+        parts = []
+        for p, i, r in zip(pos.split(chunk), ids.split(chunk), rows.split(chunk)):
+            w = tuple(x[r] for x in w_src)
+            d = None if d_src is None else tuple(x[r] for x in d_src)
+            parts.append(self._evaluate_block(p, i, grad, K, w, d))
         if grad:
             return tuple(torch.cat(deriv).reshape(shape) for deriv in zip(*parts))
         return torch.cat(parts).reshape(shape)
 
-    def _evaluate_block(self, pos, ids, grad, K):
-        N, P, S, Lw, T = len(pos), self.roisize, self.S, self.Lw, self.taps
-        if N == 0:
-            empty = K.reshape(-1)[:0].reshape(0, P, P)
-            return (empty,) * 4 if grad else empty
+    def _knot_coords(self, pos):
+        """(fractional knot offsets [N, 3] (z, y, x), first knot index [N, 3]) of positions [N, 3]."""
+        S = self.S
         pos = pos.to(self.dtype)
         tz = ((pos[:, 2] - self.z0) / self.hz).clamp(1, self.nz - 2 - 1e-4)
         ty = self.t0 - pos[:, 1].clamp(-self.xmax, self.xmax) * S
         tx = self.t0 - pos[:, 0].clamp(-self.xmax, self.xmax) * S
         t = torch.stack([tz, ty, tx], 1)
         ix = torch.floor(t)
-        fr = t - ix
-        i0 = ix.long() - 1
+        return t - ix, ix.long() - 1
+
+    def _evaluate_block(self, pos, ids, grad, K, w=None, d=None):
+        """w, d: precomputed (z, y, x) weights and derivative weights of these rows (evaluate_tables), else computed."""
+        N, P, S, Lw, T = len(pos), self.roisize, self.S, self.Lw, self.taps
+        if N == 0:
+            empty = K.reshape(-1)[:0].reshape(0, P, P)
+            return (empty,) * 4 if grad else empty
+        fr, i0 = self._knot_coords(pos)
         base = ((ids * self.nz + i0[:, 0]) * self.nv + i0[:, 1]) * self.nu + i0[:, 2]
         index = (base[:, None] + self.pat).reshape(-1)
         sub = K.reshape(-1).index_select(0, index).reshape(1, N * 4, Lw, Lw)
-        wz, wy, wx = self._z_weights(fr[:, 0], False), self._lat_weights(fr[:, 1], False), self._lat_weights(fr[:, 2], False)
+        wz, wy, wx = self._weights(fr, False) if w is None else w
+        if grad and d is None:
+            d = self._weights(fr, True)
         if self.backend == 'sep':
-            return self._render_sep(sub.view(N, 4, Lw, Lw), wz, wy, wx, fr, grad)
+            return self._render_sep(sub.view(N, 4, Lw, Lw), wz, wy, wx, d, grad)
         w = wz[:, :, None, None] * wy[:, None, :, None] * wx[:, None, None, :]
         if not grad:
             return torch.nn.functional.conv2d(sub, w, groups=N, stride=S).view(N, P, P)
-        dz, dy, dx = self._z_weights(fr[:, 0], True), self._lat_weights(fr[:, 1], True), self._lat_weights(fr[:, 2], True)
+        dz, dy, dx = d
         Wx = wz[:, :, None, None] * wy[:, None, :, None] * dx[:, None, None, :]
         Wy = wz[:, :, None, None] * dy[:, None, :, None] * wx[:, None, None, :]
         Wz = dz[:, :, None, None] * wy[:, None, :, None] * wx[:, None, None, :]
@@ -313,7 +341,7 @@ class SplinePSF(PSF):
         r = torch.nn.functional.conv2d(sub, Wt, groups=N, stride=S).view(N, 4, P, P)
         return r[:, 0], -S * r[:, 1], -S * r[:, 2], r[:, 3] / self.hz
 
-    def _render_sep(self, sub, wz, wy, wx, fr, grad):
+    def _render_sep(self, sub, wz, wy, wx, d, grad):
         """Separable evaluation (backend 'sep'): contract z, then x (strided windows of the knot block), then y; plain
         float32 arithmetic (no cuDNN algorithm choice, no TF32)."""
         S, T = self.S, self.taps
@@ -324,7 +352,7 @@ class SplinePSF(PSF):
         val = cy(Ax, wy)
         if not grad:
             return val
-        dz, dy, dx = self._z_weights(fr[:, 0], True), self._lat_weights(fr[:, 1], True), self._lat_weights(fr[:, 2], True)
+        dz, dy, dx = d
         Az = torch.einsum('nz,nzvu->nvu', dz, sub)
         gx = cy(cx(A, dx), wy)
         gy = cy(Ax, dy)
@@ -374,7 +402,22 @@ class SplinePSF(PSF):
         return bank[self.table_map]
 
     def default_volume(self, knots=None):
-        """The coefficient volume for the selected angle and the file's default dipole tensor."""
+        """The coefficient volume for the selected angle and the file's default dipole tensor. For the model's own
+        knots (no gradient) the result is cached, keyed on the knot tensor's storage, version and the angle, so a
+        per-angle spline does not average its coefficients on every angle=None render."""
+        own = knots is None and not (self.knots.requires_grad and torch.is_grad_enabled())
+        if own:
+            key = (self.knots.data_ptr(), self.knots._version, self.angle,
+                   None if self.component_weights is None else self.component_weights._version)
+            cached = getattr(self, '_default_cache', None)
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            volume = self._default_volume(knots)
+            self._default_cache = (key, volume)
+            return volume
+        return self._default_volume(knots)
+
+    def _default_volume(self, knots=None):
         tables = self._volumes(knots)
         weights = self.component_weights
         if self.angle is not None:
