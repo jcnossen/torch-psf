@@ -5,15 +5,20 @@ import numpy as np
 import torch
 
 
-MODES = ('box', 'spectral', 'gauss_legendre', 'point')
+MODES = ('midpoint', 'exact', 'gauss_legendre', 'point')
 PAD = 3  # pixels on each side for circular convolution
 
 
 def pixel_integration_mode(mode, *, from_file=False):
+    """Validated pixel-integration name. from_file: also the names stored by earlier versions ('box', 'spectral',
+    'gauss'); a file without the key is 'midpoint'. In the API None is the default 'exact', and 'box' / 'spectral'
+    were renamed (no aliases)."""
     if mode is None:
-        return 'box'
+        return 'midpoint' if from_file else 'exact'
     if isinstance(mode, str) and from_file:
-        mode = {'exact': 'spectral', 'midpoint': 'box', 'gauss': 'gauss_legendre'}.get(mode, mode)
+        mode = {'box': 'midpoint', 'spectral': 'exact', 'gauss': 'gauss_legendre'}.get(mode, mode)
+    elif mode in ('box', 'spectral'):
+        raise ValueError(f"pixel_integration {mode!r} was renamed to {'midpoint' if mode == 'box' else 'exact'!r}")
     if not isinstance(mode, str) or mode not in MODES:
         raise ValueError(f"unknown pixel_integration {mode!r}: one of {MODES}")
     return mode
@@ -26,12 +31,12 @@ def spectral_min_oversample(fc):
 
 def spectral_cutoff(model, mode, oversample):
     """Validate the current optical bandwidth, including when NA or wavelength changes."""
-    if mode in ('spectral', 'point'):
+    if mode in ('exact', 'point'):
         fc = model.band_limit()
         minimum = spectral_min_oversample(fc)
         if oversample < minimum:
             raise ValueError(f"pixel_integration {mode!r}: alias-free sampling of the band limit "
-                             f"{fc:.3f} cycles / px needs oversample >= {minimum}")
+                             f"{fc:.3f} cycles / px needs oversample >= {minimum} (or pixel_integration='midpoint')")
         return fc
 
 
@@ -72,6 +77,10 @@ class PixelIntegrator:
     def __init__(self, model, blur, *, mode=None, oversample=None, coherent=False):
         self.mode = model.pixel_integration if mode is None else pixel_integration_mode(mode)
         self.os = model.os if oversample is None else oversample
+        if oversample is None and self.mode in ('exact', 'point'):
+            # exact integration needs only alias-free point samples: raise the sampling grid to the minimum for the
+            # band limit when the model's oversample is lower (the result does not depend on it beyond that)
+            self.os = max(self.os, spectral_min_oversample(model.band_limit()))
         self.size = model.roisize
         self.fc = spectral_cutoff(model, self.mode, self.os)
         self.blur = blur
@@ -100,7 +109,7 @@ class PixelIntegrator:
         fr = torch.fft.rfftfreq(n, d=1 / self.os, device=samples.device)
         transfer = None
         if self.fc is not None:
-            transfer = _pixel_transfer(f, fr, self.os, self.fc, self.mode == 'spectral')
+            transfer = _pixel_transfer(f, fr, self.os, self.fc, self.mode == 'exact')
         if self.blur is not None:
             cov = torch.as_tensor(self.blur, device=samples.device, dtype=torch.float32)
             if cov.shape not in ((3,), (1, 3), (batch[0], 3)):

@@ -24,7 +24,7 @@ def make_setup(dev, npupil=32, nk=21, sizes=((1, 1, 1, 2, 2, 1, 1, 2, 1, 1), (1,
 
     def vec(z):
         v = VectorialPSF(31, pixel_um=0.1, NA=1.4, wavelength_um=0.67, zernike_indices=ZID, npupil=npupil,
-                         oversample=1, device=dev)
+                         oversample=1, device=dev, pixel_integration='midpoint')
         return v.set_zernike(z)
     vecs = [vec({5: -0.02, 6: 0.08, 7: -0.03, 11: 0.01}), vec({5: 0.03, 6: 0.06, 8: 0.02, 11: -0.02})]
     fields = [FieldZernikes([5, 6], 1, norm=NORM, coef=[[0.03, 0.0], [0.0, -0.03]], device=dev),
@@ -82,7 +82,7 @@ def test_joint_fit_recovers_mapping_aberrations_fields():
     data = build_multichannel_beads(stacks, reg, 17, dets=dets, render_pad=5)
     train = data.cl_stack == 0
     start = [VectorialPSF(31, pixel_um=0.1, NA=1.4, wavelength_um=0.67, zernike_indices=ZID, npupil=32, oversample=1,
-                          device=dev) for _ in range(2)]
+                          device=dev, pixel_integration='midpoint') for _ in range(2)]
     fz = [FieldZernikes.from_positions([5, 6], 1, data.channels[c].xy_image.cpu().numpy(), device=dev)
           for c in range(2)]
     r = fit_multichannel_beads(data, focus.to(dev), start, reg, iters=150, lr=5e-3, fit=('zcoef', 'field'),

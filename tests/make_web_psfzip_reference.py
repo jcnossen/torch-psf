@@ -66,7 +66,7 @@ def reference(name, model, source=None, n_angles=0):
         cases.append(dict(name=name, angle=angle, images=images))
 
 
-for mode in ('spectral', 'gauss_legendre'):
+for mode in ('exact', 'gauss_legendre'):
     v.pixel_integration = mode
     reference(mode, v)
 reference('spline_nonbox_source', v.to_spline(roisize=5, z_range=(0.1, 0.2), oversample=2,
@@ -77,7 +77,7 @@ for name, models in [('integrated', v), ('integrated_angles', [v, v2])]:
     model = to_spline(models, (0.1, 0.2), kernel='bspline', value='density', oversample=2, dz_um=0.05, xy_limit=0.5, zpad=2)
     reference(name, model, source=v if isinstance(models, list) else None)
 # A SIMCODE-style spectral calibration with a non-diagonal covariance and dipole tensor.
-v.pixel_integration = 'spectral'
+v.pixel_integration = 'exact'
 v.dipM_angle = torch.tensor([[[0.4, 0.08, 0.1], [0.08, 0.3, 0.0], [0.1, 0.0, 0.3]],
                              [[0.3, 0.0, 0.0], [0.0, 0.45, -0.1], [0.0, -0.1, 0.25]]])
 v.blur_angle = torch.tensor([[0.12, 0.16, 0.05], [0.16, 0.09, -0.06]])

@@ -54,7 +54,7 @@ CASES = [
     dict(roisize=16, pixel_um=0.1, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68, npupil=64, oversample=2),
     dict(roisize=20, pixel_um=0.065, NA=1.4, n_imm=1.518, n_med=1.45, wavelength_um=0.6, npupil=48, oversample=3),
     dict(roisize=26, pixel_um=0.10833, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.7, npupil=64, oversample=2),
-    dict(roisize=15, pixel_um=0.12, NA=1.2, n_imm=1.33, n_med=1.33, wavelength_um=0.52, npupil=32, oversample=1),
+    dict(roisize=15, pixel_um=0.12, NA=1.2, n_imm=1.33, n_med=1.33, wavelength_um=0.52, npupil=32, oversample=1, pixel_integration='midpoint'),
 ]
 
 

@@ -24,7 +24,7 @@ from torch_psf.orientation import vortex_phase
 
 def vortex_psf(optics=None, roisize=15, charge=-1, center=(0.0, 0.0), levels=0, depth=1.0, start=None,
                zernike_indices=tuple(range(5, 22)), npupil=64, oversample=3, device=None, focus_um=0.0,
-               z_range=(-0.5, 0.5)):
+               z_range=(-0.5, 0.5), pixel_integration='exact'):
     """A VectorialPSF with the vortex phase (orientation.vortex_phase arguments charge, center, levels, depth).
     start: a VectorialPSF to copy (its Zernikes etc.; resized to roisize), else optics (Optics / dict / None)."""
     if start is not None:
@@ -32,7 +32,7 @@ def vortex_psf(optics=None, roisize=15, charge=-1, center=(0.0, 0.0), levels=0, 
     else:
         o = optics if isinstance(optics, Optics) else Optics.from_dict(optics or {})
         v = VectorialPSF.from_optics(o, roisize, zernike_indices=zernike_indices, npupil=npupil,
-                                     oversample=oversample, device=device, focus_um=focus_um, z_range=z_range)
+                                     oversample=oversample, device=device, focus_um=focus_um, z_range=z_range, pixel_integration=pixel_integration)
     vortex_phase(v, charge=charge, center=center, levels=levels, depth=depth)
     v.vortex = dict(charge=int(charge), center=[float(c) for c in center], levels=int(levels), depth=float(depth))
     return v

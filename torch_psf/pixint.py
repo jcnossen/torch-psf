@@ -14,7 +14,7 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
     group terms (SplinePSF.sample, with autograd), every chunk of samples is rendered by the spline with the knots detached
     (gradients to x, y, z and to the knots), then the knot gradient is pulled back to the PSF parameters (one backward
     through the knot build). Same arguments and result as fit_tracks (the model: the exact pixel integral of the
-    vectorial PSF, psf.pixel_integration = 'spectral'); xy_limit: the spline's offset limit (px; default R / 2 - 0.5: a
+    vectorial PSF, psf.pixel_integration = 'exact'); xy_limit: the spline's offset limit (px; default R / 2 - 0.5: a
     sample that runs off to a neighbour must render as in fit_tracks, a clamp at 2 px left ~2 % of the real-data
     samples stuck and cost 1e-3 nats / px). final_exact: the
     final NLL / residuals with the exact vectorial model (else with the spline).
@@ -124,7 +124,7 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
         hist.append(dict(it=it, nll_per_px=tot, focus_um=float(focus.detach())))
         if log is not None:
             log(it, tot, time.time() - t0, big.zcoef.detach())
-    out = vectorial.resampled(R, oversample=max(vectorial.os, knot_os), pixel_integration='spectral')
+    out = vectorial.resampled(R, oversample=max(vectorial.os, knot_os), pixel_integration='exact')
     with torch.no_grad():
         out.zcoef.copy_(big.zcoef)
     out.focus_um = float(focus.detach())

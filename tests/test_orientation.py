@@ -66,9 +66,9 @@ def test_ensemble_photoselection_gamma():
 import pytest
 
 
-@pytest.mark.parametrize('mode,blur', [('box', True), ('spectral', True), ('gauss_legendre', False)])
+@pytest.mark.parametrize('mode,blur', [('midpoint', True), ('exact', True), ('gauss_legendre', False)])
 def test_basis_images_are_linear_in_M(mode, blur):
-    v = small_model(pixel_integration=mode) if mode == 'box' else small_model(pixel_integration=mode, oversample=3)
+    v = small_model(pixel_integration=mode) if mode == 'midpoint' else small_model(pixel_integration=mode, oversample=3)
     v.blur = torch.tensor([0.2, 0.1, 0.05]) if blur else None
     pos = torch.tensor([[0.3, -0.2, 0.05], [-0.4, 0.1, 0.15]])
     B = basis_images(v, pos)
@@ -189,7 +189,7 @@ def test_vortex_bead_calibration_finds_the_charge():
     from torch_psf.optics import Optics
     torch.manual_seed(0)
     o = Optics(NA=1.4, n_med=1.518, n_imm=1.518, wavelength_um=0.6, pixel_um=0.08)
-    truth = vortex_psf(o, roisize=13, charge=-1, npupil=32, oversample=1, device='cpu')
+    truth = vortex_psf(o, roisize=13, charge=-1, npupil=32, oversample=1, device='cpu', pixel_integration='midpoint')
     truth.set_zernike({5: 0.03, 8: -0.02})
     f = 0.15 * (torch.arange(9, dtype=torch.float32) - 4)
     stack = torch.full((9, 40, 40), 5.0)
@@ -198,7 +198,7 @@ def test_vortex_bead_calibration_finds_the_charge():
             img = truth(torch.tensor([[0.2, -0.1, 0.0]]).expand(9, 3).contiguous(), f)
         stack[:, y0:y0 + 13, x0:x0 + 13] += 20000 * img
     stack = torch.poisson(stack)
-    start = vortex_psf(o, roisize=13, charge=-1, npupil=32, oversample=1, device='cpu')
+    start = vortex_psf(o, roisize=13, charge=-1, npupil=32, oversample=1, device='cpu', pixel_integration='midpoint')
     psf, rep = calibrate_beads([stack.numpy()], 0.15, start, charges=(-1, 1), iters=80, roisize=13, nbeads=2,
                                drift=False)
     assert rep['charge'] == -1

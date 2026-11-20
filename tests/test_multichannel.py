@@ -18,7 +18,7 @@ RAMP = torch.linspace(0, 1, 13)[:, None] + torch.linspace(0, 2, 13)[None, :]    
 def fourpi(asym=False, mirror='y', zmode='emitter', R=13, npupil=32, offsets=None, z_range=(-0.6, 0.6)):
     kw = dict(NA=(1.45, 1.3), n_imm=(1.518, 1.406), n_med=1.33, depth_um=(0.1, 1.0),
               zernike_indices=tuple(range(4, 16))) if asym else dict(NA=1.35, n_imm=1.406, zernike_indices=tuple(range(5, 16)))
-    p = FourPiPSF(R, pixel_um=0.11, wavelength_um=0.67, npupil=npupil, oversample=2, mirror=mirror, device=DEV,
+    p = FourPiPSF(R, pixel_um=0.11, wavelength_um=0.67, npupil=npupil, oversample=2, mirror=mirror, device=DEV, pixel_integration='midpoint',
                   phi=(0.3, 1.9, 3.4, 5.0), tau=(0.2, 0.3, 0.25, 0.25), a=0.9, gamma=0.8, d_bot=(0.3, -0.2, 0.02),
                   blur_px2=0.12, channel_offsets=offsets, z_range=z_range, **kw)
     g = torch.Generator().manual_seed(3)
@@ -171,7 +171,7 @@ def test_fit_and_crlb_channels_psf():
 
 
 def test_fit_channels_vectorial():
-    vs = [VectorialPSF(11, NA=1.4, npupil=24, oversample=1, device=DEV, focus_um=f, z_range=(0.0, 0.6)) for f in (0.2, 0.45)]
+    vs = [VectorialPSF(11, NA=1.4, npupil=24, oversample=1, device=DEV, focus_um=f, z_range=(0.0, 0.6), pixel_integration='midpoint') for f in (0.2, 0.45)]
     m = ChannelsPSF(vs, [[0, 0], [0.4, -0.3]])
     th, d = _simulate(m, 30, I=3000.0, bg=(4.0, 4.0), zr=0.2)
     th[:, 2] += 0.3

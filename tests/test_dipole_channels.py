@@ -4,7 +4,7 @@ import torch
 from torch_psf import ChannelsPSF, FourPiPSF, SplinePSF, to_spline, PSF, VectorialPSF, io, psfzip
 
 
-def models(kind, mode='box'):
+def models(kind, mode='midpoint'):
     kw = dict(roisize=7, npupil=16, oversample=3, device='cpu', pixel_integration=mode, z_range=(0., .04))
     offsets = [[.11, -.19], [-.22, .16]]
     if kind == 'fourpi':
@@ -31,7 +31,7 @@ def check_image(actual, ref):
     assert ((actual - ref).abs().amax((-1, -2)) <= 1e-5 * ref.abs().amax((-1, -2))).all()
 
 
-@pytest.mark.parametrize('kind,mode', [('fourpi', 'box'), ('fourpi', 'spectral'), ('channels', 'spectral'),
+@pytest.mark.parametrize('kind,mode', [('fourpi', 'midpoint'), ('fourpi', 'exact'), ('channels', 'exact'),
                                       ('channels', 'gauss_legendre')])
 def test_full_dipoles(kind, mode):
     model = models(kind, mode)
@@ -66,8 +66,10 @@ def test_full_dipoles(kind, mode):
 @pytest.mark.parametrize('kind', ['fourpi', 'channels'])
 @pytest.mark.parametrize('integrated', [False, True])
 def test_spline_dipoles_and_files(kind, integrated, tmp_path, monkeypatch):
-    source = models(kind, 'spectral' if integrated else 'box')
+    source = models(kind, 'exact' if integrated else 'midpoint')
     grid = dict(oversample=3, dz_um=.01, xy_limit=.75, dipole_components=True, zpad=3)
+    if not integrated:
+        grid.update(kernel='catmull', value='pixel')
     pos, M = emitters()
     if kind == 'fourpi':
         source.dipM = M[0]
@@ -183,9 +185,9 @@ def test_fourpi_dipole_rebuild(tmp_path):
 
 
 @pytest.mark.parametrize('kind', ['fourpi', 'channels'])
-def test_default_box_spline_keeps_old_layout(kind, tmp_path, monkeypatch):
+def test_catmull_pixel_spline_keeps_old_layout(kind, tmp_path, monkeypatch):
     source = models(kind)
-    model = source.to_spline(oversample=2, dz_um=.02, xy_limit=1)
+    model = source.to_spline(oversample=2, dz_um=.02, xy_limit=1, kernel='catmull', value='pixel')
     path = tmp_path / 'fixed.zip'
     meta = io.save_zip(path, model if kind == 'fourpi' else model.models, zstack_planes=3)
     assert meta['version'] == '0.2.0'
@@ -211,7 +213,7 @@ def test_component_build_and_default_response(tmp_path, monkeypatch, integrated)
     def build(components):
         if integrated:
             return to_spline(v, v.z_range, kernel='bspline', value='density', dipole_components=components, **grid)
-        return v.to_spline(dipole_components=components, **grid)
+        return v.to_spline(dipole_components=components, kernel='catmull', value='pixel', **grid)
     reference = build(False).render(pos)
     owner, name = SplinePSF, 'sample'
     original = getattr(owner, name)
@@ -237,7 +239,7 @@ def test_component_build_and_default_response(tmp_path, monkeypatch, integrated)
 
 
 def test_highest_required_version_across_channels(tmp_path):
-    v = models('channels', 'spectral').models[0]
+    v = models('channels', 'exact').models[0]
     component = v.to_spline(oversample=2, dz_um=.02, dipole_components=True)
     for channels in ([v, component], [component, v]):
         assert io.save_zip(tmp_path / 'mixed.zip', channels, zstack_planes=3)['version'] == '0.4.0'

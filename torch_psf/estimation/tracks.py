@@ -33,8 +33,8 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     covariance L L^T, px^2; the line blur plus an isotropic / second-axis part). groups [B, T] (long, values
     0..ngroups-1): background groups and PSF groups (default one group). group_psf_kwargs / extra_params: per-group
     PSF hook (module docstring). fix_zernike / fix_focus: hold the Zernikes / the focus at their starting values.
-    pixel_integration: the pixel integration of the fitted model (VectorialPSF.pixel_integration: 'box' = the midpoint
-    rule with the model's oversample, 'spectral' = the exact pixel integral, 'gauss_legendre'); None = that
+    pixel_integration: the pixel integration of the fitted model (VectorialPSF.pixel_integration: 'midpoint' = the midpoint
+    rule with the model's oversample, 'exact' = the exact pixel integral, 'gauss_legendre'); None = that
     of `vectorial`. The returned psf keeps it.
     Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
     (variance of the normalized residuals, 1 for a perfect model), nll_per_px, focus_um; data: xy [B, 2] px rel. to

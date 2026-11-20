@@ -10,7 +10,7 @@ from torch_psf import PSF, VectorialPSF, SplinePSF, to_spline, io, psfzip
 
 def _vec(R=11, dip=None):
     v = VectorialPSF(R, npupil=32, oversample=2, device='cpu', focus_um=0.2, z_range=(0.0, 0.3), wavelength_um=0.7,
-                     pixel_integration='spectral')
+                     pixel_integration='exact')
     v.set_zernike({6: 0.05, 11: 0.03})
     if dip is not None:
         v.dipM = torch.tensor(dip, dtype=torch.float32)
@@ -31,7 +31,7 @@ def _err(a, b):
 
 
 def test_matches_exact_vectorial():
-    """max |spline - VectorialPSF 'spectral'| < 5e-5 of the peak over the z range and offsets <= xy_limit, at S = 4"""
+    """max |spline - VectorialPSF 'exact'| < 5e-5 of the peak over the z range and offsets <= xy_limit, at S = 4"""
     v = _vec()
     s = to_spline(v, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.5, oversample=4, dz_um=0.01)
     pos = _pos()
@@ -170,7 +170,7 @@ def test_convert_calibration_integrated_spline(tmp_path):
     """convert_calibration(integrated_spline=...): channel 0 = the integrated spline (one coefficient set per pattern
     angle), the vectorial model as its source; the calibration keys stay readable from the source"""
     calib = dict(pixelsize_um=0.1083, wavelength_um=0.7, NA=1.49, n_imm=1.518, n_med=1.33, zernike_noll=[6, 11],
-                 zernike_waves=[0.05, 0.03], focus_um=0.2, npupil=32, oversample=2, pixel_integration='spectral',
+                 zernike_waves=[0.05, 0.03], focus_um=0.2, npupil=32, oversample=2, pixel_integration='exact',
                  psf_dipole_M_angle=[list(map(list, d)) for d in DIP], tirf_depth_um=0.1)
     p = tmp_path / 'calib.json'
     p.write_text(json.dumps(calib))
@@ -190,9 +190,9 @@ def test_convert_calibration_integrated_spline(tmp_path):
 
 
 def test_zip_version(tmp_path, monkeypatch):
-    """0.3.0 exactly for the files a 0.2 reader would misread (integrated_spline, pixel_integration != 'box'), refused
-    by a 0.2-only reader; 'box' files stay 0.2.0"""
-    box = VectorialPSF(11, npupil=32, oversample=2, device='cpu', focus_um=0.2, z_range=(0.0, 0.3))
+    """0.3.0 exactly for the files a 0.2 reader would misread (integrated_spline, pixel_integration != 'midpoint'), refused
+    by a 0.2-only reader; 'midpoint' files stay 0.2.0"""
+    box = VectorialPSF(11, npupil=32, oversample=2, device='cpu', focus_um=0.2, z_range=(0.0, 0.3), pixel_integration='midpoint')
     cases = dict(box=(box, None, '0.2.0'), spectral=(_vec(), None, '0.3.0'),
                  spline=(to_spline(box, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02),
                          box, '0.3.0'),

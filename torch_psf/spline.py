@@ -26,7 +26,7 @@ _GRID_PROFILES = {
 
 def spline_kind(kind, pixel_integration):
     if kind is None:
-        return 'cubic' if pixel_integration == 'box' else 'integrated'
+        return 'cubic' if pixel_integration == 'midpoint' else 'integrated'
     if kind not in ('cubic', 'integrated'):
         raise ValueError("kind must be 'cubic' or 'integrated'")
     return kind
@@ -373,10 +373,10 @@ class SplinePSF(PSF):
         return torch.cat([self.render(pos[s:s + nb]) for s in range(0, len(pos), nb)])
 
     def to_spline(self, roisize=None, z_range=None, **grid):
-        """A spline is already a spline: returns self, resized(roisize) for another ROI size, or retabulated(...) for
+        """A spline is already a spline: returns self, resized(roisize) for another ROI size, or resampled(...) for
         other grid or kernel settings (oversample, dz_um, z_range, zpad, xy_limit, kernel, backend)."""
         if (z_range is not None and tuple(z_range) != self.z_range) or grid:
-            return self.retabulated(roisize=roisize, z_range=z_range, **grid)
+            return self.resampled(roisize=roisize, z_range=z_range, **grid)
         return self if roisize in (None, self.roisize) else self.resized(roisize)
 
     def _grid_settings(self, oversample, dz_um, z_range, zpad, xy_limit, kernel, value, roisize, backend):
@@ -390,7 +390,7 @@ class SplinePSF(PSF):
                     kernel=kernel or self.kernel, value=value or self.value,
                     roisize=self.roisize if roisize is None else int(roisize), backend=backend or self.backend)
 
-    def retabulated(self, *, oversample=None, dz_um=None, z_range=None, zpad=None, xy_limit=None, kernel=None,
+    def resampled(self, *, oversample=None, dz_um=None, z_range=None, zpad=None, xy_limit=None, kernel=None,
                     value=None, roisize=None, backend=None):
         """This spline on another knot grid or with another kernel, e.g. an integrated B-spline at 4 knots/px ->
         2 knots/px. Unset arguments keep this spline's settings (zpad keeps the padding in um when dz_um changes).

@@ -105,7 +105,7 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
     psfs, e.g. their to_spline() tables, much faster); the NLL is then evaluated with psfs. readnoise_e: read noise
     (e- rms): a scalar or per pixel of every sample [B, R, R] (as fit_tracks). NLL: Gaussian approximation of Poisson + read noise, 0.5 (d - mu)^2 / v + 0.5 log(2 pi v), v = mu + rn^2,
     over the present frames. pixel_integration: evaluate the NLL with copies of the VectorialPSF models in psfs with this
-    pixel integration (VectorialPSF.pixel_integration, e.g. 'spectral'); None = as they are. refit_psfs are used as given
+    pixel integration (VectorialPSF.pixel_integration, e.g. 'exact'); None = as they are. refit_psfs are used as given
     (build them from the models with the same setting, e.g. VectorialPSF.to_spline of the copies).
 
     Returns dict(nll [B], chi2 [B] (mean (d - mu)^2 / v per pixel of the sample's present frames), xy [B, 2] (px

@@ -119,7 +119,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
     medium; default n_imm of the top arm), zernike_indices (Noll, both arms), npupil, oversample, mirror ('y' | 'x'),
     pol (polarization per channel, 0 = E_x, 1 = E_y; its length is the channel count C), depth_um (None or
     (top, bottom) um: asymmetric-arm geometry), z_range (um; default range of to_spline),
-    device, pixel_integration ('box' by default, or 'spectral' / 'point'). Initial values: phi [C] (default
+    device, pixel_integration ('exact' by default, or 'midpoint' / 'point'; a file without it is 'midpoint'). Initial values: phi [C] (default
     -2 pi c / C mod 2 pi), tau [C] (default 1 / C), a (1), gamma
     (sigmoid(2)), d_bot (0, 0, 0), blur_px2 (0.1), channel_offsets [C, 2] px (zeros).
     Optional plain attribute dipM: emission-dipole tensor (3 x 3 or [N, 3, 3]) used when forward gets dipM=None.
@@ -132,7 +132,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
     def __init__(self, roisize, pixel_um=0.10833, wavelength_um=0.68, NA=1.35, n_imm=1.406, n_med=None,
                  zernike_indices=DEFAULT_ZIDX, npupil=48, oversample=2, mirror='y', pol=(0, 1, 0, 1), depth_um=None,
                  z_range=(-0.6, 0.6), device=None, phi=None, tau=None, a=1.0, gamma=None,
-                 d_bot=(0.0, 0.0, 0.0), blur_px2=0.1, channel_offsets=None, pixel_integration='box'):
+                 d_bot=(0.0, 0.0, 0.0), blur_px2=0.1, channel_offsets=None, pixel_integration='exact'):
         super().__init__()
         if mirror not in ('x', 'y'):
             raise ValueError("mirror must be 'x' or 'y'")
@@ -206,8 +206,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         mode = pixel_integration_mode(mode)
         if mode == 'gauss_legendre':
             raise ValueError("FourPiPSF has image-plane blur, incompatible with 'gauss_legendre'")
-        spectral_cutoff(self, mode, self.os)
-        self._pixint = mode
+        self._pixint = mode   # 'exact' raises its sampling grid as needed (PixelIntegrator)
 
     def band_limit(self):
         return max(self.top.band_limit(), self.bot.band_limit())
@@ -436,7 +435,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
                     os=self.os, mirror=self.mirror, zidx=list(self.zidx), pol=[int(v) for v in self.pol],
                     NA_t=float(t.NA), n_imm_t=t.n_imm, NA_b=float(b.NA), n_imm_b=b.n_imm, n_med=self.n_med,
                     zmode=self.axial.mode)
-        if self.pixel_integration != 'box':
+        if self.pixel_integration != 'midpoint':
             meta['pixel_integration'] = self.pixel_integration
         if self.asym:
             meta['asym'] = True
@@ -494,7 +493,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
     # ------------------------------------------------------------------ files
     @staticmethod
     def integration_version(mode):
-        return (0, 2) if mode == 'box' else (0, 4)
+        return (0, 2) if mode == 'midpoint' else (0, 4)
 
     def format_version(self, source=None):
         return self.integration_version(self.pixel_integration)
@@ -682,13 +681,13 @@ class FourPiSplinePSF(_CoupledChannels):
 
     def to_spline(self, roisize=None, z_range=None, **grid):
         if (z_range is not None and tuple(z_range) != self.z_range) or grid:
-            return self.retabulated(roisize=roisize, z_range=z_range, **grid)
+            return self.resampled(roisize=roisize, z_range=z_range, **grid)
         return self if roisize in (None, self.roisize) else self.resized(roisize)
 
-    def retabulated(self, **grid):
-        """The 4Pi tables on another knot grid or with another kernel (arguments as SplinePSF.retabulated): the one
+    def resampled(self, **grid):
+        """The 4Pi tables on another knot grid or with another kernel (arguments as SplinePSF.resampled): the one
         phase / channel / dipole knot bank is re-tabulated from its own interpolant."""
-        table = self.table.retabulated(**grid)
+        table = self.table.resampled(**grid)
         new = copy.copy(self)
         new.table = table
         new.roisize = new.P = table.roisize
@@ -704,7 +703,7 @@ class FourPiSplinePSF(_CoupledChannels):
         if source is not None:
             return max(version, source.format_version())
         if self.source_state is not None:
-            mode = self.source_state['meta'].get('pixel_integration', 'box')
+            mode = pixel_integration_mode(self.source_state['meta'].get('pixel_integration'), from_file=True)
             return max(version, FourPiPSF.integration_version(mode))
         return version
 

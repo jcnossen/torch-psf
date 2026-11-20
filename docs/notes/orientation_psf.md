@@ -473,7 +473,7 @@ run with `python -I`):
 `archive/dipole-orientation-0947`. `VectorialPSF.forward` of master is split into `_fields()` and `_image()`, with
 `pixel_integration` in `_image()`, plus a one-line hook `_emitter_pupil()`.
 * Checked against master: `render`, `render(grad=True)`, `forward(dipM=...)` and the `to_spline` knots differ by
-  exactly 0, for 'box', 'spectral' and 'gauss_legendre', with and without blur.
+  exactly 0, for 'midpoint', 'exact' and 'gauss_legendre', with and without blur.
 * `dipole_basis()` works in every pixel_integration mode (tested).
 * Full suite on CPU: 191 passed, 32 skipped (master 177 + 14 orientation tests).
 

@@ -40,7 +40,7 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
 ├── GaussianPSF(roisize, sigma_px)                                   2D
 ├── AstigmaticGaussianPSF(roisize, sigma_px, gamma_um, d_um, z_range)  3D
 ├── VectorialPSF(roisize, pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices, npupil, oversample,
-│                focus_um, z_range, pixel_integration='box' | 'spectral' | 'gauss_legendre' | 'point')  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
+│                focus_um, z_range, pixel_integration='midpoint' | 'exact' | 'gauss_legendre' | 'point')  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
 │                from_optics, optics, to_spline(...))
 ├── SplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [T, nz, nv, nu]; render_tables(..., knots=);
 │                to_spline, sample, vjp_vectorial, from_zstack

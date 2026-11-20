@@ -65,7 +65,7 @@ def build():
     """the composed model, the field, per-emitter theta [5, 9] and field xy [5, 2]"""
     torch.manual_seed(0)
     v = VectorialPSF(15, pixel_um=0.065, NA=1.47, n_imm=1.518, n_med=1.0, wavelength_um=0.5975, npupil=32,
-                     oversample=1, zernike_indices=tuple(range(5, 22)), device="cpu", focus_um=0.0, z_range=(-0.6, 0.6))
+                     oversample=1, zernike_indices=tuple(range(5, 22)), device="cpu", focus_um=0.0, z_range=(-0.6, 0.6), pixel_integration='midpoint')
     for p in v.parameters():
         p.requires_grad_(False)
     vortex_phase(v, charge=1, center=CENTER, levels=0, depth=593.0 / 597.5)

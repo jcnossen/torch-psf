@@ -9,7 +9,7 @@ DEV = 'cpu'
 def model(asym=False, mirror='y', zmode='emitter', R=13):
     kw = dict(NA=(1.45, 1.3), n_imm=(1.518, 1.406), n_med=1.33, depth_um=(0.1, 1.0),
               zernike_indices=tuple(range(4, 16))) if asym else dict(NA=1.35, n_imm=1.406, zernike_indices=tuple(range(5, 16)))
-    p = FourPiPSF(R, pixel_um=0.11, wavelength_um=0.67, npupil=32, oversample=2, mirror=mirror, device=DEV,
+    p = FourPiPSF(R, pixel_um=0.11, wavelength_um=0.67, npupil=32, oversample=2, mirror=mirror, device=DEV, pixel_integration='midpoint',
                   phi=(0.3, 1.9, 3.4, 5.0), tau=(0.2, 0.3, 0.25, 0.25), a=0.9, gamma=0.8, d_bot=(0.3, -0.2, 0.02),
                   blur_px2=0.12, **kw)
     g = torch.Generator().manual_seed(3)
@@ -24,9 +24,9 @@ POS = torch.tensor([[0.2, -0.4, 0.05], [-0.7, 0.3, -0.12], [0.0, 0.0, 0.2]])
 
 
 def test_shape_and_normalization():
-    p = FourPiPSF(31, NA=1.35, n_imm=1.406, npupil=48, oversample=2, device=DEV, gamma=0.5, blur_px2=0.01)
+    p = FourPiPSF(31, NA=1.35, n_imm=1.406, npupil=48, oversample=2, device=DEV, gamma=0.5, blur_px2=0.01, pixel_integration='midpoint')
     v = VectorialPSF(31, pixel_um=p.pixel_um, NA=1.35, n_imm=1.406, n_med=1.406, wavelength_um=0.68, npupil=48,
-                     oversample=2, device=DEV)
+                     oversample=2, device=DEV, pixel_integration='midpoint')
     v.blur = torch.tensor([0.01, 0.01, 0.0])
     with torch.no_grad():
         I = p(torch.zeros(1, 3), phi=torch.tensor([0.4]))
@@ -43,7 +43,7 @@ def test_shape_and_normalization():
 
 
 def test_more_channels():
-    p = FourPiPSF(11, pol=(0, 1, 0, 1, 0, 1), npupil=24, oversample=1, device=DEV)
+    p = FourPiPSF(11, pol=(0, 1, 0, 1, 0, 1), npupil=24, oversample=1, device=DEV, pixel_integration='midpoint')
     with torch.no_grad():
         I = p(POS)
     assert I.shape == (3, 6, 11, 11) and torch.allclose(p.tau, torch.full((6,), 1 / 6))

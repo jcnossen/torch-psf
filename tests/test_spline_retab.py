@@ -31,14 +31,14 @@ def test_subset_grid_matches_a_direct_build(kernel, value):
     assert rel(r.knots, s2.knots) < 1e-6
     for a, b in zip(r.render(POS, grad=True), s2.render(POS, grad=True)):
         assert rel(a, b) < 1e-5
-    assert torch.equal(s4.retabulated().knots, s4.knots) or rel(s4.retabulated().knots, s4.knots) < 1e-6
+    assert torch.equal(s4.resampled().knots, s4.knots) or rel(s4.resampled().knots, s4.knots) < 1e-6
 
 
 def test_off_grid_resampling_adds_only_interpolation_error():
     v = optics()
     s4 = to_spline(v, oversample=4, kernel='bspline', value='density', **GRID)
     for change in (dict(oversample=3), dict(dz_um=.02), dict(oversample=2, dz_um=.015, zpad=2)):
-        r = s4.retabulated(**change)
+        r = s4.resampled(**change)
         direct = to_spline(v, oversample=r.S, kernel='bspline', value='density', dz_um=r.hz, zpad=r.zpad,
                            xy_limit=GRID['xy_limit'])
         assert r.knots.shape == direct.knots.shape and r.zpad == change.get('zpad', 4 * .01 / r.hz // 1)
@@ -51,11 +51,11 @@ def test_kernel_change_and_refusals():
     v = optics()
     s4 = to_spline(v, oversample=4, kernel='bspline', value='density', **GRID)
     cr = to_spline(v, oversample=2, kernel='catmull', value='density', **GRID)
-    assert rel(s4.retabulated(oversample=2, kernel='catmull').knots, cr.knots) < 1e-6
+    assert rel(s4.resampled(oversample=2, kernel='catmull').knots, cr.knots) < 1e-6
     with pytest.raises(ValueError, match='optical model'):
-        s4.retabulated(value='pixel')
+        s4.resampled(value='pixel')
     with pytest.raises(ValueError, match='beyond the stored spline'):
-        s4.retabulated(z_range=(-.2, .1))
+        s4.resampled(z_range=(-.2, .1))
 
 
 @pytest.mark.parametrize('components', [None, 'dipole'])
@@ -67,7 +67,7 @@ def test_per_angle_tables(components):
     s4 = to_spline(models, oversample=4, **G)
     s2 = to_spline(models, oversample=2, **G)
     assert s4.n_angles == 2
-    r = s4.retabulated(oversample=2)
+    r = s4.resampled(oversample=2)
     assert r.axes == s2.axes and torch.equal(r.table_map, s2.table_map)
     if components:
         torch.testing.assert_close(r.component_weights, s2.component_weights)
@@ -82,7 +82,7 @@ def test_fourpi_component_tables():
     G = dict(kernel='bspline', value='density', components='dipole', **GRID)
     s4 = base.to_spline(oversample=4, **G)
     s2 = base.to_spline(oversample=2, **G)
-    r = s4.retabulated(oversample=2)
+    r = s4.resampled(oversample=2)
     assert r.table.axes == s2.table.axes and r.S == 2
     assert rel(r.knots, s2.knots) < 1e-6
     phase = torch.rand(len(POS)) * 6.28

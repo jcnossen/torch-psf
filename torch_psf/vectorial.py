@@ -15,18 +15,19 @@ Physics:
    phase = k0 (n_med cos(theta_med) z_e - n_imm cos(theta_imm) f).
  - Image: matrix Fourier transform (chirp-z) from the pupil to an oversampled pixel grid, optional image-plane Gaussian
    blur (covariance in px^2, e.g. a line blur v v^T), integration over the pixels (pixel_integration):
-   'box'            the mean of the oversample x oversample point samples of each pixel (midpoint rule; the default).
+   'midpoint'       the mean of the oversample x oversample point samples of each pixel (midpoint rule; the default
+                    of files written without the key).
                     Its error is mostly a missing isotropic blur of 1 / (12 oversample^2) px^2 (1.4 % of the peak at
                     oversample 2, NA 1.49, 700 nm, 108 nm pixels).
-   'spectral'       exact: |E|^2 is band-limited (no spatial frequency above fc = 2 NA / lambda), so its point samples on
+   'exact'          (the default) exact: |E|^2 is band-limited (no spatial frequency above fc = 2 NA / lambda), so its point samples on
                     a uniform grid with oversample > 2 fc pixel_um per px (>= 2; 2 suffices for pixels < lambda / (2 NA),
                     otherwise ValueError) (padded by three pixels per side) determine it; one FFT,
                     times the transfer function of the pixel box sinc(fx) sinc(fy) and of the optional blur, inverse
                     FFT, sampled at the pixel centres (a raised-cosine taper between the band limit and the grid's
                     Nyquist frequency keeps the kernel compact). Exact up to float32 round-off and the wrap at the
-                    padded border (~1e-5 of the peak at oversample 2); costs about oversample 3 of 'box'.
+                    padded border (~1e-5 of the peak at oversample 2); costs about oversample 3 of 'midpoint'.
    'gauss_legendre' Gauss-Legendre quadrature with oversample nodes per axis (error ~1e-5 of the peak at 3 nodes;
-                    the cost of 'box' at the same oversample); no image-plane blur.
+                    the cost of 'midpoint' at the same oversample); no image-plane blur.
    'point'          spectral sampling at pixel centres without the pixel-box transfer (density per px^2).
  - Normalization: the PSF integrates to 1 over the whole image plane for an aberration-free emitter at z_e = 0, i.e.
    `intensity` = detected photons of an emitter at the coverslip.
@@ -119,8 +120,8 @@ class VectorialPSF(torch.nn.Module, PSF):
     Constructor: roisize (px), pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices (Noll), npupil (pupil
     samples per side), oversample (image samples per px per side), device (default: cuda if available); fit_NA / fit_nmed make NA / n_med trainable.
     focus_um (focal plane position used by render) and z_range (um, the emitter heights the model is meant for).
-    pixel_integration: 'box' (default) | 'spectral' | 'gauss_legendre' | 'point' (module docstring; an attribute,
-    copied by resized() and stored in the file when not 'box').
+    pixel_integration: 'exact' (default) | 'midpoint' | 'gauss_legendre' | 'point' (module docstring; an attribute,
+    copied by resized() and stored in the file when not 'midpoint'; a file without it is 'midpoint').
 
     Parameters / buffers: zcoef [nz] (waves rms), NA, n_med, apod [3], saf [4]; buffers pupil_phase [npupil, npupil]
     (waves, 0) and pupil_amp [npupil, npupil] (1). Optional plain attributes: blur (covariance [3] px^2), diat (Ex / Ey
@@ -131,7 +132,7 @@ class VectorialPSF(torch.nn.Module, PSF):
 
     def __init__(self, roisize, pixel_um=0.10833, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68,
                  zernike_indices=tuple(range(5, 22)), npupil=64, oversample=3, device=None, fit_NA=False,
-                 fit_nmed=False, focus_um=0.0, z_range=(0.0, 1.0), pixel_integration='box'):
+                 fit_nmed=False, focus_um=0.0, z_range=(0.0, 1.0), pixel_integration='exact'):
         super().__init__()
         self.roisize = roisize
         self.pixel_um = pixel_um
@@ -184,9 +185,7 @@ class VectorialPSF(torch.nn.Module, PSF):
 
     @pixel_integration.setter
     def pixel_integration(self, mode):
-        m = pixel_integration_mode(mode)
-        spectral_cutoff(self, m, self.os)
-        self._pixint = m
+        self._pixint = pixel_integration_mode(mode)   # 'exact' raises its sampling grid as needed (PixelIntegrator)
 
     def band_limit(self):
         """Highest spatial frequency of |E|^2 (cycles / px): 2 NA / lambda * pixel size."""
@@ -418,11 +417,11 @@ class VectorialPSF(torch.nn.Module, PSF):
         return (f'VectorialPSF(roisize={self.roisize}, pixel_um={self.pixel_um}, NA={float(self.NA):.3f}, '
                 f'n_imm={self.n_imm}, n_med={float(self.n_med):.3f}, wavelength_um={self.wavelength_um}, '
                 f'npupil={self.npupil}, oversample={self.os}, focus_um={self.focus_um}'
-                + (f', pixel_integration={self.pixel_integration!r}' if self.pixel_integration != 'box' else '') + ')')
+                + (f', pixel_integration={self.pixel_integration!r}' if self.pixel_integration != 'midpoint' else '') + ')')
 
     # ------------------------------------------------------------------ files
     def format_version(self, source=None):
-        return (0, 2) if self.pixel_integration == 'box' else (0, 3)
+        return (0, 2) if self.pixel_integration == 'midpoint' else (0, 3)
 
     def _file_dict(self, source=None):
         o = self.optics
@@ -433,7 +432,7 @@ class VectorialPSF(torch.nn.Module, PSF):
                  z_range_um=None if self.z_range is None else list(self.z_range))
         if self.dipw is not None:
             d['psf_dipole_w'] = _list(self.dipw)
-        if self.pixel_integration != 'box':
+        if self.pixel_integration != 'midpoint':
             d['pixel_integration'] = self.pixel_integration
         if getattr(self, 'dipM_angle', None) is not None:
             d['psf_dipole_M_angle'] = _list(self.dipM_angle)

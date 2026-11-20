@@ -37,34 +37,35 @@ ZIP_CASES = ('box', 'gauss2d', 'gauss3d', 'cubic', 'integrated', 'integrated_ang
              'fourpi_box', 'phase_cubic', 'phase_integrated', 'phase_dipole', 'channels', 'field', 'tiles')
 
 
-def vec(mode='box'):
+def vec(mode='midpoint'):
     return VectorialPSF(7, npupil=16, oversample=3, pixel_um=.108, focus_um=.08,
                         z_range=GRID['z_range'], device='cpu', pixel_integration=mode).set_zernike({6: .04, 7: -.025})
 
 
 def models():
     blur = torch.tensor([.14, .08, -.035])
-    for mode in ('box', 'spectral', 'gauss_legendre'):
+    # pin names keep the earlier mode names ('box' = midpoint, 'spectral' = exact)
+    for name, mode in (('box', 'midpoint'), ('spectral', 'exact'), ('gauss_legendre', 'gauss_legendre')):
         v = vec(mode)
-        yield mode, v, {}
-        yield mode + '_dipole', v, dict(dipM=M)
+        yield name, v, {}
+        yield name + '_dipole', v, dict(dipM=M)
         if mode != 'gauss_legendre':
             vb = vec(mode)
             vb.blur = blur
-            yield mode + '_blur', vb, {}
-            yield mode + '_blur_dipole', vb, dict(dipM=M)
+            yield name + '_blur', vb, {}
+            yield name + '_blur_dipole', vb, dict(dipM=M)
         # Exercise the file loader's angle selection, including anisotropic blur where supported.
         spec, arrays = v._file_dict()
         spec['psf_dipole_M_angle'] = M.tolist()
         if mode != 'gauss_legendre':
             spec['psf_blur_angle_px2'] = torch.stack([blur, blur * .4]).tolist()
         a = VectorialPSF._from_file(spec, arrays, roisize=7, angle=1, device='cpu')
-        yield mode + '_angle', a, {}
-        if mode == 'spectral':
+        yield name + '_angle', a, {}
+        if mode == 'exact':
             yield 'spectral_angle_mean', VectorialPSF._from_file(spec, arrays, roisize=7, device='cpu'), {}
 
     v = vec()
-    yield 'exact_prototype', vec('spectral'), {}
+    yield 'exact_prototype', vec('exact'), {}
     yield 'focus_z', ZMode(v, height=.017), {}
     yield 'polychromatic', Polychromatic(v, [.64, .72], [.3, .7]), {}
     yield 'gauss2d', GaussianPSF(7, (1.15, 1.4), pixel_um=.108, device='cpu'), {}
@@ -86,12 +87,12 @@ def models():
         conv.backend = 'conv'
         yield 'pixel_' + kernel + '_conv', conv, {}
     phase = dict(phi=torch.tensor([.45, -1.2]))
-    for mode in ('box', 'spectral'):
+    for name, mode in (('box', 'midpoint'), ('spectral', 'exact')):
         f = FourPiPSF(7, npupil=16, oversample=2, pol=(0, 1), phi=(.2, 1.8), tau=(.4, .6), a=.87,
                       device='cpu', z_range=GRID['z_range'], pixel_integration=mode)
         f.bot.set_zernike({6: .03})
-        yield 'fourpi_' + mode, f, phase
-        kind = 'cubic' if mode == 'box' else 'integrated'
+        yield 'fourpi_' + name, f, phase
+        kind = 'cubic' if mode == 'midpoint' else 'integrated'
         yield 'phase_' + kind, f.to_spline(kind=kind, **GRID), phase
     yield 'phase_dipole', f.to_spline(kind='integrated', dipole_components=True, **GRID), dict(**phase, dipM=M)
     yield 'channels', ChannelsPSF([v, other], [[.15, -.1], [-.08, .2]], [.7, .3]), {}
@@ -147,7 +148,7 @@ def orientation():
 
 
 def sofi():
-    v = VectorialPSF(7, npupil=16, zernike_indices=(5, 6), device='cpu').set_zernike({6: .04})
+    v = VectorialPSF(7, npupil=16, zernike_indices=(5, 6), device='cpu', pixel_integration='midpoint').set_zernike({6: .04})
     grid = GridPSF(v, 7, os=1, z_layers=(.012, .033), focus=.08)
     value, jac = grid.jac()
     return value.numpy(), jac.numpy()

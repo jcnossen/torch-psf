@@ -21,6 +21,7 @@ MEMBERS = {'psf.json', 'zstack.tif', 'preview.png', 'fit_report.pdf'}
 
 
 def vectorial(R=13, **kw):
+    kw.setdefault('pixel_integration', 'midpoint')
     v = VectorialPSF(R, npupil=24, oversample=1, device=DEV, focus_um=0.3, z_range=(0.0, 0.6), **kw)
     v.set_zernike({6: 0.1, 11: 0.02})
     return v
@@ -29,7 +30,7 @@ def vectorial(R=13, **kw):
 def fourpi():
     p = FourPiPSF(11, pixel_um=0.11, wavelength_um=0.67, NA=1.35, n_imm=1.406, npupil=16, oversample=1, device=DEV,
                   zernike_indices=tuple(range(5, 12)), phi=(0.3, 1.9, 3.4, 5.0), a=0.9, gamma=0.8,
-                  d_bot=(0.3, -0.2, 0.02), z_range=(-0.2, 0.2))
+                  d_bot=(0.3, -0.2, 0.02), z_range=(-0.2, 0.2), pixel_integration='midpoint')
     with torch.no_grad():
         p.top.zcoef[1] = 0.03
         p.bot.zcoef[2] = -0.02
@@ -136,7 +137,7 @@ def test_report_model_pages_only(tmp_path):
 
 
 def test_report_zstack_estimator(tmp_path):
-    vec = VectorialPSF(13, npupil=24, oversample=1, device=DEV).set_zernike({6: 0.08})
+    vec = VectorialPSF(13, npupil=24, oversample=1, device=DEV, pixel_integration='midpoint').set_zernike({6: 0.08})
     nk, H = 9, 32
     focus = 0.08 * (torch.arange(nk) - (nk - 1) / 2)
     stack = torch.full((nk, H, H), 20.0)

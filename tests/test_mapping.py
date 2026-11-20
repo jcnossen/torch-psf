@@ -143,7 +143,7 @@ def test_channel_rois_and_field_channels():
     assert torch.equal(cor[0, 0], torch.tensor([17.0, 28.0]))
     assert torch.equal(rois[1, 1], imgs[1][1, int(cor[1, 1, 1]):int(cor[1, 1, 1]) + 7, int(cor[1, 1, 0]):int(cor[1, 1, 0]) + 7])
     v = VectorialPSF(9, pixel_um=0.1, NA=1.3, npupil=16, oversample=1, device=DEV, zernike_indices=(5, 6),
-                     z_range=(-0.3, 0.3))
+                     z_range=(-0.3, 0.3), pixel_integration='midpoint')
     f = FieldZernikes([6], 1, norm=(32.0, 32.0, 32.0, 32.0), coef=[[0.0, 0.05]])
     fp = FieldPSF(v, f)
     mc = ChannelsPSF([v, fp], mappings=[None, mp])
@@ -155,7 +155,7 @@ def test_channel_rois_and_field_channels():
 
 def test_psfzip_round_trip_mapped_field_channels(tmp_path):
     v0 = VectorialPSF(9, pixel_um=0.1, NA=1.3, npupil=16, oversample=1, device=DEV, zernike_indices=(5, 6, 11),
-                      z_range=(-0.3, 0.3))
+                      z_range=(-0.3, 0.3), pixel_integration='midpoint')
     v0.set_zernike({6: 0.05})
     v1 = v0.resized(9).set_zernike({5: 0.03})
     v1.focus_um = 0.07                                       # a channel focus offset lives in the channel model

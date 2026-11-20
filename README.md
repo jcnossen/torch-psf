@@ -41,7 +41,7 @@ psf.save('insitu.json')
 - Render pixel-integrated 2D and astigmatic 3D Gaussians with `tp.GaussianPSF` and `tp.AstigmaticGaussianPSF`.
 - Build a fast 3D spline table from a model with `psf.to_spline` (default: the integrated cubic B-spline at 2 knots/px) or from measured planes with `tp.SplinePSF.from_zstack`.
 - Integrate a cubic B-spline over each pixel with `tp.to_spline(model, kernel='bspline', value='density', **grid)`, optionally using coefficients per angle.
-- Re-tabulate an existing spline on another grid with `spline.to_spline(oversample=2)` (or `spline.retabulated(...)`): it evaluates the spline's own interpolant at the new knots, which equals a direct build up to rounding when the new knots are a subset (e.g. 4 -> 2 knots/px).
+- Re-tabulate an existing spline on another grid with `spline.to_spline(oversample=2)` (or `spline.resampled(...)`): it evaluates the spline's own interpolant at the new knots, which equals a direct build up to rounding when the new knots are a subset (e.g. 4 -> 2 knots/px).
 - Fit multiple channels jointly with `tp.ChannelsPSF`.
 - Model two-objective interference with `tp.FourPiPSF` or its spline form, `tp.FourPiSplinePSF`.
 - Integrate exactly over each pixel (spectral or Gauss-Legendre) in vectorial, 4Pi and field-dependent models.

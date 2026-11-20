@@ -16,6 +16,7 @@ PUP = dict(npupil=32, oversample=2)
 
 
 def vec(R=11, device=DEV, **kw):
+    kw.setdefault('pixel_integration', 'midpoint')
     v = VectorialPSF(R, pixel_um=0.1, NA=1.4, zernike_indices=(5, 6, 7, 11), device=device, focus_um=0.3,
                      z_range=(0.0, 0.6), **PUP, **kw)
     return v.set_zernike({6: 0.1, 7: 0.02})
@@ -119,7 +120,7 @@ def test_field_psf_render_fit_and_zip(tmp_path):
 def test_integrated_field_tiles_and_channels(tmp_path, monkeypatch):
     from torch_psf import ChannelsPSF, SplinePSF, psfzip
 
-    fp = FieldPSF(vec(11, pixel_integration='spectral'), field())
+    fp = FieldPSF(vec(11, pixel_integration='exact'), field())
     tiles = fp.to_tiled(tile=128, z_range=(.2, .3), xy_limit=1)
     xy = torch.tensor(tiles.centers[[0, 3]], device=DEV, dtype=torch.float32)
     pos = torch.tensor([[.19, -.31, .241], [-.33, .12, .264]], device=DEV)
@@ -127,7 +128,7 @@ def test_integrated_field_tiles_and_channels(tmp_path, monkeypatch):
     for i, point in enumerate(xy):
         vec_at = fp.at(*point.tolist())
         torch.testing.assert_close(ref[i], vec_at.render(pos[i:i+1])[0], atol=1e-7, rtol=0)
-        vec_at.pixel_integration = 'box'
+        vec_at.pixel_integration = 'midpoint'
         assert (ref[i] - vec_at.render(pos[i:i+1])[0]).abs().max() > 1e-4 * ref[i].max()
     expected = tiles.render(pos, xy=xy)
     assert torch.all((expected - ref).abs().amax((-2, -1)) / ref.amax((-2, -1)) < 2e-5)
@@ -228,7 +229,7 @@ def test_dense_beads_field_recovers_polynomial():
     field-constant fit on held-out clusters"""
     from torch_psf import DenseBeadEstimator
     from torch_psf.estimation.dense_beads import simulate_dense_bead_stack, dense_bead_layout
-    truth = VectorialPSF(31, pixel_um=0.1, NA=1.49, wavelength_um=0.67, device=DEV, **PUP).set_zernike(
+    truth = VectorialPSF(31, pixel_um=0.1, NA=1.49, wavelength_um=0.67, device=DEV, **PUP, pixel_integration='midpoint').set_zernike(
         {5: 0.02, 6: 0.06, 7: -0.03})
     f = FieldZernikes([5, 6], order=1, norm=(80.0, 80.0, 80.0, 80.0), device=DEV)
     with torch.no_grad():
@@ -259,7 +260,7 @@ def test_insitu_estimator_field_option():
     """InSituEstimator(field=) on a simulated movie with a linear Z6 field: the field model wins on held-out spots"""
     from torch_psf import InSituEstimator
     v = VectorialPSF(13, pixel_um=0.1, NA=1.4, zernike_indices=(5, 6, 11), device=DEV, focus_um=0.3,
-                     z_range=(0.0, 0.6), **PUP).set_zernike({6: 0.08})
+                     z_range=(0.0, 0.6), **PUP, pixel_integration='midpoint').set_zernike({6: 0.08})
     f = FieldZernikes([6], order=1, norm=(128.0, 128.0, 128.0, 128.0), device=DEV)
     with torch.no_grad():
         f.coef.copy_(torch.tensor([[0.0, 0.06]]))                         # Z6 0.02 .. 0.14 waves across x

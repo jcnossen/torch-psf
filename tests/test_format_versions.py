@@ -14,7 +14,7 @@ GRID = dict(dz_um=.02, xy_limit=.5)
 NEW = [('catmull', 'density'), ('bspline', 'pixel')]
 
 
-def vectorial(mode='box'):
+def vectorial(mode='midpoint'):
     return VectorialPSF(5, npupil=16, oversample=2, device='cpu', z_range=(0., .04),
                         pixel_integration=mode)
 
@@ -96,7 +96,7 @@ def test_phase_and_field_grids(tmp_path, monkeypatch, kernel, value):
 
 
 def test_source_and_channel_maximum(tmp_path):
-    src = vectorial('spectral')
+    src = vectorial('exact')
     table = vectorial().to_spline(**GRID)
     assert table.save(tmp_path / 'model.json', source=src)['version'] == '0.3.0'
     new = vectorial().to_spline(kernel='bspline', value='pixel', **GRID)
@@ -106,7 +106,7 @@ def test_source_and_channel_maximum(tmp_path):
 
     fourpi = FourPiPSF(5, npupil=16, pol=(0, 1), device='cpu', z_range=(0., .04))
     phase = fourpi.to_spline(kind='cubic', oversample=2, **GRID)
-    fourpi.pixel_integration = 'spectral'
+    fourpi.pixel_integration = 'exact'
     for explicit in (fourpi, None):
         if explicit is None:
             phase.source_state = fourpi.state()
@@ -115,7 +115,7 @@ def test_source_and_channel_maximum(tmp_path):
         assert psfzip.save_zip(tmp_path / 'phase.zip', phase, source=explicit, zstack_planes=2)['version'] == '0.4.0'
 
     # An explicit box source replaces the embedded spectral state in the file.
-    fourpi.pixel_integration = 'box'
+    fourpi.pixel_integration = 'midpoint'
     assert psfzip.save_zip(tmp_path / 'phase.zip', phase, source=fourpi, zstack_planes=2)['version'] == '0.2.0'
 
 
@@ -133,11 +133,11 @@ def test_explicit_field_metadata(tmp_path, value, blend, version):
     assert meta['version'] == version
 
 
-@pytest.mark.parametrize('mode', ['box', 'spectral', 'gauss_legendre', 'point'])
+@pytest.mark.parametrize('mode', ['midpoint', 'exact', 'gauss_legendre', 'point'])
 def test_vectorial_versions(mode):
     model = vectorial(mode)
-    assert model.format_version() == (0, 2 if mode == 'box' else 3)
-    assert model.json_format_version() == (0, 1 if mode == 'box' else 3)
+    assert model.format_version() == (0, 2 if mode == 'midpoint' else 3)
+    assert model.json_format_version() == (0, 1 if mode == 'midpoint' else 3)
 
 
 def test_channel_extras_cannot_replace_versioned_model(tmp_path):
@@ -146,7 +146,7 @@ def test_channel_extras_cannot_replace_versioned_model(tmp_path):
 
 
 def test_old_single_model_and_future_minor(tmp_path):
-    model = vectorial('spectral').to_spline(kernel='bspline', value='density', oversample=2, **GRID)
+    model = vectorial('exact').to_spline(kernel='bspline', value='density', oversample=2, **GRID)
     path = tmp_path / 'old.json'
     old = model.save(path)
     old['version'] = '0.1.0'  # All single-model files through stage 3 used this header.

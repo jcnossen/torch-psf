@@ -15,7 +15,7 @@ def test_fourpi_midpoint_convergence(pixel_um):
               channel_offsets=[[0, 0], [.21, -.19], [0, 0], [-.1, .2]])
     pos = torch.tensor([[.13, -.34, -.12], [-.31, .25, .02], [.17, .04, .15]], device=DEV)
     phase = torch.tensor([.37, 1.6, 2.1], device=DEV)
-    exact = FourPiPSF(**kw, oversample=3 if pixel_um < .1 else 2, pixel_integration='spectral')(pos, phi=phase)
+    exact = FourPiPSF(**kw, oversample=3 if pixel_um < .1 else 2, pixel_integration='exact')(pos, phi=phase)
     high = FourPiPSF(**kw, oversample=16)(pos, phi=phase)
     if pixel_um > .1:
         # Remove the O(1/os^2) midpoint error, still visible at os=16 for typical camera pixels.
@@ -26,7 +26,7 @@ def test_fourpi_midpoint_convergence(pixel_um):
 
 
 def test_fourpi_stored_exact_and_scalar_phase():
-    model = FourPiPSF(7, npupil=16, device='cpu', pixel_integration='spectral')
+    model = FourPiPSF(7, npupil=16, device='cpu', pixel_integration='exact')
     state = model.state()
     state['meta']['pixel_integration'] = 'exact'
     loaded = FourPiPSF.from_state(state, device='cpu')
@@ -34,13 +34,12 @@ def test_fourpi_stored_exact_and_scalar_phase():
     actual = loaded.render(pos, phi=.4, grad=True)
     expected = model.render(pos, phi=torch.full((2,), .4), grad=True)
     assert all(torch.equal(v, w) for v, w in zip(actual, expected))
-    with pytest.raises(ValueError, match='pixel_integration'):
-        model.pixel_integration = 'exact'
+    model.pixel_integration = 'exact'      # a low oversample is raised to the band limit when rendering
 
 
 @torch.no_grad()
 def test_fourpi_box_legacy_pixels(monkeypatch):
-    model = FourPiPSF(9, npupil=24, device=DEV)
+    model = FourPiPSF(9, npupil=24, device=DEV, pixel_integration='midpoint')
     pos = torch.tensor([[.32, -.15, .09]], device=DEV)
     expected = model(pos)
 
@@ -62,7 +61,7 @@ def test_fourpi_box_legacy_pixels(monkeypatch):
 
 @torch.no_grad()
 def test_fourpi_integrated_round_trip(tmp_path, monkeypatch):
-    model = FourPiPSF(9, npupil=24, device=DEV, pixel_integration='spectral', z_range=(-.025, .025),
+    model = FourPiPSF(9, npupil=24, device=DEV, pixel_integration='exact', z_range=(-.025, .025),
                       channel_offsets=[[0, 0], [.21, -.19], [0, 0], [-.1, .2]])
     pos = torch.tensor([[.23, -.17, -.0023], [-.14, .38, .012]], device=DEV)
     phase = torch.tensor([.61, -1.51], device=DEV)
@@ -91,7 +90,7 @@ def test_fourpi_integrated_round_trip(tmp_path, monkeypatch):
 @pytest.mark.parametrize('kind', ['integrated', 'cubic'])
 @pytest.mark.parametrize('storage', ['float32', 'rebuild'])
 def test_phase_spline_dipole_from_box_source(tmp_path, monkeypatch, kind, storage):
-    model = FourPiPSF(7, npupil=16, oversample=1, z_range=(-.02, .02), device=DEV)
+    model = FourPiPSF(7, npupil=16, oversample=1, z_range=(-.02, .02), device=DEV, pixel_integration='midpoint')
     model.dipM = torch.diag(torch.tensor([.5, .2, .3], device=DEV))
     restored = FourPiPSF.from_state(model.state(), device=DEV)
     torch.testing.assert_close(restored.dipM, model.dipM)
@@ -114,7 +113,7 @@ def test_phase_spline_dipole_from_box_source(tmp_path, monkeypatch, kind, storag
 
 @torch.no_grad()
 def test_integrated_default_padding_near_axial_limits():
-    model = FourPiPSF(7, npupil=16, pol=(0, 1), device='cpu', pixel_integration='spectral', z_range=(-.05, .05))
+    model = FourPiPSF(7, npupil=16, pol=(0, 1), device='cpu', pixel_integration='exact', z_range=(-.05, .05))
     z = torch.tensor([-.05, -.047, -.045, .045, .047, .05])
     pos = torch.stack([torch.full_like(z, .17), torch.full_like(z, -.21), z], 1)
     ref = model.render(pos, phi=.73)
