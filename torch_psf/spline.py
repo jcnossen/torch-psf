@@ -373,11 +373,55 @@ class SplinePSF(PSF):
         return torch.cat([self.render(pos[s:s + nb]) for s in range(0, len(pos), nb)])
 
     def to_spline(self, roisize=None, z_range=None, **grid):
-        """A cubic spline is already a spline: returns self, or resized(roisize) for another ROI size (other
-        arguments are not supported)."""
+        """A spline is already a spline: returns self, resized(roisize) for another ROI size, or retabulated(...) for
+        other grid or kernel settings (oversample, dz_um, z_range, zpad, xy_limit, kernel, backend)."""
         if (z_range is not None and tuple(z_range) != self.z_range) or grid:
-            raise ValueError('re-tabulating a spline on another grid is not supported; build it from the source model')
+            return self.retabulated(roisize=roisize, z_range=z_range, **grid)
         return self if roisize in (None, self.roisize) else self.resized(roisize)
+
+    def _grid_settings(self, oversample, dz_um, z_range, zpad, xy_limit, kernel, value, roisize, backend):
+        S = self.S if oversample is None else int(oversample)
+        hz = self.hz if dz_um is None else float(dz_um)
+        # keep the axial padding in um when only dz changes (zpad counts planes)
+        pad = (self.zpad if dz_um is None else max(1, int(self.zpad * self.hz / hz + 1e-9))) if zpad is None else int(zpad)
+        return dict(oversample=S, dz_um=hz, zpad=pad,
+                    z_range=self.z_range if z_range is None else (float(z_range[0]), float(z_range[1])),
+                    xy_limit=self.xmax if xy_limit is None else float(xy_limit),
+                    kernel=kernel or self.kernel, value=value or self.value,
+                    roisize=self.roisize if roisize is None else int(roisize), backend=backend or self.backend)
+
+    def retabulated(self, *, oversample=None, dz_um=None, z_range=None, zpad=None, xy_limit=None, kernel=None,
+                    value=None, roisize=None, backend=None):
+        """This spline on another knot grid or with another kernel, e.g. an integrated B-spline at 4 knots/px ->
+        2 knots/px. Unset arguments keep this spline's settings (zpad keeps the padding in um when dz_um changes).
+
+        The spline's own interpolant is evaluated at the new knots (mirror boundary, as the B-spline prefilter) and,
+        for kernel='bspline', prefiltered again. When the new knots are a subset of the old ones (S_new dividing
+        S_old, dz_new a multiple of dz_old, e.g. 4 -> 2 knots/px) the knot values are the old samples and the result
+        equals a direct build up to float rounding; otherwise it adds the old spline's interpolation error at the
+        new knots. To change value (pixel <-> density) or extend the grid, build again from the optical model
+        (model.to_spline(...))."""
+        g = self._grid_settings(oversample, dz_um, z_range, zpad, xy_limit, kernel, value, roisize, backend)
+        if g['value'] != self.value:
+            raise ValueError("changing value ('pixel' <-> 'density') needs the optical model: model.to_spline(...)")
+        density = g['value'] == 'density'
+        new = SplinePSF(g['roisize'], g['z_range'], g['oversample'], g['dz_um'], g['zpad'],
+                        g['xy_limit'] + int(density), device=self.dev, dtype=self.dtype, pixel_um=self.pixel_um,
+                        kernel=g['kernel'], value=g['value'], backend=g['backend'])
+        new.xmax = min(g['xy_limit'], new.xmax)
+        Wz = _interp_matrix((new.zs - self.z0) / self.hz, self.nz, self.kernel)
+        u = new.u0 + torch.arange(new.nu, device=self.dev, dtype=torch.float64) / new.S
+        Wu = _interp_matrix((u - self.u0) * self.S, self.nu, self.kernel)
+        K = torch.einsum('az,tzvu->tavu', Wz, self.knots.detach().double())
+        K = torch.einsum('bv,tavu->tabu', Wu, K)
+        K = torch.einsum('cu,tabu->tabc', Wu, K)
+        if new.kernel == 'bspline':
+            K = bspline_prefilter(K)
+        new.knots = K.to(self.dtype).contiguous()
+        new.axes, new.table_map = self.axes, self.table_map
+        new.component_weights = self.component_weights
+        new._ordered, new.angle = self._ordered, self.angle
+        return new
 
     @classmethod
     def from_zstack(cls, zstack, z0_um, dz_um, roisize, pixel_um=None, device=None, normalize=False):
@@ -837,6 +881,21 @@ for _type in SplinePSF.FILE_TYPES:
 def _weighted(images, weights):
     # Keep the component products rounded before summing (legacy dipole convention).
     return torch.einsum('nk,nkij->nkij', weights, images).sum(1)
+
+
+def _interp_matrix(t, n, kernel):
+    """[len(t), n] float64 weights that evaluate the 1-D cubic interpolant of n knots at fractional knot indices t
+    (mirror boundary: knot -j = knot j, knot n-1+j = knot n-1-j). t must lie within [-1, n]."""
+    t = t.double()
+    if len(t) and (t.min() < -1 - 1e-6 or t.max() > n + 1e-6):
+        raise ValueError('the new grid extends beyond the stored spline; use a smaller z_range / xy_limit / zpad, '
+                         'or build it from the optical model (model.to_spline)')
+    j = torch.floor(t).long()[:, None] - 1 + torch.arange(4, device=t.device)
+    w = _kernel(t[:, None] - j, kernel)
+    j = j.abs()
+    j = torch.where(j > n - 1, 2 * (n - 1) - j, j)
+    W = torch.zeros(len(t), n, dtype=torch.float64, device=t.device)
+    return W.scatter_add_(1, j, w)
 
 
 def _sample_grid(grid, render, batch, zs=None):

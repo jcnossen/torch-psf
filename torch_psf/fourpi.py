@@ -682,8 +682,19 @@ class FourPiSplinePSF(_CoupledChannels):
 
     def to_spline(self, roisize=None, z_range=None, **grid):
         if (z_range is not None and tuple(z_range) != self.z_range) or grid:
-            raise ValueError('re-tabulating a spline on another grid is not supported; build it from the source model')
+            return self.retabulated(roisize=roisize, z_range=z_range, **grid)
         return self if roisize in (None, self.roisize) else self.resized(roisize)
+
+    def retabulated(self, **grid):
+        """The 4Pi tables on another knot grid or with another kernel (arguments as SplinePSF.retabulated): the one
+        phase / channel / dipole knot bank is re-tabulated from its own interpolant."""
+        table = self.table.retabulated(**grid)
+        new = copy.copy(self)
+        new.table = table
+        new.roisize = new.P = table.roisize
+        new.S, new.hz, new.zpad = table.S, table.hz, table.zpad
+        new.zmin, new.zmax = table.z_range
+        return new
 
     # ------------------------------------------------------------------ files
     def format_version(self, source=None):
