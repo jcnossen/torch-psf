@@ -12,10 +12,10 @@ from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 
 OUT = Path(__file__).resolve().parent / 'out'
-LABEL = dict(cr_int='Integrated Catmull–Rom', bs_int='Integrated B-spline', cr_pix='Exact-pixel Catmull–Rom',
-             box_os2='Legacy midpoint Catmull–Rom', box='Vectorial box', spectral='Vectorial spectral',
+LABEL = dict(cr_int='Integrated Catmull–Rom', bs_int='Integrated B-spline', cr_pix='Catmull–Rom',
+             box='Vectorial box', spectral='Vectorial spectral',
              gauss_legendre='Vectorial Gauss–Legendre', fourpi='Spectral 4Pi', channels='Two spectral channels')
-TABLES = list(LABEL)[:4]
+TABLES = list(LABEL)[:3]   # spline definitions; the bench JSON may also hold the dropped 'box_os2' case
 COLORS = ['#176878', '#c25c32', '#6955a1', '#526579', '#9c7233']
 OPS = ['forward', 'grad', 'backward']
 BATCHES = [1000, 10000, 100000]
@@ -106,7 +106,7 @@ def decision(data):
 
 
 def summary(pdf, data, acc):
-    f = page(pdf, 'Choosing a default PSF table', 'm1809 in-situ calibration   /   Spectral reference   /   2 knots per pixel')
+    f = page(pdf, 'Choosing a default spline definition', 'm1809 in-situ calibration   /   Spectral reference   /   2 knots per pixel')
     title, why = decision(data)
     heading(f, .795, title)
     para(f, .76, why)
@@ -116,21 +116,24 @@ def summary(pdf, data, acc):
         rows.append([LABEL[r['name']], f"{r['value']['max']:.3g} / {r['value']['median']:.3g}",
                      ' / '.join(f'{x:.3g}' for x in b),
                      ' / '.join(rate(headline_timing(data, r['name'], op)) for op in OPS)])
-    table(f, .48, .20, ['Table', 'Error / peak · max / median', 'RMS bias x / y / z (nm)', 'Fwd / grad / back (kspots/s)'],
+    table(f, .48, .20, ['Spline definition', 'Error / peak · max / median', 'RMS bias x / y / z (nm)', 'Fwd / grad / back (kspots/s)'],
           rows, [.245, .225, .25, .28])
     para(f, .455, 'Bias at 5,000 photons and background 10 photons/pixel. Throughput uses 10,000 spots, '
-         'autotune off, TF32 off, sep for integrated tables and conv for pixel tables. Clean interleaved measurements take '
-         'precedence when available. An asterisk marks background GPU activity.')
-    heading(f, .337, 'Measurement conditions')
+         'cuDNN autotune off, TF32 off, the sep backend for the integrated splines and conv for Catmull–Rom. Clean '
+         'interleaved measurements take precedence when available. An asterisk marks background GPU activity.')
+    para(f, .375, 'GPU backend = how the spline is evaluated on the GPU. sep (separable): gather each spot\'s knots, then '
+         'contract z, x and y one axis at a time as batched matrix products (cuBLAS). conv: one grouped 2-D convolution '
+         'with a group per spot (cuDNN); its speed depends on cuDNN autotune (torch.backends.cudnn.benchmark).')
+    heading(f, .27, 'Measurement conditions')
     med = data['crlb_nm']['5000']
-    para(f, .30, f"{data['N']:,} uniform sub-pixel positions in ±1.9 px and 0–0.4 µm, 13 × 13 ROI, 0.01 µm axial knots. "
+    para(f, .235, f"{data['N']:,} uniform sub-pixel positions in ±1.9 px and 0–0.4 µm, 13 × 13 ROI, 0.01 µm axial knots. "
          f"NA {data['NA']:.2f}, {data['pixel_um']*1000:.2f} nm pixels, {data['npupil']} pupil samples per axis, "
-         f"optical oversampling {data['optical_os']} (legacy midpoint table 2). "
+         f"optical oversampling {data['optical_os']}. "
          f"The exact-model median CRLB at 5,000 photons is {med[0]:.2f} / {med[1]:.2f} / {med[2]:.2f} nm (x / y / z).")
     counted = Counter('idle' if r.get('idle') else 'desktop' for r in data['timing'] if 'spots_s' in r)
     initial = data.get('initial_gpu_observation')
     first = f"Initial GPU utilization was {initial['util_percent']:.0f}%. " if initial else ''
-    para(f, .18, f"{data['gpu']} · PyTorch {data['torch']} · CUDA {data['cuda']}. {first}Of {len(data['timing'])} timing cases, "
+    para(f, .15, f"{data['gpu']} · PyTorch {data['torch']} · CUDA {data['cuda']}. {first}Of {len(data['timing'])} timing cases, "
          f"{counted['idle']} passed the idle screen, {counted['desktop']} ran with background activity, and "
          f"{len(data['timing']) - sum(counted.values())} have no rate. The timing pages give coverage and reasons.")
     finish(pdf, f)
@@ -158,10 +161,9 @@ def accuracy_plots(pdf, acc):
 
 def candidate(pdf, data, name):
     descriptions = {
-        'cr_int': 'PixelSplinePSF   /   Point-density knots   /   Exact pixel integral of Catmull–Rom interpolation',
-        'bs_int': 'PixelSplinePSF   /   Prefiltered point-density knots   /   Exact pixel integral of cubic B-spline interpolation',
-        'cr_pix': 'Spectrally integrated pixel values   /   Catmull–Rom interpolation at sub-pixel shifts',
-        'box_os2': '2 × 2 midpoint quadrature   /   Catmull–Rom interpolation of pixel values   /   S = 2 only',
+        'cr_int': 'SplinePSF   /   Knots sample the PSF density   /   Interpolant integrated exactly over each pixel',
+        'bs_int': 'SplinePSF   /   Knots are prefiltered B-spline coefficients of the PSF density   /   Interpolant integrated exactly over each pixel',
+        'cr_pix': 'SplinePSF   /   Knots are pixel values of the exactly integrated model   /   Interpolated, not integrated',
     }
     f = page(pdf, LABEL[name], descriptions[name])
     rows = sorted((r for r in data['accuracy'] if r['name'] == name and primary(r)), key=lambda r: r['S'])
@@ -189,9 +191,9 @@ def candidate(pdf, data, name):
     finish(pdf, f)
 
 
-def speeds(pdf, data, names, title):
+def speeds(pdf, data, names, title, plot=True):
     f = page(pdf, title, 'Median spots per second   /   Autotune off   /   Full precision')
-    for j, op in enumerate(OPS):
+    for j, op in enumerate(OPS if plot else []):
         ax = f.add_axes([.09 + j*.307, .506, .246, .245])
         for i, name in enumerate(names):
             rows = [selected_timing(data, name, op, n=n, s=2 if name in TABLES else None) for n in BATCHES]
@@ -206,8 +208,9 @@ def speeds(pdf, data, names, title):
             ax.set_ylabel('Spots / s')
         ax.set_title(['Forward', 'Value + derivatives', 'Forward + backward'][j], loc='left', fontsize=11, weight='bold')
         ax.grid(alpha=.2)
-    f.legend(*ax.get_legend_handles_labels(), loc='center', bbox_to_anchor=(.5, .413), ncol=len(names), frameon=False,
-             fontsize=8)
+    if plot:
+        f.legend(*ax.get_legend_handles_labels(), loc='center', bbox_to_anchor=(.5, .413), ncol=len(names), frameon=False,
+                 fontsize=8)
     rows = []
     if names == TABLES:
         timings = {(r['name'], r['backend'], r['tf32'], r['op'], r['cudnn_benchmark']): r
@@ -217,24 +220,26 @@ def speeds(pdf, data, names, title):
             rates = [' / '.join(rate(timings[key + (op, tune)]) for tune in (False, True)) for op in OPS]
             rows.append([LABEL[r['name']], r['backend'] + (' + TF32' if r['tf32'] else ''),
                          f"{r['value']['max']:.3g}", *rates])
-        table(f, .163, .22, ['10,000 spots', 'Backend', 'Max error', 'Forward (k/s)', 'Grad (k/s)', 'Backward (k/s)'],
+        table(f, .163, .22, ['10,000 spots', 'GPU backend', 'Max error', 'Forward (k/s)', 'Grad (k/s)', 'Backward (k/s)'],
               rows, [.23, .13, .095, .18, .18, .185], size=8)
-        para(f, .143, 'Table entries give autotune off / on. Max error is the worst value error / reference peak. '
-             'Whiskers show the interquartile range over 10 synchronized repeats. Open points and starred rates had '
-             'background GPU activity. The JSON gives peak memory and quartiles for every measured case.')
-        para(f, .071, 'Backward includes rendering and differentiating the sum of squared pixels with respect to the stored knots or coefficients.')
+        para(f, .148, 'Entries give cuDNN autotune off / on; max error is the worst value error / reference peak; whiskers show the '
+             'interquartile range over 10 synchronized repeats, open points had background GPU activity. Backward renders and '
+             'differentiates the sum of squared pixels with respect to the knots. GPU backends: sep gathers each spot\'s knot block '
+             'and contracts z, x and y in turn (batched matrix products, cuBLAS); conv builds each spot\'s full 4 × T × T '
+             'weight block and runs one grouped 2-D convolution with a group per spot (cuDNN), whose algorithm choice needs autotune.',
+             width=150)
     else:
         for name in names:
             r = [selected_timing(data, name, op, s=None) for op in OPS]
             rows.append([LABEL[name], *[rate(a) for a in r], ' / '.join(f"{a['peak_MiB']:.0f}" if a and 'peak_MiB' in a
                                                                         else '—' for a in r)])
-        table(f, .196, .17, ['10,000 spots', 'Forward (k/s)', 'Grad (k/s)', 'Backward (k/s)', 'Peak MiB, same order'],
+        table(f, .62, .17, ['10,000 spots', 'Forward (k/s)', 'Grad (k/s)', 'Backward (k/s)', 'Peak MiB, same order'],
               rows, [.28, .16, .16, .16, .24])
-        para(f, .167, 'Whiskers give the interquartile range across 10 synchronized repeats after 2 warm-ups. Open points '
-             'and starred rates had background GPU activity. Gaps indicate unavailable timings. Peak memory is the '
+        para(f, .59, 'Medians over 10 synchronized repeats after 2 warm-ups. Starred rates had background GPU '
+             'activity; a dash is an unavailable timing (out of memory). Peak memory is the '
              'maximum live PyTorch allocation. Backward includes rendering and differentiating the sum of squared '
              'pixels with respect to each arm’s Zernikes. The native 4Pi gradient includes phase.')
-        para(f, .086, '4Pi uses four channels and the symmetric 32-sample pupil arms from the test fixture. The second '
+        para(f, .51, '4Pi uses four channels and the symmetric 32-sample pupil arms from the test fixture. The second '
              'm1809 channel has +0.12 µm focus offset and (+0.2, −0.1) px lateral offset.')
     finish(pdf, f)
 
@@ -287,6 +292,11 @@ def main():
         raise ValueError('Complete the precision sweep before generating the report')
     if not data.get('timing') or any('spots_s' not in r and 'unavailable' not in r for r in data['timing']):
         raise ValueError('Complete the timing sweep before generating the report')
+    # the legacy midpoint case (box_os2) is no longer reported
+    data['accuracy'] = [r for r in data['accuracy'] if r['name'] in LABEL]
+    data['timing'] = [r for r in data['timing'] if r['name'] in LABEL]
+    for sample in data.get('paired', []):
+        sample['rows'] = [r for r in sample['rows'] if r['name'] in LABEL]
     acc = [r for r in data['accuracy'] if primary(r)]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with PdfPages(args.output, metadata={'Author': 'Jelmer Cnossen', 'Title': 'PSF unification baseline'}) as pdf:
@@ -294,8 +304,8 @@ def main():
         accuracy_plots(pdf, acc)
         for name in TABLES:
             candidate(pdf, data, name)
-        speeds(pdf, data, TABLES, 'Table throughput at two knots per pixel')
-        speeds(pdf, data, list(LABEL)[4:], 'Optical model throughput')
+        speeds(pdf, data, TABLES, 'Spline throughput at two knots per pixel')
+        speeds(pdf, data, list(LABEL)[3:], 'Optical model throughput', plot=False)
         coverage(pdf, data)
 
 
