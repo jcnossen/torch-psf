@@ -287,8 +287,12 @@ class SplinePSF(PSF):
         # Kernel weights are computed once per distinct position (before broadcasting to the tables) and gathered:
         # the weight matmul then has the shape of a per-table evaluation, so results do not depend on how many
         # tables share a position (cuBLAS picks its kernel by the batch shape).
-        src = pos.reshape(-1, 3).to(self.dtype)
-        rows = torch.arange(len(src), device=src.device).reshape(pos.shape[:-1]).expand(batch).reshape(-1)
+        base = pos
+        for dim in range(pos.dim() - 1):          # an expanded (stride 0) axis repeats one position: keep one copy
+            if pos.shape[dim] > 1 and pos.stride(dim) == 0:
+                base = base.narrow(dim, 0, 1)
+        src = base.reshape(-1, 3).to(self.dtype)
+        rows = torch.arange(len(src), device=src.device).reshape(base.shape[:-1]).expand(batch).reshape(-1)
         fr_src = self._knot_coords(src)[0]
         w_src = self._weights(fr_src, False)
         d_src = self._weights(fr_src, True) if grad else None
