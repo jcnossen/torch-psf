@@ -33,6 +33,7 @@ N, BG, REPEATS = 3000, 10., 10
 PHOTONS = (1000, 5000, 20000)
 TABLES = [(name, s) for s in (2, 1, 3, 4) for name in ('cr_int', 'bs_int', 'cr_pix')]
 OPTICS = [(name, s) for s in (3, 2, 4) for name in ('box', 'spectral', 'gauss_legendre')]   # s = samples / pixel
+OPTICS.append(('box', 1))   # point sampling: the PSF value at the pixel centre
 GAUSS = [('astig', None), ('gauss2d', None)]
 GAUSS_PARAMS = {}      # fitted Gaussian parameters (accuracy run), passed to the timing workers through the JSON
 BATCHES = (1000, 10000, 100000)
@@ -502,7 +503,7 @@ def main():
         prev = json.loads(args.out.read_text())
         if prev['sha256'] != model_sha or prev.get('revision', revision) != revision:
             raise ValueError('Existing results belong to a different calibration or revision; use --phase all')
-        keep = ('accuracy', 'crlb_nm') if args.phase == 'timing' else (
+        keep = ('accuracy', 'crlb_nm', 'crlb_nm_focus', 'gaussian_fit', 'reference_check') if args.phase == 'timing' else (
             'timing', 'timing_idle_checks', 'allocator_budget_MiB', 'paired', 'previous_timings')
         if any(prev.get(key) != data[key] for key in ('gpu', 'torch', 'cudnn', 'seed', 'N', 'roisize')):
             raise ValueError('Existing results have different hardware, software or sampling settings')

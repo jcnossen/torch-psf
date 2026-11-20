@@ -11,7 +11,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 import numpy as np
 
 OUT = Path(__file__).resolve().parent / 'out'
-LABEL = dict(spectral='Vectorial, spectral', box='Vectorial, box', gauss_legendre='Vectorial, Gauss–Legendre',
+LABEL = dict(spectral='Vectorial, exact (spectral)', box='Vectorial, midpoint', gauss_legendre='Vectorial, Gauss–Legendre',
              astig='Astigmatic Gaussian', gauss2d='2D Gaussian (in focus)',
              cr_int='Integrated Catmull–Rom', bs_int='Integrated B-spline', cr_pix='Catmull–Rom')
 OPTICS = ['spectral', 'gauss_legendre', 'box']
@@ -25,6 +25,10 @@ plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 9, 'text.color':
                      'axes.labelcolor': INK, 'axes.edgecolor': '#8798a0', 'axes.spines.top': False,
                      'axes.spines.right': False, 'pdf.fonttype': 42})
 FOOTER = 'torch-psf   /   single-PSF models'
+
+
+def label(name, s=None):
+    return 'Point sampling (pixel centre)' if name == 'box' and s == 1 else LABEL[name]
 
 
 def primary(row):
@@ -78,7 +82,8 @@ def fmt3(a, digits=3):
 def rate(row):
     if not row or 'spots_s' not in row:
         return '—'
-    return f"{row['spots_s']/1000:,.1f}" + ('' if row['idle'] else '*')
+    noisy = row.get('iqr', 0) > .1 * row['spots_s']      # repeats spread > 10 %: disturbed window
+    return f"{row['spots_s']/1000:,.1f}" + ('' if row['idle'] else '*') + ('~' if noisy else '')
 
 
 def selected_timing(data, name, op, n=10000, s=None):
@@ -155,8 +160,8 @@ def overview(pdf, data):
     f = page(pdf, 'Single-PSF models in torch-psf', f"{data['model']}   /   {data['gpu']}   /   one emitter per "
              f"{data['roisize']} × {data['roisize']} ROI")
     heading(f, .80, 'Models compared')
-    rows = [['Vectorial PSF', 'Pupil model with Zernike aberrations, integrated over each pixel by box, spectral or '
-             'Gauss–Legendre', '2–4 samples / pixel'],
+    rows = [['Vectorial PSF', 'Pupil model; pixel = point sample or midpoint / exact / Gauss–Legendre integral',
+             '1–4 samples / pixel'],
             ['Astigmatic Gaussian', 'σx(z), σy(z) curves fitted to the vectorial PSF through focus', 'fitted'],
             ['2D Gaussian', 'Fixed width fitted at the in-focus plane; x, y only', 'fitted'],
             ['Catmull–Rom spline', 'Tabulated vectorial PSF: interpolates pixel values', '1–4 knots / pixel'],
@@ -165,9 +170,10 @@ def overview(pdf, data):
     table(f, .555, .22, ['Model', 'Definition', 'Compared at'], rows, [.18, .62, .2], size=9)
     heading(f, .48, 'How they are compared')
     chk = data.get('reference_check')
-    ref = ('The reference is the vectorial PSF with spectral (exact) pixel integration at '
+    ref = ('The reference is the vectorial PSF with exact (spectral) pixel integration at '
            f"{data['optical_os']} samples / pixel" +
-           (f"; an independent {chk['method']} quadrature agrees with it to {chk['value_max']:.1e} of the peak. "
+           (f"; an independent Gauss–Legendre quadrature (6 nodes per pixel) agrees with it to {chk['value_max']:.1e} "
+            "of the peak. "
             if chk else '. '))
     para(f, .445, ref + f"Errors are the worst |model − reference| over {data['N']:,} random positions (±1.9 px, "
          f"{data['z_range'][0]}–{data['z_range'][1]} µm), relative to each spot's reference peak. Bias comes from "
@@ -186,35 +192,37 @@ def overview(pdf, data):
 def vectorial(pdf, data):
     f = page(pdf, 'Vectorial PSF: pixel integration', 'Same optics, three ways to integrate the light over each '
              'camera pixel')
-    para(f, .815, 'Box averages point samples of the image on a sub-pixel grid (a midpoint rule, approximate). Spectral '
-         'integrates exactly by multiplying the band-limited image spectrum by the pixel transfer function; it needs '
+    para(f, .83, 'Midpoint averages point samples of the image on a sub-pixel grid (approximate; error ∝ 1/S²). Exact '
+         '(spectral) integration multiplies the band-limited image spectrum by the pixel transfer function; it needs '
          'alias-free sub-pixel sampling. Gauss–Legendre evaluates the image at quadrature nodes inside each pixel and '
-         'sums them with weights (no FFT, no image-plane blur). Spectral at '
+         'sums them with weights (no FFT, no image-plane blur). Point sampling, midpoint at one sample per pixel, takes '
+         'the PSF value at the pixel centre, as most vectorial PSF codes do. Exact at '
          f"{data['optical_os']} samples / pixel is the reference itself.")
-    plots = [(.09, .43, 'Worst image error', lambda r: r['value']['max'], 'fraction of reference peak'),
-             (.56, .43, 'Axial localization bias', lambda r: r['bias_nm']['5000']['rms'][2], 'RMS z bias (nm), 5,000 ph')]
+    plots = [(.09, .41, 'Worst image error', lambda r: r['value']['max'], 'fraction of reference peak'),
+             (.56, .41, 'Axial localization bias', lambda r: r['bias_nm']['5000']['rms'][2], 'RMS z bias (nm), 5,000 ph')]
     for x, y, title, metric, unit in plots:
-        ax = f.add_axes([x, y, .36, .26])
+        ax = f.add_axes([x, y, .36, .24])
         for i, name in enumerate(OPTICS):
             rows = sorted((r for r in data['accuracy'] if r['name'] == name and primary(r)), key=lambda r: r['S'])
             pts = [(r['S'], metric(r)) for r in rows if not (name == 'spectral' and r['S'] == data['optical_os'])]
             if pts:
                 ax.semilogy(*zip(*[(s, max(v, 1e-9)) for s, v in pts]), marker='o', ms=4, color=COLORS[i],
                             label=LABEL[name])
-        ax.set(xticks=[2, 3, 4], xlabel='Samples / pixel', ylabel=unit)
+        ax.set(xticks=[1, 2, 3, 4], xlabel='Samples / pixel', ylabel=unit)
         ax.set_title(title, loc='left', fontsize=11, weight='bold')
         ax.grid(alpha=.2)
-    f.legend(*ax.get_legend_handles_labels(), loc='center', bbox_to_anchor=(.5, .355), ncol=3, frameon=False,
-             fontsize=8)
+    handles, names = ax.get_legend_handles_labels()
+    names = [n + ' (1 sample = point sampling)' if n == LABEL['box'] else n for n in names]
+    f.legend(handles, names, loc='center', bbox_to_anchor=(.5, .345), ncol=3, frameon=False, fontsize=8)
     rows = []
     for name in OPTICS:
-        for s in (2, 3, 4):
+        for s in (1, 2, 3, 4):
             r = acc_row(data, name, s)
             if r:
                 ref = name == 'spectral' and s == data['optical_os']
-                rows.append([LABEL[name], s, 'reference' if ref else f"{r['value']['max']:.2g}", fmt3(bias(r)),
+                rows.append([label(name, s), s, 'reference' if ref else f"{r['value']['max']:.2g}", fmt3(bias(r)),
                              speed_cells(data, name, s, n=1000)])
-    table(f, .085, .245, ['Model', 'Samples / px', 'Max error', 'RMS bias 5k ph, x / y / z (nm)',
+    table(f, .065, .25, ['Model', 'Samples / px', 'Max error', 'RMS bias 5k ph, x / y / z (nm)',
                           'Fwd / grad / back, 1,000 spots (k/s)'], rows, [.25, .1, .12, .26, .27], size=8)
     finish(pdf, f)
 
@@ -332,12 +340,11 @@ def spline_speeds(pdf, data):
                      *rates])
     table(f, .163, .22, ['10,000 spots', 'GPU backend', 'Max error', 'Forward (k/s)', 'Grad (k/s)', 'Backward (k/s)'],
           rows, [.23, .13, .095, .18, .18, .185], size=8)
-    para(f, .148, 'Entries give cuDNN autotune off / on; max error is the worst value error / reference peak; whiskers '
-         'show the interquartile range over 10 synchronized repeats, open points had background GPU activity. Backward '
-         'renders and differentiates the sum of squared pixels with respect to the knots. GPU backends: sep (separable) '
-         'gathers each spot\'s knot block and contracts z, x and y in turn (batched matrix products, cuBLAS); conv builds '
-         'each spot\'s full 4 × T × T weight block and runs one grouped 2-D convolution with a group per spot (cuDNN), '
-         'whose algorithm choice needs autotune.', width=150)
+    para(f, .148, 'Entries: cuDNN autotune off / on; max error = worst value error / reference peak; whiskers = '
+         'interquartile range of 10 repeats; open points = background GPU activity; ~ = repeats spread > 10 % (a disturbed '
+         'window: sep does not use cuDNN, so its off / on rates should agree). sep (separable) contracts each spot\'s knot '
+         'block axis by axis with batched matrix products (cuBLAS); conv runs one grouped 2-D convolution per batch '
+         '(cuDNN, needs autotune).', width=150)
     finish(pdf, f)
 
 
@@ -347,25 +354,27 @@ def summary(pdf, data):
     os_ = data['optical_os']
     rows = []
     for name, s, setting in [('spectral', os_, f'{os_} samples / px'), ('gauss_legendre', os_, f'{os_} samples / px'),
-                             ('box', os_, f'{os_} samples / px'), ('bs_int', 2, '2 knots / px'),
+                             ('box', os_, f'{os_} samples / px'), ('box', 1, '1 sample / px'),
+                             ('bs_int', 2, '2 knots / px'),
                              ('cr_int', 2, '2 knots / px'), ('cr_pix', 2, '2 knots / px'),
                              ('astig', None, 'fitted'), ('gauss2d', None, 'fitted, z fixed')]:
         r = acc_row(data, name, s)
         if not r:
             continue
         err = 'reference' if name == 'spectral' else f"{r['value']['max']:.2g}"
-        rows.append([LABEL[name], setting, err, fmt3(bias(r)), speed_cells(data, name, s)])
+        rows.append([label(name, s), setting, err, fmt3(bias(r)), speed_cells(data, name, s)])
     table(f, .44, .33, ['Model', 'Setting', 'Max error / peak', 'RMS bias x / y / z (nm)',
                         'Fwd / grad / back, 10,000 spots (k/s)'], rows, [.24, .14, .13, .22, .27], size=8.6)
     para(f, .425, f"CRLB at 5,000 photons: {fmt3(data['crlb_nm']['5000'])} nm (x / y / z). † = 1,000 spots (10,000 did "
-         'not fit in memory); * = background GPU activity; — = not applicable or no rate. Spline rates come from the '
+         'not fit in memory); * = background GPU activity; ~ = repeats spread > 10 %; — = not applicable or no rate. Spline rates come from the '
          'interleaved sep run.')
     title, why = decision(data)
     heading(f, .335, 'Default spline: ' + title)
     para(f, .30, why + ' to_spline builds this spline by default.')
     heading(f, .225, 'Which model when')
-    para(f, .19, 'The vectorial model with spectral integration is the exact reference and the one to fit optical '
-         'parameters with; Gauss–Legendre matches it without FFTs, box is approximate. For localization the integrated '
+    para(f, .19, 'The vectorial model with exact (spectral) integration is the reference and the one to fit optical '
+         'parameters with; Gauss–Legendre matches it without FFTs, midpoint is approximate and point sampling, the usual '
+         'choice elsewhere, ignores the pixel area. For localization the integrated '
          'B-spline gives nearly the vectorial accuracy many times faster. The plain Catmull–Rom spline is the fastest '
          'and still far below the CRLB, at the cost of larger model error. The Gaussians are fast but biased far beyond '
          'the splines: only for quick estimates or when no calibration exists.')
