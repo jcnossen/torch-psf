@@ -8,9 +8,7 @@ the conversion to a cubic-spline model.
 Parameter vector of an emitter: theta = (x px, y px, z um, photons, bg photons / px), x, y relative to the ROI centre
 (pixel centres at integers, x = column, y = row). 2D models (z_range None) keep z fixed (any value).
 
-Files: every subclass sets the class attribute type_name (its psf.json `type`) and is registered when its class is
-defined (PSF.__init_subclass__); PSF.load looks the type up in that registry, so this module never imports its
-subclasses. Importing torch_psf (also implicitly, e.g. `import torch_psf.psf`, which runs the package __init__ first)
+Files: serializable models register their psf.json type names with PSF. PSF.load dispatches through this registry. Importing torch_psf (also implicitly, e.g. `import torch_psf.psf`, which runs the package __init__ first)
 registers all of them.
 """
 import json
@@ -23,7 +21,50 @@ from torch_psf.movie import open_movie
 from torch_psf.spots import Spots, extract_spots
 from torch_psf.dataset import Dataset, _plain
 
-FORMAT, VERSION = 'torch-psf', '0.1.0'
+FORMAT = 'torch-psf'
+READ_VERSIONS = ((0, 2), (0, 3), (0, 4), (0, 5))
+
+
+def version_string(version):
+    major, minor = version
+    return f'{major}.{minor}.0'
+
+
+def check_version(version, supported, container):
+    parts = str(version).split('.')
+    if len(parts) in (2, 3) and all(p.isascii() and p.isdecimal() for p in parts):
+        if (int(parts[0]), int(parts[1])) in supported:
+            return
+    versions = ', '.join(f'{major}.{minor}.x' for major, minor in supported)
+    raise ValueError(f'{container} version {version}: this reader supports {versions}')
+
+
+def render_with_grad(fn, pos, grad=False, **extra):
+    """Render and optionally return JVPs in x, y, z and each named extra (in order).
+    For channel positions [N, C, 3], a position tangent shifts all channels together.
+    """
+    if not grad:
+        return fn(pos, **extra)
+
+    def evaluate(p, *values):
+        return fn(p, **dict(zip(extra, values)))
+
+    # Forward AD cannot attach tangents to expanded (overlapping) storage, e.g. a scalar 4Pi phase.
+    inputs = tuple(arg.contiguous() for arg in (pos, *extra.values()))
+    derivatives = []
+    for axis in range(3 + len(extra)):
+        tangents = tuple(torch.zeros_like(arg) for arg in inputs)
+        if axis < 3:
+            tangents[0][..., axis] = 1
+        else:
+            tangents[axis - 2].fill_(1)
+        value, derivative = torch.func.jvp(evaluate, inputs, tangents)
+        derivatives.append(derivative)
+    return (value, *derivatives)
+
+
+def render_options(dipM, phi, xy, focus, angle):
+    return {k: v for k, v in dict(dipM=dipM, phi=phi, xy=xy, focus=focus, angle=angle).items() if v is not None}
 
 
 class PSF:
@@ -41,11 +82,41 @@ class PSF:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         name = cls.__dict__.get('type_name')
-        if name:
+        if isinstance(name, str):
             PSF._registry[name] = cls
 
     # ------------------------------------------------------------------ the model
-    def render(self, pos, grad=False):
+    def render(self, pos, grad=False, *, dipM=None, phi=None, xy=None, focus=None, angle=None):
+        """Normalized images and optional position derivatives. xy is fixed during a fit."""
+        return self._render(pos, grad, **render_options(dipM, phi, xy, focus, angle))
+
+    def dipole_basis(self, pos, grad=False, *, dipM=None, phi=None, xy=None, focus=None, angle=None):
+        """Six response images in xx, yy, zz, xy, xz, yz order."""
+        return self._dipole_basis(pos, grad, **render_options(dipM, phi, xy, focus, angle))
+
+    def _dipole_basis(self, pos, grad):
+        raise ValueError(f'{type(self).__name__} has no dipole response')
+
+    def basis(self, pos, grad=False, **options):
+        """Linear response images [N,C,K,P,P]."""
+        if options.pop('dipM', None) is not None:
+            images = self.dipole_basis(pos, grad, **options)
+            def channel(v):
+                return v[:, None] if v.ndim == 4 else v
+            return tuple(channel(v) for v in images) if grad else channel(images)
+        images = self.render(pos, grad, **options)
+        def axes(v):
+            return v[:, None, None] if v.ndim == 3 else v[:, :, None]
+        return tuple(axes(v) for v in images) if grad else axes(images)
+
+    def weights(self, pos, *, dipM=None, **options):
+        channels = getattr(self, 'n_channels', 1)
+        if dipM is not None:
+            from torch_psf._dipole import M_to_m6
+            return M_to_m6(torch.as_tensor(dipM).to(pos)).reshape(-1, 1, 6).expand(len(pos), channels, 6)
+        return pos.new_ones(len(pos), channels, 1)
+
+    def _render(self, pos, grad=False):
         """pos [N, 3] = (x px, y px, z um) relative to the ROI centre -> normalized PSF [N, P, P] (sums to ~1 over the
         image plane for an in-focus emitter); grad=True: (psf, d/dx per px, d/dy per px, d/dz per um)."""
         raise NotImplementedError
@@ -69,9 +140,13 @@ class PSF:
     def device(self):
         return self.dev
 
-    def to(self, device):
+    def to(self, device=None, dtype=None):
         """Move the model to another device in place and return self (torch.nn.Module semantics; a copy of another
         ROI size is resized())."""
+        if isinstance(self, torch.nn.Module):
+            if dtype is None:
+                return torch.nn.Module.to(self, device)
+            return torch.nn.Module.to(self, device, dtype)
         raise NotImplementedError
 
     def resized(self, roisize):
@@ -205,6 +280,17 @@ class PSF:
         return ds
 
     # ------------------------------------------------------------------ files
+    def format_version(self, source=None):
+        """Minimum (major, minor) for the serialized features, including any stored source."""
+        if self.type_name is None:
+            raise NotImplementedError(f'{type(self).__name__} has no model file block')
+        return (0, 2)
+
+    def json_format_version(self, source=None):
+        """Minimum version in the standalone layout, which predates the 0.2 channel container."""
+        version = self.format_version(source)
+        return (0, 1) if version == (0, 2) else version
+
     def _file_dict(self, source=None):
         """(json dict without format / version / type, {name: array} for the .npz) of this model; subclasses."""
         raise NotImplementedError
@@ -220,7 +306,7 @@ class PSF:
         built from (its parameters are stored too). camera: optional Camera. provenance: dict stored with the model
         (default: self.provenance, which the estimators set to their settings and report). Returns the json dict."""
         d, arrays = self._file_dict(source)
-        d = dict(format=FORMAT, version=VERSION, type=self.type_name, **d)
+        d = dict(format=FORMAT, version=version_string(self.json_format_version(source)), type=self.type_name, **d)
         if camera is not None:
             d['camera'] = camera.to_dict()
         d['provenance'] = _plain(provenance if provenance is not None else (self.provenance or {}))
@@ -248,25 +334,25 @@ class PSF:
             with open(path) as f:
                 d = json.load(f)
             base = os.path.dirname(path)
-        arrays = dict(np.load(os.path.join(base, d['arrays']))) if d.get('arrays') else None
         if d.get('format') == FORMAT:
+            check_version(d.get('version', '0.1.0'), ((0, 1), *READ_VERSIONS), 'psf.json')
             typ = d.get('type', 'vectorial')
         else:                    # plain calibration json: vectorial, or a 2D Gaussian with psf_gauss_sigma_um
             typ = 'gaussian' if d.get('psf_gauss_sigma_um') is not None else 'vectorial'
+        arrays = dict(np.load(os.path.join(base, d['arrays']))) if d.get('arrays') else None
         return d, arrays, typ
 
     @staticmethod
     def _has_angle_terms(psf):
         """True if the model has per-pattern-angle terms that PSF.load(angle=a) selects: VectorialPSF psf_dipole_M_angle /
-        psf_blur_angle_px2, IntegratedSplinePSF coefs_angle."""
-        return any(getattr(psf, k, None) is not None for k in ('dipM_angle', 'blur_angle', 'coefs_angle'))
+        psf_blur_angle_px2, SplinePSF coefs_angle."""
+        return bool(getattr(psf, 'n_angles', 0)) or any(getattr(psf, k, None) is not None
+                                                        for k in ('dipM_angle', 'blur_angle'))
 
     @staticmethod
     def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
-        """Read a PSF json (type 'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian' | 'fourpi' | 'fourpi_spline'), a
-        psf.zip (docs/PSF_FORMAT.md; independent multi-channel files: torch_psf.io.load(path, channel=c)) or a plain
-        calibration json and
-        return the model of that type; path may also be the parsed dict (array files are then resolved against the
+        """Read a single-model PSF json, a psf.zip or a plain calibration json. For one independent channel use
+        torch_psf.io.load(path, channel=c). The path may also be the parsed dict (array files are then resolved against the
         current directory). roisize: for vectorial / Gaussian models (default: the stored one, or 15 for a
         calibration json). angle: for calibrations with per-pattern-angle PSF terms: 0 / 1 = that angle, None = the
         average. npupil / oversample override the stored pupil sampling of a vectorial model. A calibration with
@@ -295,15 +381,9 @@ class PSF:
         return psf
 
     # ------------------------------------------------------------------ cubic spline
-    def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8):
-        """Tabulate the model as a CubicSplinePSF for roisize x roisize ROIs over z_range (um; default the model's
-        z range): knots every 1/oversample px and dz_um um, offsets up to xy_limit px. The model is rendered on the
-        larger ROI the knots need, at oversample x oversample sub-pixel shifts."""
-        CubicSplinePSF = PSF._registry['spline']
-        if self.n_dims == 2 and z_range is None:
-            raise ValueError('a 2D model has no z range: pass z_range (the spline is then constant in z)')
-        zr = self.z_range if z_range is None else z_range
-        spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
-                                 xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
-        spl.knots = spl.knots_from_model(self if self.roisize == spl.Pl else self.resized(spl.Pl), chunk=chunk)
-        return spl
+    def to_spline(self, roisize=None, z_range=None, **grid):
+        """Sample the optical model on a regular spline grid (see torch_psf.to_spline)."""
+        from torch_psf.spline import _tabulate
+        # Historical method calls without a kernel keep the file model's arithmetic.
+        grid.setdefault('backend', None)
+        return _tabulate(self, z_range, roisize=roisize, **grid)

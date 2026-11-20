@@ -234,7 +234,7 @@ def s_summary(ctx):
     chans = m.get('channels', [])
     model = [f'type {m.get("psf_type")}, {len(chans)} channel(s): ' + ', '.join(f'{c["name"]} ({c["type"]})' for c in chans),
              f'emitter parameters: {", ".join(m.get("emitter_params", []))}']
-    model += [f'{c}: {repr(x)}' for c, x in enumerate(ctx.models)]
+    model += [f'{c}: {x!r}' for c, x in enumerate(ctx.models)]
     st = ctx.meta.get('zstack', {})
     model.append(f'zstack.tif: {st.get("shape")} (ZCYX), {len(st.get("z_um", []))} planes, sample {st.get("sample_px")} px')
     blocks = [('Model', model)]

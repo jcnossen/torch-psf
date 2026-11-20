@@ -22,7 +22,7 @@ d0, th0 = test['d'], test['th']
 rep = N // len(d0)
 spl = F.new_spline()
 vec = C.make_vec(spl.Pl, 'A', 'insitu')
-spl.knots = spl.knots_from_vectorial(vec, C.insitu_pos)
+spl.knots = spl.sample(vec, C.insitu_pos)
 # pixel-sampled z-stack for the conventional spline: emitter at the patch centre, the knot z planes of spl
 zs = spl.zs.float()
 zstack = C.render(vec, torch.stack([torch.zeros_like(zs), torch.zeros_like(zs), zs], 1), torch.full_like(zs, C.F0)).cpu().numpy()
@@ -85,7 +85,7 @@ class CoefPSF:
     def evaluate(self, off, coef, grad=False):
         spl, S = self.spl, self.spl.S
         tz = ((off[:, 2] - spl.z0) / spl.hz).clamp(1, spl.nz - 2 - 1e-4)
-        t = torch.stack([tz, spl.oS0 - off[:, 1].clamp(-spl.xmax, spl.xmax) * S, spl.oS0 - off[:, 0].clamp(-spl.xmax, spl.xmax) * S], 1)
+        t = torch.stack([tz, spl.t0 - off[:, 1].clamp(-spl.xmax, spl.xmax) * S, spl.t0 - off[:, 0].clamp(-spl.xmax, spl.xmax) * S], 1)
         ix = torch.floor(t); fr = t - ix; i0 = ix.long() - 1
         base = i0[:, 0] * self.nv * self.nu + i0[:, 1] * self.nu + i0[:, 2]
         c = coef[base[:, None] + self.pat[None]]                                # [N, P*P, 64]
@@ -102,7 +102,7 @@ class CoefPSF:
 
 
 cp = CoefPSF(spl)
-coef = cp.coefs(spl.knots)
+coef = cp.coefs(spl.knots[0])
 res['coef_MB'] = coef.numel() * 4 / 1e6
 a_, b_ = spl.render(P3[:2000], grad=True), cp.evaluate(P3[:2000], coef, grad=True)
 res['coef_vs_conv_maxdiff'] = [float((x - y).abs().max() / x.abs().max()) for x, y in zip(a_, b_)]
@@ -114,14 +114,14 @@ resid = torch.randn(N, C.P, C.P, device=C.DEV)
 def back_conv():
     K = spl.knots.clone().requires_grad_(True)
     for s in range(0, N, NB):
-        (spl.render(P3[s:s + NB], knots=K) * resid[s:s + NB]).sum().backward()
+        (spl.render_tables(P3[s:s + NB], knots=K) * resid[s:s + NB]).sum().backward()
     return K.grad
 
 
 def back_coef():
     K = spl.knots.clone().requires_grad_(True)
     for s in range(0, N, NB):
-        (cp.evaluate(P3[s:s + NB], cp.coefs(K)) * resid[s:s + NB]).sum().backward()
+        (cp.evaluate(P3[s:s + NB], cp.coefs(K.reshape(spl.nz, spl.nv, spl.nu))) * resid[s:s + NB]).sum().backward()
     return K.grad
 
 
@@ -150,7 +150,7 @@ print('gradient on the coefficient table itself:', res['torch_us']['coef_table_g
       '; memory: knots', res['knots_MB'], 'MB, coefficients', res['coef_MB'], 'MB', flush=True)
 # three cases: (1) convolution on the knots, (2) coefficient table rebuilt from the knots at every use,
 # (3) coefficient table computed once. Rebuild time, and peak GPU memory of one batch of NB spots.
-t_rebuild, _ = best(lambda: cp.coefs(spl.knots), n=10)
+t_rebuild, _ = best(lambda: cp.coefs(spl.knots[0]), n=10)
 res['rebuild_ms'] = t_rebuild * 1e3
 
 
@@ -165,18 +165,18 @@ o, rs = P3[:NB], resid[:NB]
 
 
 def g_conv():
-    K = spl.knots.clone().requires_grad_(True); (spl.render(o, knots=K) * rs).sum().backward()
+    K = spl.knots.clone().requires_grad_(True); (spl.render_tables(o, knots=K) * rs).sum().backward()
 
 
 def g_coef():
-    K = spl.knots.clone().requires_grad_(True); (cp.evaluate(o, cp.coefs(K)) * rs).sum().backward()
+    K = spl.knots.clone().requires_grad_(True); (cp.evaluate(o, cp.coefs(K.reshape(spl.nz, spl.nv, spl.nu))) * rs).sum().backward()
 
 
 with torch.no_grad():
-    res['peak_MB'] = dict(conv_eval=peak(lambda: spl.render(o)), rebuilt_eval=peak(lambda: cp.evaluate(o, cp.coefs(spl.knots))),
+    res['peak_MB'] = dict(conv_eval=peak(lambda: spl.render(o)), rebuilt_eval=peak(lambda: cp.evaluate(o, cp.coefs(spl.knots[0]))),
                           table_eval=peak(lambda: cp.evaluate(o, coef)))
-    tt['rebuilt_eval'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], cp.coefs(spl.knots)) for s in range(0, N, NB)][-1])
-    tt['rebuilt_eval_deriv'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], cp.coefs(spl.knots), grad=True) for s in range(0, N, NB)][-1])
+    tt['rebuilt_eval'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], cp.coefs(spl.knots[0])) for s in range(0, N, NB)][-1])
+    tt['rebuilt_eval_deriv'], _ = best(lambda: [cp.evaluate(P3[s:s + NB], cp.coefs(spl.knots[0]), grad=True) for s in range(0, N, NB)][-1])
 res['peak_MB'].update(conv_grad=peak(g_conv), rebuilt_grad=peak(g_coef))
 res['torch_us'] = {k: v / N * 1e6 for k, v in tt.items()}
 res['Mspots_per_s'] = {k: N / v / 1e6 for k, v in tt.items()}

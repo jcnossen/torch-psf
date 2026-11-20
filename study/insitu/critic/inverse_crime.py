@@ -31,7 +31,7 @@ for label, opt in (('control: data 64/3 (inverse crime)', dict()),
                    ('data 128/4, n_med 1.35', dict(npupil=128, oversample=4, n_med=1.35))):
     spl = F.new_spline()
     C.OPT.update(opt)
-    Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
+    Ktrue = spl.sample(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
     C.OPT.clear(); C.OPT.update(OPT0)
     test, train = sim(NTE, 1, opt), sim(NTR, 2, opt)
     spl.knots = Ktrue; _, nll_true = localize(spl, test['d'])

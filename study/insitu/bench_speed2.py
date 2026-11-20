@@ -15,7 +15,7 @@ for npupil, osamp in ((64, 3), (128, 4), (256, 6)):
     spl = F.new_spline()
     big, small = C.model_vec(spl.Pl, zc0), C.model_vec(C.P, zc0)
     ch = 4 if npupil < 256 else 1
-    t_build, K = tm(lambda: spl.knots_from_vectorial(big, C.insitu_pos, chunk=ch)); spl.knots = K
+    t_build, K = tm(lambda: spl.sample(big, C.insitu_pos, chunk=ch)); spl.knots = K
     th, _ = localize(spl, rois[:4000])
     N = 4000; d, t = rois[:N], th
     tk, (gK, _) = tm(lambda: F.knot_grad(spl, d, t))

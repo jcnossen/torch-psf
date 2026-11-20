@@ -5,7 +5,7 @@ ns = runpy.run_path('study/insitu/run_pattern.py')
 C, F = ns['C'], ns['F']
 for scn in 'A':
     spl = F.new_spline()
-    spl.knots = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+    spl.knots = spl.sample(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
     d6, corner, tt = ns['simulate'](scn)
     loc = ns['PatternLoc'](d6, corner)
     for rep in range(3):

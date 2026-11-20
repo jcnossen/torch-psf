@@ -1,7 +1,7 @@
 """PSF estimation recovers known Zernike sets on simulated data: bead stacks and in situ (knot route)."""
 import torch
 from conftest import DEV, needs_gpu
-from torch_psf import VectorialPSF, CubicSplinePSF
+from torch_psf import VectorialPSF, SplinePSF
 from torch_psf.estimation import fit_beads, fit_zernike_knots, stage_focus, z_scale
 from torch_psf.simulate import simulate_bead_stack, simulate_emitters
 
@@ -33,7 +33,7 @@ def test_insitu_zernike_fit_recovers_known_set():
     sim = simulate_emitters(vec.render, 4000, bg=20.0, photons=4000.0, z_range=(0.05, 0.75), generator=g, device=DEV)
     start = VectorialPSF(15, npupil=48, oversample=2, device=DEV, focus_um=0.4, z_range=(0.0, 0.8))
     start.set_zernike({6: 0.08})                          # an approximate start (e.g. a bead calibration)
-    spl = CubicSplinePSF(15, (0.0, 0.8), dz_um=0.04, zpad=5, xy_limit=3.0, device=DEV)
+    spl = SplinePSF(15, (0.0, 0.8), dz_um=0.04, zpad=5, xy_limit=3.0, device=DEV)
     est = fit_zernike_knots(spl, sim['d'], start, iters=80)
     err = (est['psf'].zcoef.detach() - vec.zcoef.detach()).pow(2).mean().sqrt()
     assert float(err) < 0.006, float(err)

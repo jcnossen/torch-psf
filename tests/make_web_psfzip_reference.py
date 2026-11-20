@@ -8,7 +8,7 @@ Outputs:
   python_vectorial.psf.zip   VectorialPSF (Zernikes, focus, z range) with a camera with per-pixel maps and extra map
                              entries of dtypes the web npy reader does not parse (bool, unicode) and int64;
                              zstack 9 planes at 1 / 2 px
-  python_spline.psf.zip      the same model as a spline channel (CubicSplinePSF, source = the vectorial model);
+  python_spline.psf.zip      the same model as a spline channel (SplinePSF, source = the vectorial model);
                              zstack 7 planes at 1 px
   python_ref.json            the model parameters as torch_psf holds them (float32 values as float64)
   integration_ref.json       Python renders at three emitter positions for the small 0.3.0 zip files
@@ -26,7 +26,7 @@ sys.path.insert(0, a.torch_psf)
 import torch
 from torch_psf import VectorialPSF, Camera, PSF
 from torch_psf.psfzip import save_zip
-from torch_psf.pixint import IntegratedSplinePSF
+from torch_psf.spline import to_spline
 
 os.makedirs(a.out, exist_ok=True)
 v = VectorialPSF(13, pixel_um=0.108, NA=1.45, n_imm=1.518, n_med=1.33, wavelength_um=0.67, zernike_indices=tuple(range(5, 22)),
@@ -74,7 +74,7 @@ reference('spline_nonbox_source', v.to_spline(roisize=5, z_range=(0.1, 0.2), ove
 v2 = v.resized(5)
 v2.set_zernike({6: -0.18})
 for name, models in [('integrated', v), ('integrated_angles', [v, v2])]:
-    model = IntegratedSplinePSF.from_vectorial(models, (0.1, 0.2), oversample=2, dz_um=0.05, xy_limit=0.5, zpad=2)
+    model = to_spline(models, (0.1, 0.2), kernel='bspline', value='density', oversample=2, dz_um=0.05, xy_limit=0.5, zpad=2)
     reference(name, model, source=v if isinstance(models, list) else None)
 # A SIMCODE-style spectral calibration with a non-diagonal covariance and dipole tensor.
 v.pixel_integration = 'spectral'

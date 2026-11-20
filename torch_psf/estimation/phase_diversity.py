@@ -229,7 +229,7 @@ class VectorialStack:
 
     def __init__(self, vec, R, oversample=1, emitter_z_um=0.0, bead_points=None):
         R = int(R) | 1
-        self.vec = vec.resized(R, oversample=oversample)
+        self.vec = vec.resampled(R, oversample=oversample)
         self.R, self.sinc = R, oversample == 1
         self.emitter_z_um = float(emitter_z_um)
         self.bead_points = bead_points
@@ -302,7 +302,7 @@ class CallableStack:
 
 
 def spline_stack(spline, R=None, knots=None):
-    """CallableStack of a CubicSplinePSF (bead-stack convention z = -focus, see ZStackEstimator): fits its knots
+    """CallableStack of a SplinePSF (bead-stack convention z = -focus, see ZStackEstimator): fits its knots
     (a copy, `knots` param; the knots are the PSF, so this refines a spline with the object profiled out)."""
     K0 = (spline.knots if knots is None else knots).detach().clone()
     Rr = int(R or spline.roisize)
@@ -315,7 +315,7 @@ def spline_stack(spline, R=None, knots=None):
         pos[:, 2] = -focus.reshape(-1)
         lo, hi = spline.z_limits
         pos[:, 2] = pos[:, 2].clamp(lo, hi)
-        return spline.render(pos, knots=K0).reshape(n, K, Rr, Rr)
+        return spline.render_tables(pos, knots=K0).reshape(n, K, Rr, Rr)
     return CallableStack(fn, dict(knots=K0), Rr)
 
 
@@ -330,7 +330,7 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
                         intensity='plane', bg='const', fit_dz_scale=False, emitter_z_um=0.0, bead_points=None,
                         render_size=41, oversample=1, window=0.25, eps=1e-4, object_solver='newton', obj_start=None,
                         obj_inner=None, cg_iters=6, warmup=20,
-                        lr_focus=1e-2, lr_drift=1e-2, pupil_l2=0.0, max_planes=600, field=None, field_xy=None,
+                        lr_focus=1e-2, lr_drift=1e-2, pupil_l2=0.0, max_planes=600, field=None, xy=None,
                         lr_field=None, log=None, stop=None):
     """Phase-diversity fit of a PSF model to z-stack patches (see the module docstring).
 
@@ -352,7 +352,7 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
     obj_start / obj_inner: object steps at the start of stage 2 / per iteration (default newton 8 / 1, rl 50 / 3).
     max_planes:
     patch-planes per backward pass (memory). field: a torch_psf.field.FieldZernikes (copied; VectorialPSF only): every
-    patch gets the Zernikes zcoef + field(x, y) at its field position field_xy [n, 2] (camera px; default the patch
+    patch gets the Zernikes zcoef + field(x, y) at its field position xy [n, 2] (camera px; default the patch
     centres); with 'field' in fit the polynomial coefficients are fitted (Adam step lr_field, default lr; the ridge
     prior is added to the loss), else held fixed. psf may also be a torch_psf.field.FieldPSF.
 
@@ -391,7 +391,7 @@ def fit_phase_diversity(patches, focus_um, psf, fit=('zcoef',), method='poisson'
             raise ValueError('field dependence needs a VectorialPSF')
         fz = field.copy().to(dev)
         fz.coef.requires_grad_('field' in fit)
-        fxy = torch.as_tensor(patches.centers if field_xy is None else field_xy, dtype=torch.float32,
+        fxy = torch.as_tensor(patches.centers if xy is None else xy, dtype=torch.float32,
                               device=dev).reshape(-1, 2)
     named = model.params([k for k in fit if k != 'field'])
     groups = []

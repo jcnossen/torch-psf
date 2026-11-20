@@ -32,7 +32,7 @@ class GridPSF:
         p[:, 2] += dz
         if zcoef is None:
             with torch.no_grad():
-                return self.psf(p, self.focus)
+                return self.psf.render(p, focus=self.focus)
         return functional_call(self.psf, {'zcoef': zcoef}, (p, self.focus))
 
     def jac(self, zcoef=None):

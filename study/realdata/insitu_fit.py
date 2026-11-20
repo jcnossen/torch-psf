@@ -219,7 +219,7 @@ if A.method in ('c', 'd'):
     jdump(stv, f'{OUT}/state_{A.tag}.json')
     print('timing', log['timing'], flush=True)
     print('zcoef', {j: round(c, 4) for j, c in zip(st['noll'], stv['zcoef'])}, flush=True)
-    save(spl.knots, dict(vec_state=stv, D=A.D))
+    save(spl.knots[0], dict(vec_state=stv, D=A.D))
     sys.exit(0)
 
 if A.method == 'e':
@@ -263,7 +263,7 @@ if A.method == 'e':
             tot = 0.0
             for s_ in range(0, len(dtr), 20000):
                 t = th[s_:s_ + 20000]
-                mu = (t[:, 3, None, None] * spl.render(t[:, :3], knots=Kp) + t[:, 4, None, None]).clamp_min(1e-4)
+                mu = (t[:, 3, None, None] * spl.render_tables(t[:, :3], knots=Kp) + t[:, 4, None, None]).clamp_min(1e-4)
                 l = (mu - dtr[s_:s_ + 20000] * torch.log(mu)).double().sum()
                 l.backward()
                 tot += float(l)

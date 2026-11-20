@@ -21,7 +21,7 @@ from torch_psf.optics import Optics, resolve_device
 from torch_psf.fit import crlb
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import CubicSplinePSF
+from torch_psf.spline import SplinePSF
 from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
 
 API_VERSION = 1
@@ -120,9 +120,9 @@ class Engine:
             if psf.z_range is not None:
                 p['z_range'] = list(psf.z_range)
             self.loaded = None
-        elif isinstance(psf, (CubicSplinePSF, AstigmaticGaussianPSF)):
+        elif isinstance(psf, (SplinePSF, AstigmaticGaussianPSF)):
             p.update(model='spline', z_range=list(psf.z_range), z_um=float(np.mean(psf.z_range)), roisize=psf.roisize)
-            self.loaded = psf if isinstance(psf, CubicSplinePSF) else psf.to_spline(psf.roisize, dz_um=0.02)
+            self.loaded = psf if isinstance(psf, SplinePSF) else psf.to_spline(psf.roisize, dz_um=0.02)
         elif isinstance(psf, GaussianPSF):
             p.update(model='gaussian', sigma_px=psf.sigma[0], roisize=psf.roisize)
             self.loaded = None
@@ -135,7 +135,7 @@ class Engine:
         return v.set_zernike({int(k): float(x) for k, x in p.get('zernike', {}).items() if int(k) in NOLL})
 
     def models(self, p):
-        """(model for the pixel panels, CubicSplinePSF whose knots give the volume (or None))."""
+        """(model for the pixel panels, SplinePSF whose knots give the volume (or None))."""
         key = json.dumps({k: p.get(k) for k in ('model', 'optics', 'focus_um', 'z_range', 'zernike', 'roisize',
                                                  'sigma_px')}, sort_keys=True)
         if key in self.cache:
@@ -162,12 +162,13 @@ class Engine:
         render, spl = self.models(p)
         R = int(p['roisize'])
         px = float(p['optics']['pixel_um'])
-        if spl is not None:          # the knots are the PSF on a 1/S px grid (S = 2) and dz_um in z
+        if spl is not None and (spl.kernel, spl.value) == ('catmull', 'pixel'):
+            # Pixel samples directly give the oversampled image volume.
             zs = spl.zs.cpu().numpy()
             keep = (zs >= spl.zlo - 1e-9) & (zs <= spl.zhi + 1e-9)
             n = (R + 2) * spl.S                                # the ROI plus 1 px on every side
             c0 = (spl.knots.shape[-1] - n) // 2
-            vol = spl.knots[torch.tensor(keep, device=spl.dev)][:, c0:c0 + n, c0:c0 + n].cpu().numpy()
+            vol = spl.default_volume()[torch.tensor(keep, device=spl.dev)][:, c0:c0 + n, c0:c0 + n].cpu().numpy()
             dx, dz, z0 = px / spl.S, spl.hz, float(zs[keep][0])
         else:                        # other models: render at the 2 x 2 sub-pixel shifts and interleave
             zr = render.z_range or tuple(p['z_range'])

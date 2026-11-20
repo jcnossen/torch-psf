@@ -5,7 +5,7 @@ import math, json, time, os
 import numpy as np, torch
 from torch_psf import VectorialPSF
 from torch_psf.zernike import zernike
-from torch_psf import CubicSplinePSF
+from torch_psf import SplinePSF
 from torch_psf.fit import poisson_nll, lm_poisson, model_and_jacobian
 from torch_psf.estimation import knot_loss
 from rdcommon import transfer_knots
@@ -149,7 +149,7 @@ def make_vec(roisize, st, npupil=64, oversample=3, use_blur=False):
 def movie_spline():
     """Same knot grid as the bead calibration (S 2, hz 50 nm, z -0.8...0.8 um + 4 pad planes), 17 px patch, +-3 px."""
     cal = torch.load(f'{D}/locs/calib/psf_spline.pt')
-    spl = CubicSplinePSF(P, (cal['zlo'], cal['zhi']), oversample=cal['S'], dz_um=cal['hz'], zpad=cal['zpad'], xy_limit=XMAX, device=DEV)
+    spl = SplinePSF(P, (cal['zlo'], cal['zhi']), oversample=cal['S'], dz_um=cal['hz'], zpad=cal['zpad'], xy_limit=XMAX, device=DEV)
     assert spl.nz == cal['nz'] and abs(spl.z0 - cal['z0']) < 1e-9
     Kb = transfer_knots(cal['knots'].to(DEV), cal['c'], spl.c, cal['S'])
     return spl, Kb
@@ -164,7 +164,7 @@ def pos_fn_maker(f0, s, D=0.0, kappa=1.0):
 
 
 def knots_from_vec(spl, big, pos_fn):
-    return spl.knots_from_vectorial(big, pos_fn, chunk=spl.nz)
+    return spl.sample(big, pos_fn, chunk=spl.nz)
 
 
 # ---------------------------------------------------------------------------------------------- localization

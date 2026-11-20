@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import tifffile
 import torch
-from torch_psf import (PSF, VectorialPSF, CubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF, FourPiPSF,
+from torch_psf import (PSF, VectorialPSF, SplinePSF, GaussianPSF, AstigmaticGaussianPSF, FourPiPSF,
                        FourPiSplinePSF, Camera, ZStackEstimator)
 from torch_psf import io
 from torch_psf.psfzip import PSFZip, poly_features, read_zip

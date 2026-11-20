@@ -34,7 +34,7 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     0..ngroups-1): background groups and PSF groups (default one group). group_psf_kwargs / extra_params: per-group
     PSF hook (module docstring). fix_zernike / fix_focus: hold the Zernikes / the focus at their starting values.
     pixel_integration: the pixel integration of the fitted model (VectorialPSF.pixel_integration: 'box' = the midpoint
-    rule with the model's oversample, 'spectral' / 'exact' = the exact pixel integral, 'gauss_legendre'); None = that
+    rule with the model's oversample, 'spectral' = the exact pixel integral, 'gauss_legendre'); None = that
     of `vectorial`. The returned psf keeps it.
     Returns dict(psf, report, history, ...): psf = fitted VectorialPSF (focus_um = fitted focus, blur set if fitted); report: resid_var
     (variance of the normalized residuals, 1 for a perfect model), nll_per_px, focus_um; data: xy [B, 2] px rel. to
@@ -42,7 +42,7 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     dev = tracks.rois.device
     B, T, R = tracks.rois.shape[0], tracks.rois.shape[1], tracks.rois.shape[-1]
     c = (R - 1) / 2
-    model = vectorial.resized(R, pixel_integration=pixel_integration)
+    model = vectorial.resampled(R, pixel_integration=pixel_integration)
     model.zcoef.requires_grad_(True)
     focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
     rn2, pix = readnoise_variance(readnoise_e, B, R, dev)

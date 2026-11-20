@@ -6,7 +6,7 @@ tracked).
 
 Cases:
   movie.tif + movie.json       a seeded movie (torch_psf.simulate.simulate_movie, astigmatic vectorial PSF via its
-                               CubicSplinePSF), its optics and truth
+                               SplinePSF), its optics and truth
   detect.json                  torch_psf.spots.extract_spots on it (chunk = 100 frames, threshold 6, border h + 2):
                                frame, corner, score per spot, and the noise / median of each chunk
   localize.npz / .json         the spline knots (VectorialPSF.to_spline), the ROIs of the first 600 detections,
@@ -30,7 +30,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, a.torch_psf)
 import torch, tifffile
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import CubicSplinePSF
+from torch_psf.spline import SplinePSF
 from torch_psf.simulate import simulate_movie
 from torch_psf.spots import extract_spots
 from torch_psf.detect import filter_frames
@@ -93,7 +93,7 @@ print('localized', n, 'median |x - truth| etc. not checked here')
 from torch_psf.simulate import simulate_reference_movie
 from torch_psf.estimators import InSituEstimator
 from torch_psf.estimation import knot_gradient, split_checkerboard, fit_zernike_knots
-from torch_psf.spline import emitter_height_pos_fn
+from torch_psf.composition import ZMode
 INS = dict(T=1500, H=96, W=96, emitters_per_frame=8.0, seed=5)
 r = simulate_reference_movie('astigmatic', device=dev, **INS)
 tifffile.imwrite(os.path.join(a.out, 'insitu_movie.tif'), r['movie_adu'])
@@ -116,10 +116,10 @@ print('insitu: spots', rep.get('n_spots'), 'train', rep.get('n_train'), 'rejecte
 print('heldout', rep.get('heldout'), 'z_scale', rep.get('z_scale'), 'at_limit', rep.get('at_limit'))
 
 # the gradient at the start: spline grid of InSituEstimator (zpad 5), theta by localize, knot gradient, VJP
-spl5 = CubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
+spl5 = SplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 big = start.resized(spl5.Pl)
-pf = emitter_height_pos_fn(0.4)
-spl5.knots = spl5.knots_from_vectorial(big, pf, chunk=spl5.nz)
+pf = ZMode(big, 'emitter', focus=.4).coordinates
+spl5.knots = spl5.sample(big, pf, chunk=spl5.nz)
 sp = extract_spots(r['movie_adu'], 15, r['camera'], device=dev, max_spots=2 * 4500, threshold=6.0)
 par = split_checkerboard(sp.corner[:, 0] + 7, sp.corner[:, 1] + 7, 16)
 tr = np.flatnonzero(par == 0)[:3000]
@@ -127,14 +127,14 @@ d = sp.rois[tr]
 th, _ = localize(spl5, d)
 gK, nll0 = knot_gradient(spl5, d, th)
 gz = spl5.vjp_vectorial(big, pf, gK, chunk=spl5.nz)['zcoef']
-np.savez(os.path.join(a.out, 'insitu_grad.npz'), knots=spl5.knots.cpu().numpy(), rois=d.cpu().numpy(),
+np.savez(os.path.join(a.out, 'insitu_grad.npz'), knots=spl5.knots[0].cpu().numpy(), rois=d.cpu().numpy(),
          theta=th.cpu().numpy(), gK=gK.cpu().numpy(), gz=gz.cpu().numpy(), nll=np.float64(nll0),
          train_frame=sp.frame[tr].cpu().numpy(), train_corner=sp.corner[tr].cpu().numpy())
 print('gradient: nll', nll0, 'gz', np.round(gz.cpu().numpy(), 2).tolist())
 
 # fit_zernike_knots alone on these training ROIs (no overlap rejection), with the Zernikes of every iteration
 hist = []
-spl5b = CubicSplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
+spl5b = SplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 fz = fit_zernike_knots(spl5b, d, start, iters=40, log=lambda it, nll, sec, zc: hist.append(dict(it=it, nll=nll, zcoef=zc.tolist())))
 json.dump(dict(final_zernike=fz['psf'].zcoef.tolist(), history=hist), open(os.path.join(a.out, 'insitu_fit.json'), 'w'), indent=1)
 print('fit_zernike_knots only:', np.round(fz['psf'].zcoef.tolist(), 4).tolist())
@@ -149,11 +149,11 @@ print('deviance: median', float(np.median(dv)), 'above 1.283:', int((dv > 1 + 3 
 # of fit_zernike_knots on the training ROIs, regularised towards it (lam_ref 3000, lam_s 1000)
 from torch_psf.estimation import fit_free_knots
 s_ref = fz['psf'].to_spline(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0)
-K_vec = s_ref.knots.clone()
+K_vec = s_ref.knots[0].clone()
 hist_r = []
 rr = fit_free_knots(s_ref, K_vec, rois=d, ref=K_vec, lam_ref=3000.0, lam_s=1000.0, outer=3,
                     log=lambda o, l, sec, K: hist_r.append(dict(it=o, loss=float(l))))
-np.savez(os.path.join(a.out, 'insitu_refine.npz'), K_vec=K_vec.cpu().numpy(), knots=rr['psf'].knots.cpu().numpy())
+np.savez(os.path.join(a.out, 'insitu_refine.npz'), K_vec=K_vec.cpu().numpy(), knots=rr['psf'].knots[0].cpu().numpy())
 json.dump(dict(history=hist_r, outer=3, lam_ref=3000.0, lam_s=1000.0), open(os.path.join(a.out, 'insitu_refine.json'), 'w'), indent=1)
 print('refine: loss per outer', [round(h['loss'], 2) for h in hist_r])
 

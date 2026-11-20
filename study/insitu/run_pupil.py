@@ -10,7 +10,7 @@ lr_a = float(sys.argv[4]) if len(sys.argv) > 4 else 1e-2
 res = {}
 for scn in (sys.argv[3] if len(sys.argv) > 3 else 'AB'):
     spl = F.new_spline()
-    Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+    Ktrue = spl.sample(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
     test = C.sim_test(scn, 6000)
     spl.knots = Ktrue; _, nll_true = localize(spl, test['d'])
     D = torch.load(f'study/insitu/out_dev_{scn}.pt', weights_only=False)

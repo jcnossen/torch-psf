@@ -33,7 +33,7 @@ def score(spl, K, test, nll_true):
 
 for scn in scns:
     spl = F.new_spline()
-    Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+    Ktrue = spl.sample(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
     test = C.sim_test(scn, 6000, seed=1000 + seed)
     spl.knots = Ktrue
     _, nll_true = localize(spl, test['d'])

@@ -16,7 +16,7 @@ RAMP = torch.linspace(0, 1, 13)[:, None] + torch.linspace(0, 2, 13)[None, :]    
 
 
 def fourpi(asym=False, mirror='y', zmode='emitter', R=13, npupil=32, offsets=None, z_range=(-0.6, 0.6)):
-    kw = dict(NA=(1.45, 1.3), n_imm=(1.518, 1.406), n_med=1.33, depth_um=(0.1, 1.0), zmode=zmode,
+    kw = dict(NA=(1.45, 1.3), n_imm=(1.518, 1.406), n_med=1.33, depth_um=(0.1, 1.0),
               zernike_indices=tuple(range(4, 16))) if asym else dict(NA=1.35, n_imm=1.406, zernike_indices=tuple(range(5, 16)))
     p = FourPiPSF(R, pixel_um=0.11, wavelength_um=0.67, npupil=npupil, oversample=2, mirror=mirror, device=DEV,
                   phi=(0.3, 1.9, 3.4, 5.0), tau=(0.2, 0.3, 0.25, 0.25), a=0.9, gamma=0.8, d_bot=(0.3, -0.2, 0.02),
@@ -25,7 +25,8 @@ def fourpi(asym=False, mirror='y', zmode='emitter', R=13, npupil=32, offsets=Non
     with torch.no_grad():
         p.top.zcoef.copy_(0.04 * (torch.rand(len(p.zidx), generator=g) - 0.5))
         p.bot.zcoef.copy_(0.04 * (torch.rand(len(p.zidx), generator=g) - 0.5))
-    return p
+    from torch_psf import ZMode
+    return ZMode(p, zmode)
 
 
 def gauss_pair(offsets=((0.0, 0.0), (0.6, -0.4)), ratio=(1.0, 0.8), R=13):
@@ -54,12 +55,12 @@ def test_fourpi_offset_equals_shifted_position(kw):
     p = fourpi(**kw)
     off = torch.tensor(OFF)
     with torch.no_grad():
-        ref = torch.stack([p(POS + torch.cat([off[c], torch.zeros(1)])[None], phi_extra=PHI)[:, c] for c in range(4)], 1)
+        ref = torch.stack([p(POS + torch.cat([off[c], torch.zeros(1)])[None], phi=PHI)[:, c] for c in range(4)], 1)
         p.set_channel_offsets(off)
-        a, b = p(POS, phi_extra=PHI), p.render(POS, phi=PHI)
+        a, b = p(POS, phi=PHI), p.render(POS, phi=PHI)
         # per-spot offsets add to the channel offsets
         po = torch.tensor([[0.1, -0.2]]).expand(3, 4, 2)
-        c = p.render(POS - torch.tensor([[0.1, -0.2, 0.0]]), phi=PHI, offsets=po)
+        c = p.render_geometry(POS - torch.tensor([[0.1, -0.2, 0.0]]), phi=PHI, offsets=po)
     assert torch.equal(a, b)
     assert float((a - ref).abs().max() / ref.abs().max()) < 1e-5
     assert float((c - a).abs().max() / a.abs().max()) < 1e-5
@@ -75,12 +76,12 @@ def test_spline_offsets_and_knots_override():
         a = spl.render(POS, phi=PHI)
     assert float((a - ref).abs().max() / ref.abs().max()) < 1e-6
     K = spl.knots.clone().requires_grad_(True)
-    v = spl.render(POS, phi=PHI, knots=K)
+    v = spl.render_tables(POS, phi=PHI, knots=K)
     assert torch.allclose(v, a, atol=1e-7)
     (v ** 2).sum().backward()
     assert K.grad is not None and float(K.grad.abs().max()) > 0
     with torch.no_grad():
-        assert torch.allclose(spl.render(POS, phi=PHI, knots=2 * spl.knots), 2 * a, atol=1e-6)
+        assert torch.allclose(spl.render_tables(POS, phi=PHI, knots=2 * spl.knots), 2 * a, atol=1e-6)
 
 
 def test_channels_psf_render_and_offsets():
@@ -259,7 +260,7 @@ def test_to_spline_bakes_offsets(spline4pi):
     with torch.no_grad():
         a, b = spl.render(pos, phi=PHI), p.render(pos, phi=PHI)
     assert float((a - b).abs().max() / b.abs().max()) < 1e-2
-    zk = float(spl.luts[0][0].zs[5])
+    zk = float(spl.table.zs[5])
     pk = torch.tensor([[0.0, 0.0, zk], [0.5, -0.5, zk]])
     with torch.no_grad():
         a, b = spl.render(pk, phi=PHI[:2]), p.render(pk, phi=PHI[:2])

@@ -33,7 +33,7 @@ from common import OPTICS, THEIR_NOLL, setup_path   # noqa: E402  (study/fieldps
 setup_path()
 import dataclasses                                                    # noqa: E402
 from torch_psf.vectorial import VectorialPSF                          # noqa: E402
-from torch_psf.spline import CubicSplinePSF                           # noqa: E402
+from torch_psf.spline import SplinePSF                           # noqa: E402
 from torch_psf.field import FieldZernikes, FieldPSF                   # noqa: E402
 from torch_psf.fit import localize                                    # noqa: E402
 from torch_psf.estimation import fit_field_knots, spot_deviance, split_checkerboard   # noqa: E402
@@ -127,7 +127,7 @@ def main():
         itr = torch.as_tensor(tr, device=dev)
         print(f'training {len(tr)} spots ({int((dv >= thr).sum())} rejected; {time.time() - t0:.0f} s)', flush=True)
         fz = FieldZernikes.from_positions(THEIR_NOLL, ORDERS[a.orders], xy_all[itr], prior_sd=a.prior_sd, device=dev)
-        spl = CubicSplinePSF(a.roisize, M.zr, device=dev, **M.grid)
+        spl = SplinePSF(a.roisize, M.zr, device=dev, **M.grid)
 
         def log(it, nll, sec, zc, coef):
             print(f'  it {it} nll {nll:.1f} ({sec:.0f} s) |coef| max {float(coef.abs().max()):.4f}', flush=True)

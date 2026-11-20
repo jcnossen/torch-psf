@@ -68,13 +68,13 @@ def test_cli_localize(tmp_path):
 
 @needs_gpu
 def test_zstack_spline_and_astig_gauss(tmp_path):
-    from torch_psf import CubicSplinePSF, AstigmaticGaussianPSF
+    from torch_psf import SplinePSF, AstigmaticGaussianPSF
     vec = VectorialPSF(21, npupil=48, oversample=2, device=DEV).set_zernike({6: 0.12})
     f = bead_tif(tmp_path, vec)
     opt = dict(pixel_um=0.10833, NA=1.49, wavelength_um=0.68)
     est = ZStackEstimator('spline', optics=opt, roisize=21, npupil=48, oversample_pupil=2, iters=150, device=DEV)
     spl = est.estimate([f], dz_um=0.03)
-    assert isinstance(spl, CubicSplinePSF) and est.report['spline']['change_vs_vectorial'] < 0.5
+    assert isinstance(spl, SplinePSF) and est.report['spline']['change_vs_vectorial'] < 0.5
     est = ZStackEstimator('astig_gauss', optics=opt, roisize=21, iters=400, device=DEV)
     ag = est.estimate([f], dz_um=0.03)
     assert isinstance(ag, AstigmaticGaussianPSF) and abs(ag.gamma) > 0.05      # astigmatism -> separated foci
@@ -93,7 +93,7 @@ def test_insitu_estimator_with_refinement():
                           refine_outer=4, isolation=12, device=DEV)
     psf = est.estimate(r['movie_adu'])
     rep = est.report
-    assert rep['chosen'] in ('VectorialPSF', 'CubicSplinePSF') and 'refine' in rep and rep['warnings']
+    assert rep['chosen'] in ('VectorialPSF', 'SplinePSF') and 'refine' in rep and rep['warnings']
     assert rep['heldout']['vectorial']['nll_per_px'] < rep['heldout']['start']['nll_per_px']
     vec = r['psf']
     fitted = est.data['spline']

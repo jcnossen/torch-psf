@@ -17,7 +17,7 @@ usage: python beads_fit.py stack.tif beads_found.json outdir [--maxdist 100] [--
 import sys, json, time, argparse, math
 import numpy as np, torch, tifffile
 sys.path.insert(0, '.')
-from torch_psf import CubicSplinePSF
+from torch_psf import SplinePSF
 from torch_psf.fit import localize
 from torch_psf.fit import poisson_nll
 from rdcommon import gauss_knots, spline_widths, DEV
@@ -63,7 +63,7 @@ def crop(beads):
 
 
 def new_spline():
-    return CubicSplinePSF(PB, (-A.zr, A.zr), oversample=A.S, dz_um=A.hz, zpad=4, xy_limit=1.0, device=DEV)
+    return SplinePSF(PB, (-A.zr, A.zr), oversample=A.S, dz_um=A.hz, zpad=4, xy_limit=1.0, device=DEV)
 
 
 def init_knots(spl):
@@ -84,7 +84,7 @@ def normalize(spl, K):
     off = torch.zeros(spl.nz, 3, device=DEV)
     off[:, 2] = spl.zs.float()
     off[:, 2] = off[:, 2].clamp(spl.z0 + spl.hz, spl.z0 + (spl.nz - 2) * spl.hz - 1e-4)
-    s = spl.render(off, knots=K).sum((1, 2))
+    s = spl.render_tables(off, knots=K).sum((1, 2))
     return K / s[:, None, None].clamp_min(1e-12)
 
 
@@ -150,7 +150,7 @@ def fit(beads, d, z, bid, lam, outer, log=True, K0=None):
 
         def closure():
             opt.zero_grad()
-            mu = tt[:, 3, None, None] * spl.render(tt[:, :3], knots=Kp) + tt[:, 4, None, None]
+            mu = tt[:, 3, None, None] * spl.render_tables(tt[:, :3], knots=Kp) + tt[:, 4, None, None]
             l = poisson_nll(d, mu).sum()
             if lam > 0:
                 a, b_, c = rough(Kp)

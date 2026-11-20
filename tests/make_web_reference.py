@@ -1,7 +1,7 @@
 """Reference data for the web tests (web/test/), GENERATED on the fly into web/test/.cache/ (not tracked).
 web/test/run_tests.py runs this script when the cache is missing or this file has changed.
 
-The reference is torch_psf itself (torch_psf.vectorial.VectorialPSF, torch_psf.spline.CubicSplinePSF), imported from
+The reference is torch_psf itself (torch_psf.vectorial.VectorialPSF, torch_psf.spline.SplinePSF), imported from
 this repository; no other package and no calibration / fit result is used: all test PSFs are generated from known
 parameters (the web app's tetrapod-like and astigmatic presets).
 
@@ -10,7 +10,7 @@ parameters (the web app's tetrapod-like and astigmatic presets).
 Outputs:
   forward.json / forward.npz   forward cases: PSF images [B, R, R] and the Jacobian [B, 21, R, R] (x px, y px, focus um,
                                z_e um, Zernike Noll 5..21 waves; forward-mode AD)
-  knots.json / knots.npz       spline knots of torch_psf CubicSplinePSF (knots_from_vectorial) for the astigmatic preset
+  knots.json / knots.npz       spline knots of torch_psf SplinePSF (sample) for the astigmatic preset
   tiff/*.tif, tiff.json/.npz   TIFF reader cases (compressions, BigTIFF, tiles, dtypes, byte order, multi-part)
   stack_<name>.tif, <name>.json  simulated bead z-stacks (3 beads, Poisson noise) of the presets 'astig' and 'tetrapod'
   fit_ref.json                 the Python fit of the web's bead model (web/src/fit/beads.ts) on both simulated stacks and
@@ -253,14 +253,15 @@ def make_sim(name):
 
 # ---------------------------------------------------------------- spline knots
 def make_knots():
-    from torch_psf.spline import CubicSplinePSF, emitter_height_pos_fn
+    from torch_psf.spline import SplinePSF
+    from torch_psf.composition import ZMode
     o = dict(roisize=13, pixel_um=0.1, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68, npupil=64, oversample=3)
     zc = np.array([ASTIG_Z.get(j, 0.0) for j in ZIDX], np.float32)
-    sp = CubicSplinePSF(o['roisize'], (0.0, 0.4), oversample=2, dz_um=0.04, zpad=3, xy_limit=3.0, device=dev)
+    sp = SplinePSF(o['roisize'], (0.0, 0.4), oversample=2, dz_um=0.04, zpad=3, xy_limit=3.0, device=dev)
     m = vec(dict(o, roisize=sp.Pl))
     with torch.no_grad():
         m.zcoef.copy_(torch.tensor(zc, device=dev))
-    knots = sp.knots_from_vectorial(m, emitter_height_pos_fn(0.1))
+    knots = sp.sample(m, ZMode(m, 'emitter', focus=.1).coordinates)
     np.savez(os.path.join(a.out, 'knots.npz'), knots=knots.cpu().numpy().astype(np.float32), zcoef=zc)
     json.dump(dict(optics=o, focus_um=0.1, zmax=0.4, S=2, hz=0.04, zpad=3, xmax=3.0, z0=sp.z0, u0=sp.u0,
                    shape=list(knots.shape)), open(os.path.join(a.out, 'knots.json'), 'w'), indent=1)

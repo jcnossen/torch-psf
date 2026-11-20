@@ -160,7 +160,16 @@ test('psfzip: refuse unknown versions, integration modes and invalid spline coef
     try { psfFromMeta(meta, file.arrays); } catch (e) { message = (e as Error).message; }
     check(message.includes(feature), `expected ${feature}, got ${message}`);
   };
-  reject(m => m.version = '0.4.0', '0.4.0');
+  for (const version of ['0.4.0', '0.4.7', '0.5.0', '0.5.7', '0.6.0']) {
+    reject(m => m.version = version, `version ${version}: this reader supports 0.2.x and 0.3.x`);
+  }
+  for (const [basis, value] of [['catmull_rom', 'density'], ['cubic_bspline', 'pixel']]) {
+    // Even a mislabeled older file with a vectorial source must refuse the unsupported table.
+    reject(m => {
+      m.channels[0].type = 'spline_table';
+      m.channels[0].model = { spline_table: { basis, value } };
+    }, 'cannot render this spline basis and value');
+  }
   reject(m => m.channels[0].source.model.pixel_integration = 'unknown_rule', 'unknown_rule');
   reject(m => m.channels[0].model.integrated_spline.basis = 'unknown_basis', 'unknown_basis');
   reject(m => m.channels[0].model.integrated_spline.n_angles++, 'coefs_angle');

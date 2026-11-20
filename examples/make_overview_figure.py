@@ -47,7 +47,7 @@ movie, events = simulate_movie(render_true, 23, T=4000, H=H, W=W, p_on=0.0006, m
                                photons_logsd=0.3, generator=g, device=dev, sites=sites)
 spots = tp.extract_spots(movie, 15, device=dev, threshold=6.0, isolation=16)
 start = tp.VectorialPSF(15, focus_um=0.4, **opt).set_zernike({6: 0.08})
-spline = tp.CubicSplinePSF(15, (0.0, 0.8), dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
+spline = tp.SplinePSF(15, (0.0, 0.8), dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 est = fit_zernike_knots(spline, spots.rois, start, iters=200)
 fitted = est['psf'].to_spline(15, (0.0, 0.8))
 locs = fitted.localize(movie.numpy())
@@ -219,7 +219,7 @@ cb.set_label('PSF / peak (log)', labelpad=2)
 # (g) the convolutional spline: knots + compact schematic
 sg = gridspec.GridSpecFromSubplotSpec(2, 1, subplot_spec=r2[1], height_ratios=[1.35, 1], hspace=0.12)
 ax = fig.add_subplot(sg[0])
-K = fitted.knots.cpu().numpy()
+K = fitted.knots[0].cpu().numpy()
 kz = int(np.argmin(np.abs(fitted.zs.cpu().numpy() - 0.4)))
 c0 = (K.shape[1] - 28) // 2
 ax.imshow(K[kz, c0:c0 + 28, c0:c0 + 28], cmap=CM, interpolation='nearest')

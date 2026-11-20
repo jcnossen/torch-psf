@@ -20,13 +20,15 @@ def _axis(o, c, s):
 
 
 class _GaussianBase(PSF):
+    dtype = torch.float32
+
     def _widths(self, z):
         raise NotImplementedError
 
-    def render(self, pos, grad=False):
+    def _render(self, pos, grad=False):
         """pos [N, 3] (x, y px from the ROI centre, z um) -> [N, P, P]; grad: + d/dx, d/dy (per px), d/dz (per um)."""
-        pos = torch.as_tensor(pos, dtype=torch.float32, device=self.dev)
-        o = torch.arange(self.roisize, device=self.dev, dtype=torch.float32) - (self.roisize - 1) / 2
+        pos = torch.as_tensor(pos, dtype=self.dtype, device=self.dev)
+        o = torch.arange(self.roisize, device=self.dev, dtype=self.dtype) - (self.roisize - 1) / 2
         sx, sy, dsx, dsy = self._widths(pos[:, 2])
         ex, dex, dsx_ = _axis(o, pos[:, 0], sx)
         ey, dey, dsy_ = _axis(o, pos[:, 1], sy)
@@ -67,13 +69,14 @@ class GaussianPSF(_GaussianBase):
         one = torch.ones_like(z)
         return self.sigma[0] * one, self.sigma[1] * one, 0 * one, 0 * one
 
-    def to(self, device):
+    def to(self, device=None, dtype=None):
         """In place (the model holds no tensors); returns self."""
-        self.dev = torch.device(device)
+        self.dev = self.dev if device is None else torch.device(device)
+        self.dtype = dtype or self.dtype
         return self
 
     def resized(self, roisize):
-        return GaussianPSF(roisize, self.sigma, self.dev, self.pixel_um)
+        return GaussianPSF(roisize, self.sigma, self.dev, self.pixel_um).to(dtype=self.dtype)
 
     def __repr__(self):
         return f'GaussianPSF(roisize={self.roisize}, sigma_px={self.sigma})'
@@ -112,13 +115,14 @@ class AstigmaticGaussianPSF(_GaussianBase):
         qx, qy = torch.sqrt(1 + ax ** 2), torch.sqrt(1 + ay ** 2)
         return sx0 * qx, sy0 * qy, sx0 * ax / (qx * self.d), sy0 * ay / (qy * self.d)
 
-    def to(self, device):
+    def to(self, device=None, dtype=None):
         """In place (the model holds no tensors); returns self."""
-        self.dev = torch.device(device)
+        self.dev = self.dev if device is None else torch.device(device)
+        self.dtype = dtype or self.dtype
         return self
 
     def resized(self, roisize):
-        return AstigmaticGaussianPSF(roisize, self.sigma, self.gamma, self.d, self.z_range, self.dev, self.pixel_um)
+        return AstigmaticGaussianPSF(roisize, self.sigma, self.gamma, self.d, self.z_range, self.dev, self.pixel_um).to(dtype=self.dtype)
 
     def __repr__(self):
         return (f'AstigmaticGaussianPSF(roisize={self.roisize}, sigma_px={self.sigma}, gamma_um={self.gamma}, '

@@ -8,14 +8,14 @@ D = torch.load('study/insitu/out_dev_A.pt', weights_only=False)
 rois = D['rois'].to(C.DEV); zc0 = D['zc_s'].to(C.DEV)
 spl = F.new_spline()
 big, small = C.model_vec(spl.Pl, zc0), C.model_vec(C.P, zc0)
-spl.knots = spl.knots_from_vectorial(big, C.insitu_pos)
+spl.knots = spl.sample(big, C.insitu_pos)
 th, _ = localize(spl, rois)
 def tm(fn, rep=3):
     fn(); torch.cuda.synchronize(); t = time.time()
     for _ in range(rep): r = fn()
     torch.cuda.synchronize(); return (time.time() - t) / rep, r
 res = dict(N=[], tK_knot=[], tK_vjp=[], tK_build=[], tV=[], cos=[], t_loc=[])
-t_build, _ = tm(lambda: spl.knots_from_vectorial(big, C.insitu_pos))
+t_build, _ = tm(lambda: spl.sample(big, C.insitu_pos))
 for N in (250, 1000, 4000, 16000, 64000):
     idx = torch.arange(N, device=C.DEV) % len(rois)
     d, t = rois[idx], th[idx]

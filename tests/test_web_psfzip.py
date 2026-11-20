@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import tifffile
 import torch
-from torch_psf import VectorialPSF, CubicSplinePSF
+from torch_psf import VectorialPSF, SplinePSF
 from torch_psf import io as tio
 from torch_psf.psfzip import PSFZip, read_zip, render_zstack, zstack_tif_bytes
 
@@ -70,7 +70,7 @@ def test_model_zernikes_optics(name):
     assert vec.roisize == e['roisize'] and list(vec.z_range) == e['z_range_um']
     assert pz.camera.gain_e_per_adu == e['camera']['gain_e_per_adu'] and pz.camera.offset_adu == e['camera']['offset_adu']
     psf = tio.load(os.path.join(OUT, name), device='cpu')                       # the single-channel reader
-    assert type(psf) is (CubicSplinePSF if 'spline' in name else VectorialPSF)
+    assert type(psf) is (SplinePSF if 'spline' in name else VectorialPSF)
     assert pz.meta['emitter_params'] == ['x', 'y', 'z', 'I', 'bg'] and pz.meta['n_dims'] == 3
 
 
@@ -131,5 +131,5 @@ def test_spline_knots_vs_torch_psf():
                         xy_limit=sp['xmax'])
     assert spl.to_dict() == ref.to_dict()
     err = rel(spl.knots.numpy(), ref.knots.numpy())
-    print(f'\nweb spline knots {tuple(spl.knots.shape)} vs torch_psf knots_from_vectorial: max rel err {err:.2e}')
+    print(f'\nweb spline knots {tuple(spl.knots.shape)} vs torch_psf sample: max rel err {err:.2e}')
     assert err < 1e-4
