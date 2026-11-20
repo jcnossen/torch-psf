@@ -213,7 +213,7 @@ class ZStackEstimator(Estimator):
         zlo, zhi = float(-focus.max()), float(-focus.min())
         dz = self.spline_dz_um or max(abs(float(focus[1] - focus[0])), 0.02)
         spl = ZMode(vec, focus=0.).to_spline(self.roisize, (zlo + dz, zhi - dz), oversample=self.oversample, dz_um=dz, zpad=2,
-                            xy_limit=self.xy_limit)
+                            xy_limit=self.xy_limit, kernel='catmull', value='pixel')   # the knot route refines pixel-value knots
         K0 = spl.knots[0].clone()
         keep = sid != self.holdout if self.holdout is not None else torch.ones_like(sid, dtype=torch.bool)
         z_nom = -focus
@@ -494,7 +494,7 @@ class InSituEstimator(Estimator):
         self.warn_rejected = warn_rejected
         self.refine, self.refine_lam_ref, self.refine_lam_s, self.refine_outer = (refine, refine_lam_ref,
                                                                                    refine_lam_s, refine_outer)
-        self.grid = dict(oversample=oversample, dz_um=dz_um, zpad=5, xy_limit=xy_limit)
+        self.grid = dict(oversample=oversample, dz_um=dz_um, zpad=5, xy_limit=xy_limit, kernel='catmull', value='pixel')  # knot-route tables
         self.threshold, self.isolation, self.tile, self.detect_kw = threshold, isolation, tile, detect_kw
         self.chunk = chunk
         self.zernike_indices, self.npupil, self.oversample_pupil = tuple(zernike_indices), npupil, oversample_pupil

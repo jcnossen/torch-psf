@@ -69,8 +69,8 @@ def models():
     yield 'polychromatic', Polychromatic(v, [.64, .72], [.3, .7]), {}
     yield 'gauss2d', GaussianPSF(7, (1.15, 1.4), pixel_um=.108, device='cpu'), {}
     yield 'gauss3d', AstigmaticGaussianPSF(7, (1.15, 1.4), pixel_um=.108, device='cpu'), {}
-    yield 'cubic', v.to_spline(**GRID), {}
-    yield 'cubic_dipole', v.to_spline(**GRID, dipole_components=True), dict(dipM=M)
+    yield 'cubic', v.to_spline(kernel='catmull', value='pixel', **GRID), {}
+    yield 'cubic_dipole', v.to_spline(kernel='catmull', value='pixel', **GRID, dipole_components=True), dict(dipM=M)
     yield 'integrated', to_spline(v, kernel='bspline', value='density', **GRID), {}
     other = vec().set_zernike({6: -.03})
     integrated = to_spline([v, other], kernel='bspline', value='density', **GRID)

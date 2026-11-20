@@ -255,8 +255,12 @@ progress=None, **detect_kw)`
 samples an optical model. The method form is `model.to_spline(roisize, z_range, **grid)`.
 Use `kernel='catmull'` for interpolating samples or `kernel='bspline'` for coefficients with a mirror-boundary
 prefilter. With `value='pixel'` each sample is a rendered pixel. With `value='density'` the builder samples
-point density and the evaluator integrates the spline over the pixel. The existing scalar optical default
-is Catmull-Rom on pixel values at two knots per pixel. The 4Pi and field builders retain their
+point density and the evaluator integrates the spline over the pixel. Without kernel / value, an optical
+model (or a wrapper of one) gets the integrated cubic B-spline at two knots per pixel
+(`DEFAULT_SPLINE = ('bspline', 'density', 2)`: in the study/psf_unify benchmark it is faster and more accurate than
+integrated Catmull-Rom at two knots per pixel); a model that renders only pixel values (the Gaussians) gets
+Catmull-Rom on pixel values at two knots per pixel (`DEFAULT_PIXEL_SPLINE`). Calibration builds pass kernel, value
+and the grid explicitly; the bead and in-situ estimators' knot routes and the viewer keep Catmull-Rom pixel tables. The 4Pi and field builders retain their
 integration-mode-dependent defaults.
 
 ```python

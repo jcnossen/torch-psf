@@ -7,7 +7,7 @@ from torch_psf import VectorialPSF, SplinePSF, GaussianPSF, AstigmaticGaussianPS
 def test_spline_matches_vectorial():
     vec = VectorialPSF(15, npupil=64, oversample=3, device=DEV, focus_um=0.4, z_range=(0.0, 0.8))
     vec.set_zernike({6: 0.1, 11: 0.03})
-    spl = vec.to_spline(15, oversample=3, dz_um=0.02)
+    spl = vec.to_spline(15, oversample=3, dz_um=0.02, kernel='catmull', value='pixel')
     g = torch.Generator(device=DEV).manual_seed(1)
     pos = torch.stack([torch.rand(50, generator=g, device=DEV) - 0.5, torch.rand(50, generator=g, device=DEV) - 0.5,
                        0.05 + 0.7 * torch.rand(50, generator=g, device=DEV)], 1)
@@ -20,7 +20,7 @@ def test_spline_matches_vectorial():
 def test_spline_derivatives():
     vec = VectorialPSF(13, npupil=48, oversample=2, device=DEV, focus_um=0.3, z_range=(0.0, 0.6))
     vec.set_zernike({6: 0.1})
-    spl = vec.to_spline(13, dz_um=0.03)
+    spl = vec.to_spline(13, dz_um=0.03, kernel='catmull', value='pixel')
     pos = torch.tensor([[0.13, -0.27, 0.31], [-0.4, 0.2, 0.12]], device=DEV)
     out = spl.render(pos, grad=True)
     for k in range(3):
@@ -63,8 +63,8 @@ def test_from_zstack_reproduces_the_stack_at_grid_points():
 
 def test_even_roi_and_wrapped_knots():
     vec = VectorialPSF(15, npupil=48, oversample=2, device=DEV, focus_um=0.3, z_range=(0.0, 0.6)).set_zernike({6: 0.1})
-    odd = vec.to_spline(15, dz_um=0.03)
-    even = vec.to_spline(16, dz_um=0.03)
+    odd = vec.to_spline(15, dz_um=0.03, kernel='catmull', value='pixel')
+    even = vec.to_spline(16, dz_um=0.03, kernel='catmull', value='pixel')
     pos = torch.tensor([[0.0, 0.0, 0.3], [0.1, -0.2, 0.2]], device=DEV)
     a = odd.render(pos)
     # the 16 px ROI is centred between pixels: an offset of +0.5 px in the even ROI = the same emitter in the odd one
@@ -78,7 +78,7 @@ def test_even_roi_and_wrapped_knots():
 
 def test_clamped_derivative_outside_the_z_range():
     vec = VectorialPSF(13, npupil=32, oversample=2, device=DEV, focus_um=0.3, z_range=(0.0, 0.6)).set_zernike({6: 0.1})
-    spl = vec.to_spline(13, dz_um=0.03, zpad=0)
+    spl = vec.to_spline(13, dz_um=0.03, zpad=0, kernel='catmull', value='pixel')
     lo = spl.z_limits[0]
     out = spl.render(torch.tensor([[0.0, 0.0, lo - 0.2], [0.0, 0.0, lo]], device=DEV), grad=True)
     assert torch.allclose(out[0][0], out[0][1]) and torch.allclose(out[3][0], out[3][1])     # value and d/dz clamped
@@ -105,7 +105,7 @@ def test_to_device_is_in_place_for_every_model():
     assert vec.blur.device.type == 'cpu' and vec.roisize == 13
     img = vec.render(torch.tensor([[0.0, 0.0, 0.2]]))
     assert img.shape == (1, 13, 13) and img.device.type == 'cpu'
-    spl = VectorialPSF(13, npupil=32, oversample=2, device=DEV, z_range=(0, 0.4)).to_spline(11, dz_um=0.05)
+    spl = VectorialPSF(13, npupil=32, oversample=2, device=DEV, z_range=(0, 0.4)).to_spline(11, dz_um=0.05, kernel='catmull', value='pixel')
     r0 = spl.render(torch.tensor([[0.1, 0.0, 0.2]], device=DEV)).cpu()
     assert spl.to(dev2) is spl and torch.allclose(spl.render(torch.tensor([[0.1, 0.0, 0.2]])), r0, atol=1e-6)
     for m in (GaussianPSF(11, device=DEV), AstigmaticGaussianPSF(11, device=DEV)):

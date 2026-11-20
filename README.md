@@ -39,7 +39,7 @@ psf.save('insitu.json')
 
 - Model Zernike aberrations, pupil maps and per-pattern-angle dipole emission and blur with `tp.VectorialPSF`.
 - Render pixel-integrated 2D and astigmatic 3D Gaussians with `tp.GaussianPSF` and `tp.AstigmaticGaussianPSF`.
-- Build a 3D cubic spline from a model with `psf.to_spline` or from measured planes with `tp.SplinePSF.from_zstack`.
+- Build a fast 3D spline table from a model with `psf.to_spline` (default: the integrated cubic B-spline at 2 knots/px) or from measured planes with `tp.SplinePSF.from_zstack`.
 - Integrate a cubic B-spline over each pixel with `tp.to_spline(model, kernel='bspline', value='density', **grid)`, optionally using coefficients per angle.
 - Fit multiple channels jointly with `tp.ChannelsPSF`.
 - Model two-objective interference with `tp.FourPiPSF` or its spline form, `tp.FourPiSplinePSF`.

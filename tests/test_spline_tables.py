@@ -136,3 +136,17 @@ def test_phase_and_dipole_weight_gradients():
     minus = phase_view.render(pos, phi=phase, dipM=M - eps * direction)
     torch.testing.assert_close(((plus - minus) * probe).sum() / (2 * eps), (dM * direction).sum())
     assert torch.all(adjoint.flatten(1).abs().sum(1) > 0)
+
+
+def test_default_table_rule():
+    """Without kernel / value: optical models get the integrated B-spline at 2 knots/px, pixel-only models
+    (Gaussians) Catmull-Rom pixel values at 2 knots/px."""
+    from torch_psf import AstigmaticGaussianPSF, VectorialPSF
+    from torch_psf.spline import DEFAULT_PIXEL_SPLINE, DEFAULT_SPLINE
+    assert DEFAULT_SPLINE == ('bspline', 'density', 2) and DEFAULT_PIXEL_SPLINE == ('catmull', 'pixel', 2)
+    vec = VectorialPSF(9, npupil=16, oversample=2, z_range=(0.0, 0.1), device='cpu')
+    s = vec.to_spline(9, dz_um=0.05)
+    assert (s.kernel, s.value, s.S) == DEFAULT_SPLINE
+    g = AstigmaticGaussianPSF(9, (1.1, 1.3), pixel_um=0.108, device='cpu')
+    sg = g.to_spline(9, dz_um=0.05)
+    assert (sg.kernel, sg.value, sg.S) == DEFAULT_PIXEL_SPLINE

@@ -8,7 +8,12 @@ from torch_psf._dipole import M_to_m6, combine_tables, default_weights, unit_ten
 from torch_psf.integrate import PixelIntegrator, spectral_min_oversample
 
 
-DEFAULT_SPLINE = ('catmull', 'pixel', 2)  # kernel, value, knots/px for newly built plain tables
+# The table built when to_spline gets no kernel / value: kernel, value, knots/px. Models that can render the point
+# density (optical models and their wrappers) get the integrated cubic B-spline at 2 knots/px (study/psf_unify: faster
+# and more accurate than integrated Catmull-Rom at 2 knots/px); models that only render pixel values (GaussianPSF,
+# AstigmaticGaussianPSF) get a Catmull-Rom table of pixel values at 2 knots/px (psf.zip 0.2.0).
+DEFAULT_SPLINE = ('bspline', 'density', 2)
+DEFAULT_PIXEL_SPLINE = ('catmull', 'pixel', 2)
 
 # Sampling presets for an explicitly requested value or a phase table: kernel, S, dz, zpad, xy_limit, chunk.
 _GRID_PROFILES = {
@@ -861,6 +866,11 @@ def to_spline(model, z_range=None, *, roisize=None, kernel=None, value=None, com
     return model.to_spline(roisize, z_range, **grid)
 
 
+def _has_point_density(model):
+    """True if the model can render the point density (needed for value='density' tables)."""
+    return hasattr(model, '_grid_sampler') or hasattr(model, '_image')
+
+
 @torch.no_grad()
 def _tabulate(model, z_range=None, *, roisize=None, kernel=None, value=None, components=None, oversample=None,
               dz_um=None, zpad=None, xy_limit=None, chunk=None, backend='sep', pos_fn=None, kind=None,
@@ -876,13 +886,13 @@ def _tabulate(model, z_range=None, *, roisize=None, kernel=None, value=None, com
         raise ValueError('provide at least one source model')
     first = models[0]
     phase = hasattr(first, '_channel_images')
-    legacy = kernel is None and value is None
     if phase or kind is not None:
         default = spline_kind(kind, first.pixel_integration)
         if value is None:
             value = 'density' if default == 'integrated' else 'pixel'
     elif value is None:
-        default_kernel, value, default_sampling = DEFAULT_SPLINE
+        default_kernel, value, default_sampling = (DEFAULT_SPLINE if _has_point_density(first)
+                                                   else DEFAULT_PIXEL_SPLINE)
         kernel = default_kernel if kernel is None else kernel
         if oversample is None:
             oversample = default_sampling
@@ -903,7 +913,7 @@ def _tabulate(model, z_range=None, *, roisize=None, kernel=None, value=None, com
     if components not in (None, 'dipole', 'phase') or (components == 'phase' and not phase):
         raise ValueError('unknown spline components')
     dipole = dipole_components or components == 'dipole'
-    backend = backend or ('conv' if legacy and value == 'pixel' else 'sep')
+    backend = backend or ('conv' if kernel == 'catmull' and value == 'pixel' else 'sep')   # catmull pixel tables: the old CubicSplinePSF evaluation
     grid = SplinePSF(P, zr, S, dz, pad, xl + int(value == 'density'), device=first.dev, pixel_um=first.pixel_um,
                      kernel=kernel, value=value, backend=backend, dtype=getattr(first, 'dtype', torch.float32))
     grid.xmax = min(xl, grid.xmax)

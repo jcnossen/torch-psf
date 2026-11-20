@@ -155,7 +155,7 @@ def test_unknown_basis_or_arrays_refused(tmp_path):
 def test_old_spline_files_unchanged(tmp_path):
     """the 'spline' type is written and read as before (SplinePSF, knots)"""
     v = _vec()
-    spl = v.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, xy_limit=2.0)
+    spl = v.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, xy_limit=2.0, kernel='catmull', value='pixel')
     f = tmp_path / 's.psf.zip'
     io.save_zip(f, spl, source=v)
     meta, _ = psfzip.read_zip(f)
@@ -196,8 +196,8 @@ def test_zip_version(tmp_path, monkeypatch):
     cases = dict(box=(box, None, '0.2.0'), spectral=(_vec(), None, '0.3.0'),
                  spline=(to_spline(box, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02),
                          box, '0.3.0'),
-                 box_spline=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05), box, '0.2.0'),
-                 spectral_source=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05), _vec(), '0.3.0'))
+                 box_spline=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, kernel='catmull', value='pixel'), box, '0.2.0'),
+                 spectral_source=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, kernel='catmull', value='pixel'), _vec(), '0.3.0'))
     for name, (m, src, ver) in cases.items():
         f = tmp_path / f'{name}.psf.zip'
         meta = io.save_zip(f, m, source=src)

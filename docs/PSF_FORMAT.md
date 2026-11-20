@@ -185,7 +185,8 @@ immediately before `nz`. The default weights and any fixed response follow the e
 A 0.5 phase channel uses `model.spline_table` for its three phase arrays. Standalone phase files
 carry the same basis and value in `fourpi_spline`. Field channels rebuild each tile from the reference
 grid's basis, value, backend and sampling. The plain builder default is `torch_psf.spline.DEFAULT_SPLINE`
-(kernel, value, knots per pixel). Existing file grids specify their own interpolation rules.
+(kernel, value, knots per pixel): the integrated B-spline at 2 knots/px ('integrated_spline' block, psf.zip 0.3.0);
+models without a point density use `DEFAULT_PIXEL_SPLINE`, Catmull-Rom pixel values ('spline' block, 0.2.0). Existing file grids specify their own interpolation rules.
 
 **gaussian** (`GaussianPSF`, 2D): `gaussian` {sigma_px [2], pixel_um}, `roisize`. No arrays.
 
