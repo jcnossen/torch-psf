@@ -4,6 +4,8 @@ import math
 import numpy as np
 import torch
 
+from torch_psf.optics import pixel_xy
+
 
 MODES = ('midpoint', 'exact', 'gauss_legendre', 'point')
 PAD = 3  # pixels on each side for circular convolution
@@ -86,21 +88,27 @@ class PixelIntegrator:
         self.blur = blur
         self.weights = None
         self.pad = 0
+        # image sample positions (um) along x (u) and y (uy; the same tensor for square pixels). Non-square pixels:
+        # the grids follow the pixel sizes at every render (they may be tensors of a fitted aspect)
+        square = not isinstance(model.pixel_um, tuple)
+        px, py = pixel_xy(model.pixel_um)
         if self.mode == 'gauss_legendre':
             if blur is not None:
                 raise ValueError("pixel_integration 'gauss_legendre' does not support an image-plane blur")
             nodes, weights = np.polynomial.legendre.leggauss(self.os)
             centres = np.arange(self.size) - (self.size - 1) / 2
-            u = (centres[:, None] + nodes / 2).reshape(-1)
-            self.u = torch.tensor(u, dtype=torch.float32, device=model.dev) * model.pixel_um
+            u = torch.tensor((centres[:, None] + nodes / 2).reshape(-1), dtype=torch.float32, device=model.dev)
+            self.u = u * px
+            self.uy = self.u if square else u * py
             self.weights = torch.tensor(weights / 2, dtype=model.u.dtype, device=model.dev)
         else:
             if self.fc is not None or blur is not None:
                 self.pad = 2 * PAD if coherent and self.fc is not None else PAD
-            if self.pad == 0 and self.os == model.os and hasattr(model, 'u'):
+            if square and self.pad == 0 and self.os == model.os and hasattr(model, 'u'):
                 self.u = model.u
             else:
-                self.u = uniform_grid(self.size + 2 * self.pad, self.os, model.pixel_um, model.dev)
+                self.u = uniform_grid(self.size + 2 * self.pad, self.os, px, model.dev)
+            self.uy = self.u if square else uniform_grid(self.size + 2 * self.pad, self.os, py, model.dev)
 
     def _filter(self, samples, batch):
         """Apply blur and the spectral pixel transfer together on the padded grid."""

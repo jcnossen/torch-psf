@@ -37,7 +37,8 @@ Any other field (any dtype, shape [n, ...], e.g. per-frame intensities [n, frame
 
 ## Metadata
 
-A free dictionary of JSON-serializable values. Common keys: `pixel_nm` (camera pixel size in the sample, nm),
+A free dictionary of JSON-serializable values. Common keys: `pixel_nm` (camera pixel size in the sample, nm; for non-square pixels the x size, also the
+unit of z), `pixel_nm_y` (only for non-square pixels: the y size, nm),
 `image_size` [h, w] (px), `n_frames` (frames of the movie), `n_dims`,
 `method`, `source`, `region` / `origin` (set by crop), `drift` (the estimation record for the correction applied to these positions).
 

@@ -4,7 +4,7 @@ astigmatic calibration curves sigma_x(z) = sx0 sqrt(1 + ((z - gamma) / d)^2), si
 and sum to 1 over the image plane."""
 import math
 import torch
-from torch_psf.optics import resolve_device
+from torch_psf.optics import pixel_size, resolve_device
 from torch_psf.psf import PSF
 
 
@@ -59,7 +59,7 @@ class GaussianPSF(_GaussianBase):
 
     def __init__(self, roisize, sigma_px=1.3, device=None, pixel_um=None):
         self.roisize = roisize
-        self.pixel_um = None if pixel_um is None else float(pixel_um)
+        self.pixel_um = pixel_size(pixel_um, floats=True)
         self.dev = resolve_device(device)
         s = (sigma_px, sigma_px) if not isinstance(sigma_px, (tuple, list)) else sigma_px
         self.sigma = (float(s[0]), float(s[1]))
@@ -101,7 +101,7 @@ class AstigmaticGaussianPSF(_GaussianBase):
     def __init__(self, roisize, sigma_px=(1.3, 1.3), gamma_um=0.2, d_um=0.4, z_range=(-0.5, 0.5), device=None,
                  pixel_um=None):
         self.roisize = roisize
-        self.pixel_um = None if pixel_um is None else float(pixel_um)
+        self.pixel_um = pixel_size(pixel_um, floats=True)
         self.dev = resolve_device(device)
         s = (sigma_px, sigma_px) if not isinstance(sigma_px, (tuple, list)) else sigma_px
         self.sigma = (float(s[0]), float(s[1]))

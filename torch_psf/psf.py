@@ -20,9 +20,16 @@ from torch_psf.fit import fisher, crlb, localize, at_limit
 from torch_psf.movie import open_movie
 from torch_psf.spots import Spots, extract_spots
 from torch_psf.dataset import Dataset, _plain
+from torch_psf.optics import pixel_meta, pixel_size, pixel_x
 
 FORMAT = 'torch-psf'
-READ_VERSIONS = ((0, 2), (0, 3), (0, 4), (0, 5))
+READ_VERSIONS = ((0, 2), (0, 3), (0, 4), (0, 5), (0, 6))
+PIXEL_PAIR_VERSION = (0, 6)     # non-square pixels: pixel_um stored as [x, y]
+
+
+def pixel_version(version, *pixel_sizes):
+    """version, raised to PIXEL_PAIR_VERSION when one of the pixel sizes is a non-square pair."""
+    return max(version, PIXEL_PAIR_VERSION) if any(isinstance(p, (tuple, list)) for p in pixel_sizes) else version
 
 
 def version_string(version):
@@ -220,7 +227,7 @@ class PSF:
             out['theta'].append(th); out['crlb'].append(crlb(self, th, var=v)); out['nll'].append(nll)
             out['lim'].append(at_limit(th, self)); out['xy'].append(xy)
         cat = lambda k, shape: torch.cat(out[k]).cpu() if out[k] else torch.zeros(shape)
-        px = pixel_um if pixel_um is not None else getattr(self, 'pixel_um', None)
+        px = pixel_size(pixel_um if pixel_um is not None else getattr(self, 'pixel_um', None), floats=True)
         if self.n_dims == 3 and not px:
             raise ValueError(f'{type(self).__name__} has no pixel size: z is stored in px of the lateral pixel size, so '
                              f'pass pixel_um=... or set psf.pixel_um')
@@ -229,12 +236,12 @@ class PSF:
         if out['chi2']:
             meta['chi2_median'] = float(cat('chi2', (0,)).median())      # ~1 if the camera gain / noise model is right
         if px:
-            meta['pixel_nm'] = 1000.0 * float(px)
+            meta.update(pixel_meta(px))
         pos = [cat('xy', (0, 2))]
         crp = [cr[:, :2]]
         if self.n_dims == 3:
-            pos.append(th[:, 2:3].double() / px)
-            crp.append(cr[:, 2:3] / px)
+            pos.append(th[:, 2:3].double() / pixel_x(px))        # z in px of the x pixel size
+            crp.append(cr[:, 2:3] / pixel_x(px))
         fr = (torch.as_tensor(frames).cpu() if frames is not None else torch.zeros(len(th), dtype=torch.int32))
         return Dataset(dict(frame=fr, pos=torch.cat(pos, 1), crlb=torch.cat(crp, 1), photons=th[:, 3], bg=th[:, 4],
                             crlb_photons=cr[:, 3], crlb_bg=cr[:, 4], loglik=-cat('nll', (0,)), chi2=cat('chi2', (0,)),
@@ -284,7 +291,7 @@ class PSF:
         """Minimum (major, minor) for the serialized features, including any stored source."""
         if self.type_name is None:
             raise NotImplementedError(f'{type(self).__name__} has no model file block')
-        return (0, 2)
+        return pixel_version((0, 2), getattr(self, 'pixel_um', None))
 
     def json_format_version(self, source=None):
         """Minimum version in the standalone layout, which predates the 0.2 channel container."""

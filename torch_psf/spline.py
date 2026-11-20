@@ -2,8 +2,8 @@
 import copy
 import math
 import torch
-from torch_psf.optics import resolve_device
-from torch_psf.psf import PSF
+from torch_psf.optics import pixel_json, pixel_size, resolve_device
+from torch_psf.psf import PSF, pixel_version
 from torch_psf._dipole import M_to_m6, combine_splines, default_weights, unit_tensors
 from torch_psf.integrate import PixelIntegrator, spectral_min_oversample
 
@@ -119,7 +119,7 @@ class SplinePSF(PSF):
             raise ValueError('unknown spline kernel, integrated (a bool) or backend')
         self.kernel, self.integrated, self.backend = kernel, integrated, backend
         self.chunk_elems = 2 ** 24
-        self.pixel_um = None if pixel_um is None else float(pixel_um)
+        self.pixel_um = pixel_size(pixel_um, floats=True)     # metadata (z in px, Dataset); a pair if non-square
         zlo, zhi = float(z_range[0]), float(z_range[1])
         S, hz, xmax = int(oversample), float(dz_um), float(xy_limit)
         self.roisize, self.S, self.hz = roisize, S, hz
@@ -616,6 +616,7 @@ class SplinePSF(PSF):
             version = (0, 3)
         else:
             version = (0, 2)
+        version = pixel_version(version, self.pixel_um)
         return version if source is None else max(version, source.format_version())
 
     @classmethod
@@ -654,7 +655,7 @@ class SplinePSF(PSF):
             g = dict(kernel=self.kernel, integrated=self.integrated)
         g.update(roisize=self.roisize, z_range=list(self.z_range), oversample=self.S, dz_um=self.hz,
                  zpad=self.zpad, xy_limit=self.xmax, c=self.c, z0_um=self.z0, nz=self.nz, u0_px=self.u0,
-                 pixel_um=self.pixel_um)
+                 pixel_um=pixel_json(self.pixel_um))
         if density or self.n_angles:
             g['n_angles'] = self.n_angles
         if self.has_dipole:

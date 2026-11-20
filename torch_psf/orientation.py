@@ -35,6 +35,7 @@ import time
 import torch
 from torch_psf.vectorial import photosel_tensor
 from torch_psf.fit import lm_poisson, localize
+from torch_psf.optics import pixel_meta, pixel_size, pixel_x
 
 from torch_psf._dipole import M_to_m6, m6_to_M
 
@@ -489,7 +490,8 @@ class OrientationEstimator:
         xy = th[:, :2].double()
         if corners is not None:
             xy = xy + torch.as_tensor(corners[:n], device=self.dev).double() + h
-        px = psf.pixel_um
+        pxy = pixel_size(psf.pixel_um, floats=True)
+        px = pixel_x(pxy)                      # z in px of the x pixel size
         tdeg, pdeg = angles(th[:, 5:8])
         cpu = lambda t: t.detach().cpu()
         fr = torch.as_tensor(frame_ids[:n]).cpu() if frame_ids is not None else torch.zeros(n, dtype=torch.int32)
@@ -503,7 +505,7 @@ class OrientationEstimator:
                       crlb_theta_deg=cpu(cr['theta']), crlb_phi_deg=cpu(cr['phi']),
                       crlb_inplane_deg=cpu(cr['inplane']), crlb_g=cpu(cr['g']),
                       loglik=cpu(-nll), chi2=cpu(chi2), at_limit=cpu(at_limit(th, psf)))
-        meta = dict(method='torch_psf OrientationEstimator', n_dims=3, pixel_nm=1000.0 * float(px),
+        meta = dict(method='torch_psf OrientationEstimator', n_dims=3, **pixel_meta(pxy),
                     focus_um=float(psf.focus_um), z_limits=list(self.z_limits),
                     vortex=getattr(psf, 'vortex', None))
         if n:

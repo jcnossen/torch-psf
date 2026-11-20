@@ -47,8 +47,8 @@ import copy
 import math
 import torch
 from torch_psf.composition import _AxialCoordinate
-from torch_psf.optics import resolve_device, Optics
-from torch_psf.psf import PSF, render_with_grad
+from torch_psf.optics import resolve_device, Optics, pixel_area, pixel_json, pixel_size
+from torch_psf.psf import PSF, pixel_version, render_with_grad
 from torch_psf.multichannel import MultiChannelPSF
 from torch_psf._dipole import M_to_m6, contract_fields
 from torch_psf.integrate import PixelIntegrator, pixel_integration_mode, spectral_cutoff, spectral_min_oversample
@@ -136,7 +136,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         super().__init__()
         if mirror not in ('x', 'y'):
             raise ValueError("mirror must be 'x' or 'y'")
-        self.roisize, self.pixel_um, self.os, self.mirror = int(roisize), float(pixel_um), int(oversample), mirror
+        self.roisize, self.pixel_um, self.os, self.mirror = int(roisize), pixel_size(pixel_um), int(oversample), mirror
         self.axial = _AxialCoordinate('emitter')
         self.dev = resolve_device(device)
         self.z_range = None if z_range is None else (float(z_range[0]), float(z_range[1]))
@@ -248,7 +248,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
                 height, stage = self.axial.map(-pos[:, 2], 0., depth)
             else:
                 height, _ = self.axial.map(pos[:, 2], 0., depth)
-        return arm._pupil(pos, 0., pixels.u, height=height, stage_um=stage)
+        return arm._pupil(pos, 0., (pixels.u, pixels.uy), height=height, stage_um=stage)
 
     def arm_fields(self, arm, pos, sgn_mu, pixels=None):
         """Fields [N, 3, 2, n, n] of one arm in its own frame, and its pupil energy."""
@@ -330,7 +330,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
             cross = contract_fields(et, dipM, y=eb * phase, basis=basis)
             out.append(top + a * a * bottom + 2 * a * g * cross)
         intensity = torch.stack(out, 1) / (1 + a * a)
-        image = pixels(intensity) * self.pixel_um ** 2 / energy
+        image = pixels(intensity) * pixel_area(self.pixel_um) / energy
         return image * self.tau.reshape(1, -1, *([1] * (image.ndim - 2))) * 2
 
     def _forward_ref(self, pos, dipM=None, phi=None, basis=False):
@@ -346,7 +346,8 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         polarization before transforming the fields into the image plane."""
         B, C, dev = pos_c.shape[0], pos_c.shape[1], pos_c.device
         pos = pos_c[:, 0]
-        sh = (pos_c[:, :, :2] - pos[:, None, :2]) * self.pixel_um          # [B, C, 2] um, camera frame
+        pu = self.pixel_um
+        sh = (pos_c[:, :, :2] - pos[:, None, :2]) * (pos.new_tensor(pu) if isinstance(pu, tuple) else pu)  # [B, C, 2] um, camera frame
         pixels = self._integrator()
         top = self._pupil_at_depth(self.top, pos, pixels)
         pb = pos + self.d_bot[None]
@@ -431,7 +432,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         n_imm_b, n_med, zmode, and asym=True for the asymmetric-arm geometry. channel_offsets [C, 2] (px) only when
         nonzero (from_state: absent = zeros), so states of models without offsets are unchanged."""
         t, b = self.top, self.bot
-        meta = dict(R=self.roisize, px=self.pixel_um, NA=float(t.NA), n=t.n_imm, lam=t.wavelength_um, npupil=t.npupil,
+        meta = dict(R=self.roisize, px=pixel_json(self.pixel_um), NA=float(t.NA), n=t.n_imm, lam=t.wavelength_um, npupil=t.npupil,
                     os=self.os, mirror=self.mirror, zidx=list(self.zidx), pol=[int(v) for v in self.pol],
                     NA_t=float(t.NA), n_imm_t=t.n_imm, NA_b=float(b.NA), n_imm_b=b.n_imm, n_med=self.n_med,
                     zmode=self.axial.mode)
@@ -496,7 +497,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         return (0, 2) if mode == 'midpoint' else (0, 4)
 
     def format_version(self, source=None):
-        return self.integration_version(self.pixel_integration)
+        return pixel_version(self.integration_version(self.pixel_integration), self.pixel_um)
 
     def _file_dict(self, source=None):
         o = Optics(pixel_um=self.pixel_um, NA=float(self.top.NA), wavelength_um=self.top.wavelength_um,
@@ -527,7 +528,7 @@ class FourPiSplinePSF(_CoupledChannels):
         self.S, self.hz, self.zpad = int(oversample), float(dz_um), int(zpad)
         self.zmin, self.zmax = float(z_range[0]), float(z_range[1])
         self.dev = resolve_device(device)
-        self.pixel_um = None if pixel_um is None else float(pixel_um)
+        self.pixel_um = pixel_size(pixel_um, floats=True)
         self.source_state = source_state
         xl = self.P / 2 + 1 if xy_limit is None else float(xy_limit)
         K = torch.as_tensor(knots)
@@ -697,7 +698,8 @@ class FourPiSplinePSF(_CoupledChannels):
 
     # ------------------------------------------------------------------ files
     def format_version(self, source=None):
-        version = self.spline.format_version()
+        version = pixel_version(self.spline.format_version(), self.pixel_um,
+                                (self.source_state or {}).get('meta', {}).get('px'))
         if self.spline.integrated:
             version = max(version, (0, 4))
         if source is not None:
@@ -714,7 +716,7 @@ class FourPiSplinePSF(_CoupledChannels):
         L = self.spline
         g = dict(L.to_dict(), roisize=self.P, n_channels=self.n_channels, tau=_list(self.tau), xy_limit=L.xmax)
         if L.type_name == 'cubic_spline':
-            g['pixel_um'] = self.pixel_um
+            g['pixel_um'] = pixel_json(self.pixel_um)
         if self.default_dipM is not None:
             g['default_dipM'] = self.default_dipM
         if self.has_offsets():

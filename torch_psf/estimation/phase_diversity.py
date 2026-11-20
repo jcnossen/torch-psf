@@ -229,6 +229,8 @@ class VectorialStack:
 
     def __init__(self, vec, R, oversample=1, emitter_z_um=0.0, bead_points=None):
         R = int(R) | 1
+        if isinstance(vec.pixel_um, tuple):
+            raise NotImplementedError('phase diversity assumes square pixels (its OTF support is a disk in cycles / px)')
         self.vec = vec.resampled(R, oversample=oversample)
         self.R, self.sinc = R, oversample == 1
         self.emitter_z_um = float(emitter_z_um)

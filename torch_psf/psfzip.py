@@ -25,6 +25,7 @@ import torch
 from torch_psf.psf import PSF, FORMAT, READ_VERSIONS, check_version, version_string
 from torch_psf.spline import SplinePSF
 from torch_psf.dataset import _plain
+from torch_psf.optics import pixel_json
 
 JSON_NAME, ZSTACK_NAME, PREVIEW_NAME, REPORT_NAME = 'psf.json', 'zstack.tif', 'preview.png', 'fit_report.pdf'
 COUPLED = ('fourpi', 'fourpi_spline')
@@ -569,12 +570,14 @@ def _short32(v):
 
 def _short_optics(d):
     if isinstance(d, dict):
-        return {k: (_short32(v) if k in OPTICS_KEYS else _short_optics(v)) for k, v in d.items()}
+        return {k: ([_short32(x) for x in v] if k in PIXEL_KEYS and isinstance(v, list) else   # non-square [x, y]
+                    _short32(v) if k in OPTICS_KEYS else _short_optics(v)) for k, v in d.items()}
     if isinstance(d, list):
         return [_short_optics(v) for v in d]
     return d
 
 
+PIXEL_KEYS = ('pixel_um', 'pixelsize_um', 'px')
 OPTICS_KEYS = ('pixel_um', 'pixelsize_um', 'NA', 'wavelength_um', 'n_imm', 'n_med', 'px', 'lam', 'n', 'NA_t', 'NA_b',
                'n_imm_t', 'n_imm_b')
 
@@ -735,7 +738,7 @@ def _optics_of(chans, sb, models):
             m = blk['model']['fourpi']['meta']
             return dict(pixel_um=m['px'], NA=m['NA'], wavelength_um=m['lam'], n_imm=m['n'], n_med=m.get('n_med', m['n']))
     px = getattr(models[0], 'pixel_um', None)
-    return None if px is None else dict(pixel_um=float(px))
+    return None if px is None else dict(pixel_um=pixel_json(px))
 
 
 def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, zstack_px=1.0, zstack_planes=25,
@@ -830,7 +833,8 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     # zstack, preview, report
     stack, zs = render_zstack(psf, zstack_planes, zstack_px)
     px = (optics or {}).get('pixel_um')
-    sample_um = None if not px else float(px) * float(zstack_px)
+    sample_um = (None if not px else [float(v) * float(zstack_px) for v in px] if isinstance(px, list)
+                 else float(px) * float(zstack_px))
     zinfo = dict(file=ZSTACK_NAME, axes='ZCYX', shape=list(stack.shape), dtype='float32', z_um=[float(z) for z in zs],
                  sample_px=float(zstack_px), sample_um=sample_um, channels=names, position=dict(x=0.0, y=0.0),
                  params=dict(phi=0.0) if models[0].type_name in COUPLED else {},

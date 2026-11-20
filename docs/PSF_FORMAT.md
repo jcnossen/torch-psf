@@ -36,8 +36,9 @@ the optical state embedded in a phase spline. Readers check the major and minor 
 | Non-box vectorial integration, independent B-spline density grid (including per-angle) | 0.3.0 | 0.3.0 |
 | Non-box 4Pi, integrated phase grid, spline dipole components, integrated or bilinearly blended field tiles | 0.4.0 | 0.4.0 for a single model |
 | Explicit `cubic_spline` grid (earlier name `spline_table`), including its use for a phase channel or a tile | 0.5.0 | 0.5.0 |
+| Non-square pixels: `pixel_um` / `pixelsize_um` / 4Pi `px` stored as `[x, y]` (only when x != y) | 0.6.0 | 0.6.0 |
 
-Python reads zip minors 0.2 through 0.5. Standalone files have a top-level `type` and optional sidecar
+Python reads zip minors 0.2 through 0.6. Standalone files have a top-level `type` and optional sidecar
 `.npz`. Python also reads historical standalone 0.1 files, including those that already contained newer
 features, and plain SIMCODE calibration JSONs without a format header. The web reader accepts 0.2.x and
 0.3.x. A 0.4 reader knows only the two older spline representations and can rebuild a phase or tile with

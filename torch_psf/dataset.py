@@ -15,13 +15,14 @@ Fields (every field has its own dtype and shape [n, ...]):
                              of linked blinks); last frame = end_frame = frame + n_frames - 1
   pos       [n, D] float64   position in px: x, y (and z), pixel centres at integer coordinates, x = column. z is in px of
                              the lateral pixel size (meta['pixel_nm']; one unit for all axes), relative to the focal
-                             plane of the PSF (pos_nm converts)
+                             plane of the PSF (pos_nm converts). Non-square camera pixels: meta['pixel_nm'] is the x
+                             size (also the z unit) and meta['pixel_nm_y'] the y size (absent = square)
   crlb      [n, D] float32   precision (one sigma) per axis, px
   photons   [n] float32      total signal (photons)
   bg        [n] float32      background (photons / px / frame)
   optional: chi2, score, group, cov ([n, 3] = xy, xz, yz covariances, px^2), and any other field (add_fields); all are
   carried through indexing, filters, crop, concatenate, save and load.
-Metadata (dict meta): pixel_nm, image_size [h, w], n_frames (of the movie), method, n_dims, drift (the record of an
+Metadata (dict meta): pixel_nm (and pixel_nm_y for non-square pixels), image_size [h, w], n_frames (of the movie), method, n_dims, drift (the record of an
 applied correction), ... (free; JSON-serializable).
 Drift is a separate result. drift.at(ds.center_frame) samples its curve in px at each localization.
 
@@ -110,6 +111,15 @@ class Drift:
         with np.load(path, allow_pickle=False) as f:
             return cls(f['curve'], json.loads(f['info'].item()))
 
+
+
+def _pixel_pair_nm(pixel_nm):
+    """(x, y, meta) of a pixel size in nm given as a number or a pair (x, y); meta has pixel_nm_y only if non-square."""
+    if isinstance(pixel_nm, (tuple, list)):
+        x, y = float(pixel_nm[0]), float(pixel_nm[1])
+    else:
+        x = y = float(pixel_nm)
+    return x, y, (dict(pixel_nm=x) if x == y else dict(pixel_nm=x, pixel_nm_y=y))
 
 class Dataset:
     """Localization fields (name -> tensor [n, ...]) and metadata."""
@@ -220,11 +230,29 @@ class Dataset:
         return None if v is None else float(v)
 
     @property
+    def pixel_nm_xy(self):
+        """(x, y) camera pixel sizes (nm): meta pixel_nm and pixel_nm_y (= pixel_nm for square pixels); None if
+        unknown."""
+        x = self.pixel_nm
+        if x is None:
+            return None
+        y = self.meta.get('pixel_nm_y')
+        return (x, x if y is None else float(y))
+
+    @property
     def pos_nm(self):
-        """pos in nm (needs meta['pixel_nm'])."""
+        """pos in nm (needs meta['pixel_nm']; x and z use pixel_nm, y uses pixel_nm_y if the pixels are not square)."""
         if self.pixel_nm is None:
             raise ValueError("meta['pixel_nm'] is not set")
-        return self.fields['pos'] * self.pixel_nm
+        return self.fields['pos'] * self._axis_nm(self.fields['pos'])
+
+    def _axis_nm(self, a):
+        """nm per unit of each column of a [n, D] px array (x, y, z): the pixel size, or per axis if non-square."""
+        px, py = self.pixel_nm_xy
+        if py == px:
+            return px
+        s = [px, py, px][:a.shape[1]]
+        return torch.tensor(s, dtype=a.dtype, device=a.device) if torch.is_tensor(a) else np.asarray(s, np.float64)
 
     @property
     def num_frames(self):
@@ -280,7 +308,12 @@ class Dataset:
         if max_px is not None:
             m &= s <= max_px
         if max_nm is not None:
-            m &= s * self.pixel_nm <= max_nm
+            px, py = self.pixel_nm_xy
+            if px == py:
+                m &= s * px <= max_nm
+            else:
+                c = self.fields['crlb'].double()
+                m &= (c * self._axis_nm(c))[:, list(axes)].max(1).values <= max_nm
         return self[m]
 
     def filter_crlb_(self, max_px=None, max_nm=None, axes=(0, 1)):
@@ -414,16 +447,18 @@ class Dataset:
         region (x0, y0, x1, y1) px (default region()); sigma_nm > 0: Gaussian blur (scipy); weights: field name or array.
         return_extent: also (x0, x1, y0, y1) px of the image edges."""
         x0, y0, x1, y1 = self.region() if region is None else region
-        s = (self.pixel_nm or 1.0) / pixel_nm
+        px, py = self.pixel_nm_xy or (1.0, 1.0)
+        s = px / pixel_nm
+        sy = py / pixel_nm                           # = s for square pixels (non-square: square pixels in nm)
         nx = max(int(np.ceil((x1 - x0) * s - 1e-9)), 1)
-        ny = max(int(np.ceil((y1 - y0) * s - 1e-9)), 1)
+        ny = max(int(np.ceil((y1 - y0) * sy - 1e-9)), 1)
         w = self.fields[weights] if isinstance(weights, str) else weights
         p = self.fields['pos'].cpu().numpy()
-        img = np.histogram2d(p[:, 1], p[:, 0], bins=(ny, nx), range=[[y0, y0 + ny / s], [x0, x0 + nx / s]],
+        img = np.histogram2d(p[:, 1], p[:, 0], bins=(ny, nx), range=[[y0, y0 + ny / sy], [x0, x0 + nx / s]],
                              weights=None if w is None else _tensor(w).cpu().numpy())[0].astype(np.float32)
         if sigma_nm > 0:
             img = gaussian_filter(img, sigma_nm / pixel_nm)
-        return (img, (x0, x0 + nx / s, y0, y0 + ny / s)) if return_extent else img
+        return (img, (x0, x0 + nx / s, y0, y0 + ny / sy)) if return_extent else img
 
     def frc(self, block=300, pixel_nm=5.0, return_curve=False, region=None, mask=None):
         """Fourier ring correlation resolution (nm) between the localizations of even and odd blocks of `block` frames:
@@ -442,6 +477,10 @@ class Dataset:
             x0, y0, x1, y1 = region
             sel &= (p[:, 0] >= x0) & (p[:, 0] < x1) & (p[:, 1] >= y0) & (p[:, 1] < y1)
         p, f = p[sel], f[sel]
+        py = self.pixel_nm_xy[1]
+        if py != px:                                 # non-square pixels: y in units of the x pixel (square in nm)
+            p = p.copy()
+            p[:, 1] *= py / px
         h = (f // block) % 2 == 0
         xa, ya, xb, yb = p[h, 0], p[h, 1], p[~h, 0], p[~h, 1]
         s = px / pixel_nm
@@ -476,6 +515,8 @@ class Dataset:
     def info(self):
         R = dict(n=len(self), n_dims=self.n_dims, n_frames=self.num_frames, fields=self.keys(),
                  pixel_nm=self.pixel_nm, drift='applied' if 'drift' in self.meta else 'none')
+        if self.meta.get('pixel_nm_y') is not None:
+            R['pixel_nm_y'] = float(self.meta['pixel_nm_y'])
         for k in ('image_size', 'method', 'region', 'source'):
             if self.meta.get(k) is not None:
                 R[k] = self.meta[k]
@@ -490,7 +531,8 @@ class Dataset:
         I = self.info()
         s = f'Dataset: {I["n"]} localizations, {I["n_dims"]}D, {I["n_frames"]} frames'
         if I['pixel_nm']:
-            s += f', pixel {I["pixel_nm"]:g} nm'
+            s += (f', pixel {I["pixel_nm"]:g} x {I["pixel_nm_y"]:g} nm' if 'pixel_nm_y' in I else
+                  f', pixel {I["pixel_nm"]:g} nm')
         if 'median_crlb_px' in I:
             s += f', median precision {I["median_crlb_px"]:.3f} px'
         if 'median_photons' in I:
@@ -574,6 +616,9 @@ class Dataset:
         n, F = len(self), self.numpy()
         if self.n_dims == 3 and not self.pixel_nm:
             raise ValueError('save_picasso of a 3D Dataset needs meta["pixel_nm"] (Picasso stores z in nm)')
+        if self.pixel_nm and self.pixel_nm_xy[1] != self.pixel_nm:
+            warnings.warn('Picasso assumes square pixels: its Pixelsize is the x pixel size (pixel_nm); the y pixel '
+                          'size (pixel_nm_y) is not stored', UserWarning, stacklevel=2)
         z0 = np.zeros(n, np.float32)
         psx = F.get('psf_sx', np.full(n, psf_sigma_px, np.float32))
         psy = F.get('psf_sy', psx)
@@ -640,20 +685,22 @@ class Dataset:
     def save_csv(self, path, extra=True, frame_base=1, offset_px=0.5):
         """ThunderSTORM csv: "id","frame","x [nm]","y [nm]",("z [nm]",)"intensity [photon]","offset [photon]",
         "uncertainty [nm]","uncertainty_x [nm]","uncertainty_y [nm]" (and "uncertainty_z [nm]"); x [nm] = (x + offset_px)
-        pixel_nm, frame + frame_base. extra: the other 1D fields under their names. Needs meta['pixel_nm']."""
-        px = self.pixel_nm
-        if px is None:
+        pixel_nm (y: pixel_nm_y for non-square pixels), frame + frame_base. extra: the other 1D fields under their names.
+        Needs meta['pixel_nm']."""
+        if self.pixel_nm is None:
             raise ValueError("meta['pixel_nm'] is not set")
+        px, py = self.pixel_nm_xy
         F, n = self.numpy(), len(self)
         z0 = np.zeros(n)
         cr = F['crlb'].astype(np.float64) if 'crlb' in F else np.zeros((n, self.n_dims))
         C = [('id', F['id'], '%d'), ('frame', F['frame'].astype(np.int64) + frame_base, '%d'),
-             ('x [nm]', (F['pos'][:, 0] + offset_px) * px, '%.4f'), ('y [nm]', (F['pos'][:, 1] + offset_px) * px, '%.4f')]
+             ('x [nm]', (F['pos'][:, 0] + offset_px) * px, '%.4f'), ('y [nm]', (F['pos'][:, 1] + offset_px) * py, '%.4f')]
         if self.n_dims == 3:
             C.append(('z [nm]', F['pos'][:, 2] * px, '%.4f'))
         C += [('intensity [photon]', F.get('photons', z0), '%.8g'), ('offset [photon]', F.get('bg', z0), '%.8g'),
-              ('uncertainty [nm]', np.sqrt(0.5 * (cr[:, 0] ** 2 + cr[:, 1] ** 2)) * px, '%.5f'),
-              ('uncertainty_x [nm]', cr[:, 0] * px, '%.5f'), ('uncertainty_y [nm]', cr[:, 1] * px, '%.5f')]
+              ('uncertainty [nm]', np.sqrt(0.5 * (cr[:, 0] ** 2 + cr[:, 1] ** 2)) * px if py == px else
+               np.sqrt(0.5 * ((cr[:, 0] * px) ** 2 + (cr[:, 1] * py) ** 2)), '%.5f'),
+              ('uncertainty_x [nm]', cr[:, 0] * px, '%.5f'), ('uncertainty_y [nm]', cr[:, 1] * py, '%.5f')]
         if self.n_dims == 3:
             C.append(('uncertainty_z [nm]', cr[:, 2] * px, '%.5f'))
         if extra:
@@ -667,14 +714,16 @@ class Dataset:
 
     @classmethod
     def load_csv(cls, path, pixel_nm, frame_base=1, offset_px=0.5):
-        """A ThunderSTORM csv (positions in nm, frames from 1, first pixel centre at 0.5 px) -> Dataset in px."""
+        """A ThunderSTORM csv (positions in nm, frames from 1, first pixel centre at 0.5 px) -> Dataset in px.
+        pixel_nm: a number, or (x, y) for non-square pixels (z in px of x)."""
+        pixel_nm, pixel_y, meta_px = _pixel_pair_nm(pixel_nm)
         with open(path) as f:
             hdr = [h.strip().strip('"') for h in f.readline().strip().split(',')]
         M = np.loadtxt(path, delimiter=',', skiprows=1, ndmin=2)
         R = {h: M[:, i] for i, h in enumerate(hdr)}
         g = lambda *names: next((R.pop(n) for n in names if n in R), None)
         x, y, z = g('x [nm]'), g('y [nm]'), g('z [nm]')
-        pos = [x / pixel_nm - offset_px, y / pixel_nm - offset_px] + ([z / pixel_nm] if z is not None else [])
+        pos = [x / pixel_nm - offset_px, y / pixel_y - offset_px] + ([z / pixel_nm] if z is not None else [])
         F = dict(pos=np.stack(pos, 1), frame=np.round(g('frame')).astype(np.int32) - frame_base)
         ux, uy, u, uz = g('uncertainty_x [nm]'), g('uncertainty_y [nm]'), g('uncertainty [nm]', 'uncertainty_xy [nm]'), \
             g('uncertainty_z [nm]')
@@ -682,7 +731,8 @@ class Dataset:
             ux = uy = u
         if ux is not None:
             F['crlb'] = np.stack([ux, uy] + ([uz] if (z is not None and uz is not None) else
-                                             ([np.zeros_like(ux)] if z is not None else [])), 1) / pixel_nm
+                                             ([np.zeros_like(ux)] if z is not None else [])), 1) / \
+                (pixel_nm if pixel_y == pixel_nm else np.array([pixel_nm, pixel_y, pixel_nm][:2 + (z is not None)]))
         for src, dst in (('intensity [photon]', 'photons'), ('offset [photon]', 'bg'), ('chi2', 'chi2')):
             v = g(src)
             if v is not None:
@@ -692,14 +742,16 @@ class Dataset:
             F['id'] = idv.astype(np.int64)
         for k, v in R.items():
             F[k.split(' [')[0]] = v
-        return cls(F, dict(source=os.path.abspath(str(path)), format='thunderstorm csv', pixel_nm=float(pixel_nm)))
+        return cls(F, dict(source=os.path.abspath(str(path)), format='thunderstorm csv', **meta_px))
 
     @classmethod
     def load_smlm(cls, path, pixel_nm, frame_base=1, offset_px=0.5):
         """A ShareLoc.XYZ .smlm file (zip: manifest.json + a binary table) -> Dataset in px. Positions in nm with the
         ThunderSTORM conventions of most ShareLoc tables (frames from 1, first pixel centre at 0.5 px; override with
         frame_base / offset_px). Columns: x, y (z) -> pos; uncertainty_* -> crlb; intensity_* -> photons; offset_* ->
-        bg; frame, id, chi2; the rest are kept under their names. The first table of the file is read."""
+        bg; frame, id, chi2; the rest are kept under their names. The first table of the file is read. pixel_nm: a
+        number, or (x, y) for non-square pixels."""
+        pixel_nm, pixel_y, meta_px = _pixel_pair_nm(pixel_nm)
         z = zipfile.ZipFile(str(path))
         m = json.loads(z.read('manifest.json'))
         f = next(q for q in m['files'] if q.get('type', 'table') == 'table')
@@ -712,7 +764,7 @@ class Dataset:
         pick = lambda pred: next((R.pop(h) for h in list(R) if pred(h.lower())), None)
         x, y = R.pop('x'), R.pop('y')
         zz = pick(lambda h: h in ('z', 'z_nm', 'z_nm_'))
-        pos = [x / pixel_nm - offset_px, y / pixel_nm - offset_px] + ([zz / pixel_nm] if zz is not None else [])
+        pos = [x / pixel_nm - offset_px, y / pixel_y - offset_px] + ([zz / pixel_nm] if zz is not None else [])
         F = dict(pos=np.stack(pos, 1), frame=np.round(R.pop('frame')).astype(np.int32) - frame_base)
         ux = pick(lambda h: h.startswith('uncertainty_x'))
         uy = pick(lambda h: h.startswith('uncertainty_y'))
@@ -722,7 +774,8 @@ class Dataset:
             ux = uy = u
         if ux is not None:
             F['crlb'] = np.stack([ux, uy] + ([uz if uz is not None else np.zeros_like(ux)] if zz is not None
-                                             else []), 1) / pixel_nm
+                                             else []), 1) / \
+                (pixel_nm if pixel_y == pixel_nm else np.array([pixel_nm, pixel_y, pixel_nm][:2 + (zz is not None)]))
         for pre, dst in (('intensity', 'photons'), ('offset', 'bg')):
             v = pick(lambda h, pre=pre: h.startswith(pre))
             if v is not None:
@@ -731,7 +784,7 @@ class Dataset:
             F['id'] = R.pop('id').astype(np.int64)
         for k, v in R.items():
             F[k.rstrip('_')] = v
-        return cls(F, dict(source=os.path.abspath(str(path)), format='shareloc smlm', pixel_nm=float(pixel_nm)))
+        return cls(F, dict(source=os.path.abspath(str(path)), format='shareloc smlm', **meta_px))
 
 
 def _read_yaml(path):

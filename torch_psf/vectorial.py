@@ -43,10 +43,10 @@ from typing import NamedTuple
 import numpy as np
 import torch
 from torch_psf.zernike import zernike
-from torch_psf.optics import default_device, Optics
+from torch_psf.optics import default_device, Optics, pixel_area, pixel_json, pixel_max, pixel_size, pixel_x, pixel_xy
 from torch_psf.integrate import PixelIntegrator, pixel_integration_mode, spectral_cutoff, uniform_grid
 from torch_psf._dipole import contract_fields
-from torch_psf.psf import PSF, render_with_grad
+from torch_psf.psf import PSF, pixel_version, render_with_grad
 
 
 def _list(v):
@@ -117,7 +117,8 @@ class _Pupil(NamedTuple):
 class VectorialPSF(torch.nn.Module, PSF):
     """Vectorial PSF on a roisize x roisize patch (see the module docstring for the physics).
 
-    Constructor: roisize (px), pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices (Noll), npupil (pupil
+    Constructor: roisize (px), pixel_um (a number, or (x, y) for non-square pixels: positions stay in px of each axis,
+    the image grids and the pixel integral follow both sizes), NA, n_imm, n_med, wavelength_um, zernike_indices (Noll), npupil (pupil
     samples per side), oversample (image samples per px per side), device (default: cuda if available); fit_NA / fit_nmed make NA / n_med trainable.
     focus_um (focal plane position used by render) and z_range (um, the emitter heights the model is meant for).
     pixel_integration: 'exact' (default) | 'midpoint' | 'gauss_legendre' | 'point' (module docstring; an attribute,
@@ -135,7 +136,7 @@ class VectorialPSF(torch.nn.Module, PSF):
                  fit_nmed=False, focus_um=0.0, z_range=(0.0, 1.0), pixel_integration='exact'):
         super().__init__()
         self.roisize = roisize
-        self.pixel_um = pixel_um
+        self.pixel_um = pixel_size(pixel_um)     # a float, or (x, y) for non-square pixels
         self.npupil = npupil
         self.os = oversample
         self.zidx = list(zernike_indices)
@@ -175,8 +176,9 @@ class VectorialPSF(torch.nn.Module, PSF):
         self.register_buffer('pupil_phase', torch.zeros(npupil, npupil, device=self.dev))
         self.register_buffer('pupil_amp', torch.ones(npupil, npupil, device=self.dev))
 
-        # image sample positions (oversampled), relative to the ROI centre, in um
-        self.register_buffer('u', uniform_grid(roisize, oversample, pixel_um, self.dev))
+        # image sample positions (oversampled), relative to the ROI centre, in um (along x; PixelIntegrator makes the
+        # y grid of non-square pixels)
+        self.register_buffer('u', uniform_grid(roisize, oversample, pixel_x(pixel_size(pixel_um, floats=True)), self.dev))
         self.pixel_integration = pixel_integration
 
     @property
@@ -188,8 +190,8 @@ class VectorialPSF(torch.nn.Module, PSF):
         self._pixint = pixel_integration_mode(mode)   # 'exact' raises its sampling grid as needed (PixelIntegrator)
 
     def band_limit(self):
-        """Highest spatial frequency of |E|^2 (cycles / px): 2 NA / lambda * pixel size."""
-        return 2 * float(self.NA.detach()) / self.wavelength_um * self.pixel_um
+        """Highest spatial frequency of |E|^2 (cycles / px): 2 NA / lambda * pixel size (the larger one if non-square)."""
+        return 2 * float(self.NA.detach()) / self.wavelength_um * pixel_max(self.pixel_um)
 
     # ------------------------------------------------------------------ physics
     def pupil_fields(self):
@@ -270,8 +272,9 @@ class VectorialPSF(torch.nn.Module, PSF):
             if zcoef is None:
                 zc = zc + zc * (scale - 1)
         W = (torch.einsum('...j,jnm->...nm', zc, self.Z) + phase) * (2 * math.pi)
-        x = pos[:, 0, None, None] * self.pixel_um
-        y = pos[:, 1, None, None] * self.pixel_um
+        px, py = pixel_xy(self.pixel_um)
+        x = pos[:, 0, None, None] * px
+        y = pos[:, 1, None, None] * py
         ze = pos[:, 2, None, None] if height is None else height.reshape(-1, 1, 1)
         f = focus.reshape(-1, 1, 1) if torch.is_tensor(focus) and focus.ndim > 0 else focus
         ph = torch.exp(1j * (W - kx * x - ky * y - kz_imm * f))
@@ -283,8 +286,9 @@ class VectorialPSF(torch.nn.Module, PSF):
             stage_phase = torch.exp(-1j * kz_imm * stage_um[:, None, None])
             Pb = self._emitter_pupil(P, ph, kz_med, ze, stage_phase)
         kx1, ky1 = kx[0], ky[:, 0]
-        Fx = torch.exp(1j * u[:, None] * kx1[None, :])
-        Fy = torch.exp(1j * u[:, None] * ky1[None, :])
+        ux, uy = u if isinstance(u, tuple) else (u, u)          # image grids along x and y (um)
+        Fx = torch.exp(1j * ux[:, None] * kx1[None, :])
+        Fy = torch.exp(1j * uy[:, None] * ky1[None, :])
         # normalization: Parseval energy of an aberration-free emitter at z = 0 -> sum over the plane = 1
         dk = (kx1[1] - kx1[0]) * (ky1[1] - ky1[0])
         energy = (P.real ** 2 + P.imag ** 2).sum() / 3 * dk / (2 * math.pi) ** 2
@@ -301,7 +305,7 @@ class VectorialPSF(torch.nn.Module, PSF):
             zcoef_offset = self.zcoef[None] * (scale - 1) + (0. if zcoef_offset is None else zcoef_offset * scale)
         if zcoef_offset is not None:
             zc = zc + zcoef_offset
-        pupil = self._pupil(pos, focus, pixels.u, zc)
+        pupil = self._pupil(pos, focus, (pixels.u, pixels.uy), zc)
         return pupil.image_fields(), pupil.amplitude_scale ** 2, pupil.energy
 
     def _image(self, pos, focus, pixels, zcoef_offset=None, dipM=None, dipw=None, *, basis=False):
@@ -314,8 +318,8 @@ class VectorialPSF(torch.nn.Module, PSF):
         I = contract_fields(E.unflatten(1, (3, 2)), M, basis=basis) * scale
         if pixels.mode == 'point':
             # Spline knot coefficients depend on normalizing the point density before the FFT.
-            return pixels(I * self.pixel_um ** 2 / energy)
-        return pixels(I) * self.pixel_um ** 2 / energy
+            return pixels(I * pixel_area(self.pixel_um) / energy)
+        return pixels(I) * pixel_area(self.pixel_um) / energy
 
     def forward(self, pos, focus, zcoef_offset=None, intensity=None, bg=None, blur=None, dipw=None, dipM=None):
         """
@@ -421,7 +425,7 @@ class VectorialPSF(torch.nn.Module, PSF):
 
     # ------------------------------------------------------------------ files
     def format_version(self, source=None):
-        return (0, 2) if self.pixel_integration == 'midpoint' else (0, 3)
+        return pixel_version((0, 2) if self.pixel_integration == 'midpoint' else (0, 3), self.pixel_um)
 
     def _file_dict(self, source=None):
         o = self.optics
@@ -438,7 +442,7 @@ class VectorialPSF(torch.nn.Module, PSF):
             d['psf_dipole_M_angle'] = _list(self.dipM_angle)
         if getattr(self, 'blur_angle', None) is not None:
             d['psf_blur_angle_px2'] = _list(self.blur_angle)
-        d.update(pixelsize_um=o.pixel_um, wavelength_um=o.wavelength_um, NA=o.NA, n_imm=o.n_imm, n_med=o.n_med)
+        d.update(pixelsize_um=pixel_json(o.pixel_um), wavelength_um=o.wavelength_um, NA=o.NA, n_imm=o.n_imm, n_med=o.n_med)
         arrays = {}
         if bool((self.pupil_phase != 0).any()):
             arrays['pupil_phase'] = self.pupil_phase.detach().cpu().numpy()

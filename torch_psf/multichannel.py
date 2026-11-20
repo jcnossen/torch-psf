@@ -46,6 +46,7 @@ from torch_psf.spline import IndexedSplines, SplinePSF
 from torch_psf.psf import PSF
 from torch_psf.fit import lm_poisson, poisson_nll
 from torch_psf.dataset import Dataset
+from torch_psf.optics import pixel_meta, pixel_size, pixel_x
 from torch_psf.vectorial import VectorialPSF
 
 
@@ -524,14 +525,14 @@ class MultiChannelPSF(PSF):
             xy = xy + mc[:, 0].double() + (P - 1) / 2
         elif corners is not None:
             xy = xy + _as_t(corners, self.dev, torch.float64) + (P - 1) / 2
-        px = pixel_um if pixel_um is not None else getattr(self, 'pixel_um', None)
+        px = pixel_size(pixel_um if pixel_um is not None else getattr(self, 'pixel_um', None), floats=True)
         if self.n_dims == 3 and not px:
             raise ValueError(f'{type(self).__name__} has no pixel size: z is stored in px of the lateral pixel size, so '
                              f'pass pixel_um=... or set psf.pixel_um')
         pos, crp = [xy], [sd[:, :2]]
         if self.n_dims == 3:
-            pos.append(th[:, 2:3].double() / px)
-            crp.append(sd[:, 2:3] / px)
+            pos.append(th[:, 2:3].double() / pixel_x(px))        # z in px of the x pixel size
+            crp.append(sd[:, 2:3] / pixel_x(px))
         xm = self.xy_limit - 0.06
         if N and self.mapped:
             lim = self.mapped_positions(th[:, :3], offsets, mc)[0][..., :2].abs().amax((1, 2)) > xm
@@ -551,7 +552,7 @@ class MultiChannelPSF(PSF):
         if N:
             meta['chi2_median'] = float(chi2.median())
         if px:
-            meta['pixel_nm'] = 1000.0 * float(px)
+            meta.update(pixel_meta(px))
         return Dataset(f, meta)
 
     def localize(self, movie, *args, **kwargs):

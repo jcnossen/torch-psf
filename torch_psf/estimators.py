@@ -16,7 +16,7 @@ import numpy as np
 import tifffile
 import torch
 from scipy.ndimage import gaussian_filter, maximum_filter
-from torch_psf.optics import Optics, resolve_device
+from torch_psf.optics import Optics, pixel_x, resolve_device
 from torch_psf.camera import Camera
 from torch_psf.fit import poisson_nll
 from torch_psf.psf import PSF
@@ -115,6 +115,8 @@ class ZStackEstimator(Estimator):
     isolated ones), sign (scan direction), iters, holdout (index of a stack kept out of the fit; its beads are refitted
     (own position / photons / bg, PSF fixed) and their NLL per pixel is reported), drift / drift_order (lateral drift
     of each stack over the planes, a polynomial of this degree; default cubic), fit_dz_scale (fit the z-step scale),
+    fit_aspect (vectorial / spline: fit the pixel aspect py / px of non-square camera pixels at a fixed geometric-mean
+    pixel size; report pixel_aspect, pixel_um; use it with fit_height, see estimation.fit_beads),
     emitter_z_um (starting bead centre height; default bead_diameter_um / 2, else 0), fit_height (fit it),
     bead_diameter_um (finite bead size; with fit_height the diameter is tied to 2 x the fitted height: a bead lies on
     the coverslip), fit_na / fit_n_med / fit_apod (fit NA / the medium index / the radial pupil amplitude apod),
@@ -131,7 +133,7 @@ class ZStackEstimator(Estimator):
                  emitter_z_um=None, bead_diameter_um=None, fit_na=False, fit_n_med=False, fit_apod=False,
                  intensity='free', regularize=3000.0, oversample=2, spline_dz_um=None, xy_limit=3.0,
                  zernike_indices=tuple(range(5, 22)), npupil=64, oversample_pupil=3, device=None, progress=None,
-                 stop=None):
+                 stop=None, fit_aspect=False):
         super().__init__(device, progress, stop)
         if model not in ('vectorial', 'spline', 'astig_gauss'):
             raise ValueError("model: 'vectorial', 'spline' or 'astig_gauss'")
@@ -141,6 +143,7 @@ class ZStackEstimator(Estimator):
         self.fit_dz_scale, self.fit_height, self.bead_diameter_um, self.intensity = (fit_dz_scale, fit_height,
                                                                                      bead_diameter_um, intensity)
         self.drift_order, self.fit_na, self.fit_n_med, self.fit_apod = drift_order, fit_na, fit_n_med, fit_apod
+        self.fit_aspect = fit_aspect
         # starting bead (centre) height: given, else the bead radius (a bead lies on the coverslip), else 0
         self.emitter_z_um = (float(emitter_z_um) if emitter_z_um is not None else
                              0.5 * float(bead_diameter_um) if bead_diameter_um else 0.0)
@@ -191,14 +194,15 @@ class ZStackEstimator(Estimator):
                       drift_order=self.drift_order, weights=w, emitter_z_um=self.emitter_z_um,
                       fit_dz_scale=self.fit_dz_scale, fit_height=self.fit_height,
                       bead_diameter_um=self.bead_diameter_um, intensity=self.intensity,
-                      log=self._log('vectorial'), stop=self.stop)
+                      log=self._log('vectorial'), stop=self.stop, fit_aspect=self.fit_aspect)
         psf = r['psf']
         psf.focus_um = 0.0
         if self.fit_na or self.fit_n_med:
             self.report.update(NA=float(psf.NA), n_med=float(psf.n_med))
         if self.fit_apod:
             self.report['apod'] = psf.apod.detach().cpu().tolist()
-        for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um', 'chi2_median', 'heldout_chi2_median'):
+        for k in ('nll_per_px', 'heldout_nll_per_px', 'dz_scale', 'height_um', 'chi2_median', 'heldout_chi2_median',
+                  'pixel_aspect', 'pixel_um'):
             if k in r['report']:
                 self.report[k] = r['report'][k]
         self.data = dict(rois=d, stack_id=sid, focus_um=focus, xy=r['xy'], photons=r['photons'], bg=r['bg'],
@@ -231,7 +235,7 @@ class ZStackEstimator(Estimator):
         photons / bg; z = -focus."""
         nb, nk, P = d.shape[0], d.shape[1], d.shape[-1]
         o = Optics.from_dict(self.optics) if isinstance(self.optics, dict) else (self.optics or Optics())
-        s0 = 0.21 * o.wavelength_um / o.NA / o.pixel_um * 1.1
+        s0 = 0.21 * o.wavelength_um / o.NA / pixel_x(o.pixel_um) * 1.1
         z = (-focus)[None].expand(nb, -1).reshape(-1)
         lsx = torch.tensor([np.log(s0), np.log(s0)], device=self.dev, requires_grad=True)
         gam = torch.tensor(0.15, device=self.dev, requires_grad=True)

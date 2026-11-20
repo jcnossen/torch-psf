@@ -4,6 +4,7 @@ each model class writes and reads its own parameters); the functions here are th
 PSF json schema (format 'torch-psf', feature versions in docs/PSF_FORMAT.md):
   type            vectorial, spline, integrated_spline, cubic_spline, gaussian, astig_gaussian, fourpi, fourpi_spline
   optics          {pixel_um, NA, wavelength_um, n_imm, n_med}   (also at the top level as pixelsize_um, wavelength_um, ...)
+                  pixel_um is [x, y] for non-square pixels (feature version 0.6), else a number
   zernike_noll, zernike_waves, apod, saf, focus_um, psf_blur_px2, psf_dipole_M, diattenuation, npupil, oversample,
   roisize, z_range_um
   spline          (type spline) {roisize, z_range, oversample, dz_um, zpad, xy_limit, c, z0_um, nz, u0_px, pixel_um};
