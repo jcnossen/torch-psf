@@ -21,7 +21,7 @@ A JSON object. Missing fields take the server's current defaults (`GET /api/defa
 
 | field | type | unit | meaning |
 |---|---|---|---|
-| `model` | `"vectorial"` \| `"spline"` \| `"gaussian"` | | `spline` = CubicSplinePSF built from the vectorial parameters (oversample 2, 20 nm), or the spline loaded with /api/load |
+| `model` | `"vectorial"` \| `"spline"` \| `"gaussian"` | | `spline` = SplinePSF built from the vectorial parameters (oversample 2, 20 nm), or the spline loaded with /api/load |
 | `optics` | object | | `pixel_um`, `NA`, `wavelength_um`, `n_imm`, `n_med` (partial objects are merged with the defaults) |
 | `focus_um` | number | um | focal plane position |
 | `z_um` | number | um | emitter height of the pixel images (/api/render) |

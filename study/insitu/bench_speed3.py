@@ -29,8 +29,8 @@ def one_pass(spl, big, gK):
     """Knot build that keeps the autograd graph, then one backward."""
     prm = {k: v.detach() for k, v in list(big.named_parameters()) + list(big.named_buffers())}
     prm['zcoef'] = prm['zcoef'].clone().requires_grad_(True)
-    K = spl.build_planes(big, prm, 0, spl.nz, C.insitu_pos)
-    return torch.autograd.grad(K, prm['zcoef'], gK.float())[0]
+    K = spl.sample(big, C.insitu_pos, params=prm, chunk=spl.nz, differentiable=True)
+    return torch.autograd.grad(K, prm['zcoef'], gK.reshape_as(K).float())[0]
 
 
 g = torch.Generator(device=C.DEV).manual_seed(9)
@@ -54,7 +54,7 @@ for npupil, osamp in ((64, 3), (128, 4), (256, 6)):
     im = C.render(small, pos, f0, nb=10)
     acc = float(((im - ref).flatten(1).norm(dim=1) / ref.flatten(1).norm(dim=1)).median())
     ch = 4 if npupil < 256 else 1
-    t_build, K = tm(lambda: spl.knots_from_vectorial(big, C.insitu_pos, chunk=ch))
+    t_build, K = tm(lambda: spl.sample(big, C.insitu_pos, chunk=ch))
     spl.knots = K
     acc_spl = float(((spl.render(pos) - im).flatten(1).norm(dim=1) / im.flatten(1).norm(dim=1)).median())
     th, _ = localize(spl, rois)

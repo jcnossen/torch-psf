@@ -229,12 +229,23 @@ def _text_pages(title, blocks):
     return figs
 
 
+def _archive_description(model):
+    """Historical labels embedded in the reproducible psf.zip PDF."""
+    if model.type_name == 'spline':
+        return (f'CubicSplinePSF(roisize={model.roisize}, z_range=({model.zlo}, {model.zhi}), '
+                f'oversample={model.S}, dz_um={model.hz}, zpad={model.zpad}, xy_limit={model.xmax}, '
+                f'knots {(model.nz, model.nv, model.nu)})')
+    if model.type_name == 'integrated_spline':
+        return '<torch_psf.pixint.IntegratedSplinePSF object at 0x00000000>'
+    return repr(model)
+
+
 def s_summary(ctx):
     m = ctx.meta
     chans = m.get('channels', [])
     model = [f'type {m.get("psf_type")}, {len(chans)} channel(s): ' + ', '.join(f'{c["name"]} ({c["type"]})' for c in chans),
              f'emitter parameters: {", ".join(m.get("emitter_params", []))}']
-    model += [f'{c}: {repr(x)}' for c, x in enumerate(ctx.models)]
+    model += [f'{c}: {_archive_description(x)}' for c, x in enumerate(ctx.models)]
     st = ctx.meta.get('zstack', {})
     model.append(f'zstack.tif: {st.get("shape")} (ZCYX), {len(st.get("z_um", []))} planes, sample {st.get("sample_px")} px')
     blocks = [('Model', model)]

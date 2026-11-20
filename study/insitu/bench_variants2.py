@@ -1,7 +1,7 @@
 import sys, time, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
-spl = F.new_spline(); vec = C.make_vec(spl.Pl, 'A', 'insitu'); spl.knots = spl.knots_from_vectorial(vec, C.insitu_pos)
+spl = F.new_spline(); vec = C.make_vec(spl.Pl, 'A', 'insitu'); spl.knots = spl.sample(vec, C.insitu_pos)
 N, NB = 200000, 5000
 g = torch.Generator(device=C.DEV).manual_seed(1)
 P3 = torch.stack([torch.rand(N, generator=g, device=C.DEV) - .5, torch.rand(N, generator=g, device=C.DEV) - .5, 0.05 + 0.7 * torch.rand(N, generator=g, device=C.DEV)], 1)
@@ -9,7 +9,7 @@ resid = torch.randn(N, C.P, C.P, device=C.DEV)
 def ev(self, off, K, mode):
     N, P, S, Lw = off.shape[0], self.roisize, self.S, self.Lw
     tz = ((off[:, 2] - self.z0) / self.hz).clamp(1, self.nz - 2 - 1e-4)
-    t = torch.stack([tz, self.oS0 - off[:, 1] * S, self.oS0 - off[:, 0] * S], 1)
+    t = torch.stack([tz, self.t0 - off[:, 1] * S, self.t0 - off[:, 0] * S], 1)
     ix = torch.floor(t); fr = t - ix; i0 = ix.long() - 1
     base = i0[:, 0] * self.nv * self.nu + i0[:, 1] * self.nu + i0[:, 2]
     idx = base[:, None] + self.pat[None]
@@ -20,7 +20,7 @@ def ev(self, off, K, mode):
     elif mode == 'take':
         sub = torch.take(K, idx)
     elif mode == 'rows':            # gather whole rows of Lw knots: unfold along x gives a view [nz, nv, nu-Lw+1, Lw]
-        rows = K.unfold(2, Lw, 1).reshape(-1, Lw)
+        rows = K.reshape(self.nz, self.nv, self.nu).unfold(2, Lw, 1).reshape(-1, Lw)
         r = torch.arange(4, device=K.device)[:, None] * self.nv + torch.arange(Lw, device=K.device)[None]
         ridx = ((i0[:, 0] * self.nv + i0[:, 1])[:, None, None] + r[None]) * (self.nu - Lw + 1) + i0[:, 2, None, None]
         sub = rows.index_select(0, ridx.reshape(-1))

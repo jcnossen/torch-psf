@@ -86,3 +86,16 @@ def test_psf_zip_bytes(name, models, tmp_path):
     else:
         # On a different writer stack require whole-file reproducibility locally as well.
         assert got == pins.archive_pins(tmp_path / 'again.psf.zip', models[name][0])
+
+    # The exact archive bytes pin the legacy writer. Exercise the reader against
+    # the original rendered pixels and derivatives as well, including field tiles.
+    if name in ('cubic', 'integrated', 'integrated_angle_dipole', 'phase_cubic',
+                'phase_integrated', 'phase_dipole', 'tiles'):
+        from torch_psf import PSF
+        model, kw = models[name]
+        loaded = PSF.load(tmp_path / 'case.psf.zip', device='cpu', angle=getattr(model, 'angle', None))
+        gradients, value = pins.outputs(loaded, kw)
+        expected = REF['cases'][name]
+        check_image(value, expected.get('forward', expected['value']))
+        for key, image in gradients.items():
+            check_image(image, expected[key])

@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 import torch
 from conftest import DEV, needs_gpu
-from torch_psf import VectorialPSF, CubicSplinePSF
-from torch_psf.pixint import (PixelSplinePSF, build_pixel_spline, bspline_prefilter, _kernel,
+from torch_psf import VectorialPSF, SplinePSF
+from torch_psf.spline import (to_spline, bspline_prefilter, _kernel,
                               _dkernel, _qkernel)
 
 
@@ -99,7 +99,7 @@ def test_point_batched_blur_round_trip(tmp_path):
 
 
 def _gauss_spline(S, kernel, integrate, sigma=1.1, R=9):
-    geo = CubicSplinePSF(R, (0.0, 0.2), oversample=S, dz_um=0.05, zpad=2, xy_limit=2.0, device='cpu')
+    geo = SplinePSF(R, (0.0, 0.2), oversample=S, dz_um=0.05, zpad=2, xy_limit=2.0, device='cpu')
     u = geo.u0 + torch.arange(geo.nu, dtype=torch.float64) / S
     if integrate:       # density per px^2
         g1 = torch.exp(-u ** 2 / (2 * sigma ** 2)) / math.sqrt(2 * math.pi * sigma ** 2)
@@ -108,7 +108,9 @@ def _gauss_spline(S, kernel, integrate, sigma=1.1, R=9):
         g1 = Phi(u + 0.5) - Phi(u - 0.5)
     plane = g1[:, None] * g1[None, :]
     samples = plane[None].expand(geo.nz, -1, -1).float().contiguous()
-    return PixelSplinePSF(geo, samples, kernel=kernel, integrate=integrate)
+    knots = bspline_prefilter(samples) if kernel == 'bspline' else samples
+    return SplinePSF(R, geo.z_range, S, geo.hz, geo.zpad, geo.xmax, device='cpu', knots=knots,
+                     kernel=kernel, value='density' if integrate else 'pixel')
 
 
 def _gauss_pixels(pos, sigma=1.1, R=9):
@@ -132,8 +134,8 @@ def test_integrated_spline_gaussian(S):
 
 def test_point_spline_matches_cubicsplinepsf():
     spl = _gauss_spline(3, 'catmull', False)
-    cs = CubicSplinePSF(9, (0.0, 0.2), oversample=3, dz_um=0.05, zpad=2, xy_limit=spl.xmax, device='cpu',
-                        knots=spl.samples, knot_u0_px=spl.geo.u0, knot_z0_um=spl.geo.z0)
+    cs = SplinePSF(9, (0.0, 0.2), oversample=3, dz_um=0.05, zpad=2, xy_limit=spl.xmax, device='cpu',
+                        backend='conv', knots=spl.knots, knot_u0_px=spl.u0, knot_z0_um=spl.z0)
     pos = torch.rand(30, 3) * torch.tensor([1.0, 1.0, 0.2]) - torch.tensor([0.5, 0.5, 0.0])
     a, b = spl.render(pos, grad=True), cs.render(pos, grad=True)
     for x, y in zip(a, b):
@@ -166,7 +168,7 @@ def test_vectorial_integrated_spline_accuracy():
     """integrated B-spline (S = 3) of the vectorial point density vs the exact pixel integral"""
     torch.backends.cudnn.allow_tf32 = False
     vec = _vec(DEV, R=11)
-    spl = build_pixel_spline(vec, 11, (0.0, 0.3), 3, dz_um=0.01, kernel='bspline', integrate=True)
+    spl = to_spline(vec, (0.0, 0.3), roisize=11, oversample=3, dz_um=0.01, kernel='bspline', value='density')
     ref = vec.resized(vec.roisize, oversample=3, pixel_integration='spectral')
     pos = torch.rand(100, 3, device=DEV) * torch.tensor([1.0, 1.0, 0.3], device=DEV) - torch.tensor([0.5, 0.5, 0], device=DEV)
     with torch.no_grad():

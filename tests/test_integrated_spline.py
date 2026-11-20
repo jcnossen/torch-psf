@@ -1,11 +1,11 @@
-"""IntegratedSplinePSF (torch_psf.pixint): the integrated cubic B-spline as a file model (psf.json type
+"""SplinePSF (torch_psf.spline): the integrated cubic B-spline as a file model (psf.json type
 'integrated_spline', docs/PSF_FORMAT.md): accuracy against the exact vectorial model, per-angle coefficient sets, PSF
 json / psf.zip round trips, and refusal by readers that do not know the type."""
 import json
 import numpy as np
 import pytest
 import torch
-from torch_psf import PSF, VectorialPSF, CubicSplinePSF, IntegratedSplinePSF, io, psfzip
+from torch_psf import PSF, VectorialPSF, SplinePSF, to_spline, io, psfzip
 
 
 def _vec(R=11, dip=None):
@@ -33,7 +33,7 @@ def _err(a, b):
 def test_matches_exact_vectorial():
     """max |spline - VectorialPSF 'spectral'| < 5e-5 of the peak over the z range and offsets <= xy_limit, at S = 4"""
     v = _vec()
-    s = IntegratedSplinePSF.from_vectorial(v, (0.0, 0.2), xy_limit=1.5, oversample=4, dz_um=0.01)
+    s = to_spline(v, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.5, oversample=4, dz_um=0.01)
     pos = _pos()
     with torch.no_grad():
         assert _err(s.render(pos), v.render(pos)) < 5e-5
@@ -42,7 +42,7 @@ def test_matches_exact_vectorial():
 
 def test_gradients_and_chunks():
     v = _vec()
-    s = IntegratedSplinePSF.from_vectorial(v, (0.0, 0.2), xy_limit=1.5, oversample=3, dz_um=0.02)
+    s = to_spline(v, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.5, oversample=3, dz_um=0.02)
     pos = _pos(6).double().float()
     val, gx, gy, gz = s.render(pos, grad=True)
     e = 1e-3
@@ -57,7 +57,7 @@ def test_gradients_and_chunks():
 
 def test_angles_mean_and_selection():
     vs = [_vec(dip=d) for d in DIP]
-    s = IntegratedSplinePSF.from_vectorial(vs, (0.0, 0.2), xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(vs, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
     assert s.n_angles == 2 and s.angle is None
     pos = _pos(8, xy=1.0)
     with torch.no_grad():
@@ -71,9 +71,9 @@ def test_angles_mean_and_selection():
 
 
 def test_resized_shares_coefficients():
-    s = IntegratedSplinePSF.from_vectorial(_vec(), (0.0, 0.2), roisize=15, xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', value='density', roisize=15, xy_limit=1.0, oversample=3, dz_um=0.02)
     r = s.resized(7)
-    assert r.coefs is s.coefs and r.roisize == 7 and r.xy_limit > 4          # a smaller ROI: larger offsets
+    assert r.knots is s.knots and r.roisize == 7 and r.xy_limit > 4          # a smaller ROI: larger offsets
     pos = _pos(5, xy=1.0)
     with torch.no_grad():
         assert torch.allclose(r.render(pos), s.render(pos)[:, 4:11, 4:11], atol=1e-7)
@@ -83,7 +83,7 @@ def test_resized_shares_coefficients():
 @pytest.mark.parametrize('kind', ['json', 'zip'])
 def test_round_trip(tmp_path, kind):
     vs = [_vec(dip=d) for d in DIP]
-    s = IntegratedSplinePSF.from_vectorial(vs, (0.0, 0.2), xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(vs, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
     src = _vec(dip=np.mean(DIP, 0).tolist())
     f = tmp_path / ('m.json' if kind == 'json' else 'm.psf.zip')
     if kind == 'json':
@@ -93,10 +93,10 @@ def test_round_trip(tmp_path, kind):
     pos = _pos(6, xy=1.0)
     for a in (None, 0, 1):
         m = PSF.load(f, angle=a, device='cpu')
-        assert type(m) is IntegratedSplinePSF and m.angle == a and m.xy_limit == s.xy_limit
+        assert type(m) is SplinePSF and m.angle == a and m.xy_limit == s.xy_limit
         assert torch.equal(m.render(pos), s.for_angle(a).render(pos))
     assert PSF.load(f, roisize=7, device='cpu').roisize == 7
-    v = IntegratedSplinePSF.load_source(f, device='cpu')
+    v = SplinePSF.load_source(f, device='cpu')
     assert isinstance(v, VectorialPSF) and torch.allclose(v.zcoef, src.zcoef)
     if kind == 'zip':
         meta, arrays = psfzip.read_zip(f)
@@ -109,7 +109,7 @@ def test_round_trip(tmp_path, kind):
 
 
 def test_single_model_round_trip(tmp_path):
-    s = IntegratedSplinePSF.from_vectorial(_vec(), (0.0, 0.2), xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
     f = tmp_path / 'm.psf.zip'
     io.save_zip(f, s)
     meta, _ = psfzip.read_zip(f)
@@ -124,13 +124,12 @@ def test_single_model_round_trip(tmp_path):
 def test_readers_without_the_type_refuse(tmp_path, monkeypatch):
     """A reader that does not know 'integrated_spline' fails loudly: PSF.load / PSFZip.read raise (the type is not
     registered), and the coefficients are not where a 'spline' reader looks (no 'spline' block, no 'knots' array)"""
-    s = IntegratedSplinePSF.from_vectorial(_vec(), (0.0, 0.2), xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
     f = tmp_path / 'm.psf.zip'
     io.save_zip(f, s, source=_vec())
     d, arrays, typ = PSF.read_file(f)
     assert typ == 'integrated_spline'
-    with pytest.raises(KeyError):
-        CubicSplinePSF._from_file(d, arrays)           # a reader that took it for a 'spline' finds no grid / knots
+    assert 'spline' not in d and 'knots' not in arrays
     monkeypatch.delitem(PSF._registry, 'integrated_spline')
     with pytest.raises(ValueError, match='unknown PSF type'):
         PSF.load(f, device='cpu')
@@ -139,7 +138,7 @@ def test_readers_without_the_type_refuse(tmp_path, monkeypatch):
 
 
 def test_unknown_basis_or_arrays_refused(tmp_path):
-    s = IntegratedSplinePSF.from_vectorial(_vec(), (0.0, 0.2), xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
     f = tmp_path / 'm.json'
     d = s.save(f)
     d['integrated_spline']['basis'] = 'quintic_bspline'
@@ -148,13 +147,13 @@ def test_unknown_basis_or_arrays_refused(tmp_path):
         PSF.load(f, device='cpu')
     d['integrated_spline']['basis'] = 'cubic_bspline'
     f.write_text(json.dumps(d))
-    np.savez(tmp_path / 'm.npz', coefs=s.coefs.numpy(), coefs_angle=s.coefs.numpy()[None])
+    np.savez(tmp_path / 'm.npz', coefs=s.knots[0].numpy(), coefs_angle=s.knots[0].numpy()[None])
     with pytest.raises(ValueError, match='exactly one'):
         PSF.load(f, device='cpu')
 
 
 def test_old_spline_files_unchanged(tmp_path):
-    """the 'spline' type is written and read as before (CubicSplinePSF, knots)"""
+    """the 'spline' type is written and read as before (SplinePSF, knots)"""
     v = _vec()
     spl = v.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, xy_limit=2.0)
     f = tmp_path / 's.psf.zip'
@@ -164,7 +163,7 @@ def test_old_spline_files_unchanged(tmp_path):
     assert ch['type'] == 'spline' and set(ch['arrays']) == {'knots'} and 'basis' not in ch['model']['spline']
     m = PSF.load(f, device='cpu')
     pos = _pos(4, xy=1.0)
-    assert type(m) is CubicSplinePSF and torch.equal(m.render(pos), spl.render(pos))
+    assert type(m) is SplinePSF and torch.equal(m.render(pos), spl.render(pos))
 
 
 def test_convert_calibration_integrated_spline(tmp_path):
@@ -195,7 +194,7 @@ def test_zip_version(tmp_path, monkeypatch):
     by a 0.2-only reader; 'box' files stay 0.2.0"""
     box = VectorialPSF(11, npupil=32, oversample=2, device='cpu', focus_um=0.2, z_range=(0.0, 0.3))
     cases = dict(box=(box, None, '0.2.0'), spectral=(_vec(), None, '0.3.0'),
-                 spline=(IntegratedSplinePSF.from_vectorial(box, (0.0, 0.2), xy_limit=1.0, oversample=3, dz_um=0.02),
+                 spline=(to_spline(box, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02),
                          box, '0.3.0'),
                  box_spline=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05), box, '0.2.0'),
                  spectral_source=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05), _vec(), '0.3.0'))

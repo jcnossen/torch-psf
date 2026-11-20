@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 from conftest import DEV, needs_gpu
-from torch_psf import VectorialPSF, CubicSplinePSF, PSF, io
+from torch_psf import VectorialPSF, SplinePSF, PSF, io
 from torch_psf.field import FieldZernikes, FieldPSF, TiledSplinePSF, field_from_spec, feature_powers
 from torch_psf.psfzip import PSFZip, FieldZernikePoly, poly_features
 from torch_psf.estimation import fit_field_knots, compare_heldout, stage_focus
@@ -117,7 +117,7 @@ def test_field_psf_render_fit_and_zip(tmp_path):
 
 @torch.no_grad()
 def test_integrated_field_tiles_and_channels(tmp_path, monkeypatch):
-    from torch_psf import ChannelsPSF, IntegratedSplinePSF, psfzip
+    from torch_psf import ChannelsPSF, SplinePSF, psfzip
 
     fp = FieldPSF(vec(11, pixel_integration='spectral'), field())
     tiles = fp.to_tiled(tile=128, z_range=(.2, .3), xy_limit=1)
@@ -134,7 +134,7 @@ def test_integrated_field_tiles_and_channels(tmp_path, monkeypatch):
     path = tmp_path / 'tiles.zip'
     assert io.save_zip(path, tiles, zstack_planes=3)['version'] == '0.4.0'
     loaded = PSF.load(path, device=DEV)
-    assert isinstance(loaded.reference_spline(), IntegratedSplinePSF)
+    assert isinstance(loaded.reference_spline(), SplinePSF)
     torch.testing.assert_close(loaded.render(pos, xy=xy), expected)
     models = [tiles.spline(0), tiles.spline(3)]
     channels = ChannelsPSF(models)
@@ -191,7 +191,7 @@ def test_fit_field_knots_recovers_a_linear_field():
         rois = torch.poisson(3000 * torch.cat([fp.render(pos[s:s + 1000], xy=xy[s:s + 1000])
                                                for s in range(0, N, 1000)]) + 10)
     start = FieldZernikes([5, 6], order=1, norm=(128.0, 128.0, 128.0, 128.0), device=DEV)
-    spl = CubicSplinePSF(11, (0.0, 0.6), device=DEV, oversample=2, dz_um=0.04, zpad=3, xy_limit=2.0)
+    spl = SplinePSF(11, (0.0, 0.6), device=DEV, oversample=2, dz_um=0.04, zpad=3, xy_limit=2.0)
     r = fit_field_knots(spl, rois, xy, v, start, tile=128, iters=25, lr=5e-3)
     assert r['report']['n_tiles'] == 4 and sorted(r['tile_counts']) and sum(r['tile_counts']) == N
     c = r['psf'].field.coef.detach().cpu().numpy()

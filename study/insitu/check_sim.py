@@ -1,7 +1,7 @@
 import time, torch, sys
 sys.path.insert(0, 'study/insitu')
 import common as C
-from torch_psf import CubicSplinePSF
+from torch_psf import SplinePSF
 from torch_psf.fit import localize, crlb
 t=time.time()
 movie, truth = C.sim_movie('A', T=2000)
@@ -10,8 +10,8 @@ t=time.time()
 rois, fr, cor = C.detect_crop(movie)
 print('detected', len(rois), f'{time.time()-t:.1f}s')
 # truth spline
-spl = CubicSplinePSF(C.P, C.ZR, oversample=2, dz_um=0.04, xy_limit=1.5, device=C.DEV)
-spl.knots = spl.knots_from_vectorial(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
+spl = SplinePSF(C.P, C.ZR, oversample=2, dz_um=0.04, xy_limit=1.5, device=C.DEV)
+spl.knots = spl.sample(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
 t=time.time()
 th, nll = localize(spl, rois)
 torch.cuda.synchronize(); print('localize', f'{time.time()-t:.1f}s')

@@ -5,7 +5,7 @@
     psf.render(pos, xy=field_xy)                      # every emitter at its own field position (camera px)
     psf.at(x, y)                                      # a VectorialPSF at one field point
     ds = psf.fit(rois, corners=corners)               # localization: each ROI with the PSF at its centre
-    tiled = psf.to_tiled(tile=128, roisize=15)        # fast form: one CubicSplinePSF per tile, picked by position
+    tiled = psf.to_tiled(tile=128, roisize=15)        # fast form: one SplinePSF per tile, picked by position
     io.save_zip('psf.zip', psf); PSF.load('psf.zip')  # the psf.zip 'zernike_poly' field block (docs/PSF_FORMAT.md)
 
 Field model (FieldZernikes): for each Noll index j of `noll` with order o_j (0, 1 or 2)
@@ -33,7 +33,7 @@ File form (psf.zip channel `field`, unchanged format): {"type": "zernike_poly", 
 "reference_point"}. Per-mode orders are not a key of the block: they are the zero pattern of coef (from_block infers
 them).
 
-The tiled spline form (TiledSplinePSF): the field box split into tiles of `tile` px; per tile a CubicSplinePSF built
+The tiled spline form (TiledSplinePSF): the field box split into tiles of `tile` px; per tile a SplinePSF built
 from the Zernikes at the tile centre (lazily, on first use); a spot uses the tile that holds its field position.
 """
 import math
@@ -383,7 +383,7 @@ class FieldPSF(PSF):
         return self
 
     def to_spline(self, *a, **kw):
-        """the CubicSplinePSF of the model at the reference point (VectorialPSF.to_spline); to_tiled for the field
+        """the SplinePSF of the model at the reference point (VectorialPSF.to_spline); to_tiled for the field
         dependence"""
         return self.base.to_spline(*a, **kw)
 
@@ -407,7 +407,7 @@ class FieldPSF(PSF):
 
 class TiledSplinePSF(PSF):
     """The tiled spline form of a FieldPSF: the extent (x0, y0, x1, y1) px split into tiles of `tile` px, per tile a
-    CubicSplinePSF (roisize, z_range, grid: oversample, dz_um, zpad, xy_limit) of the vectorial model at the tile
+    SplinePSF (roisize, z_range, grid: oversample, dz_um, zpad, xy_limit) of the vectorial model at the tile
     centre, built on first use (lazy) or at once. A spot uses the tile that holds its field position (positions
     outside the extent use the nearest tile).
 
@@ -461,10 +461,7 @@ class TiledSplinePSF(PSF):
         return iy * self.nx + ix
 
     def _build(self, vec):
-        if self.kind == 'integrated':
-            from torch_psf.pixint import IntegratedSplinePSF
-            return IntegratedSplinePSF.from_vectorial(vec, self._zr, roisize=self.roisize, **self.grid)
-        return vec.to_spline(self.roisize, self._zr, **self.grid)
+        return vec.to_spline(self.roisize, self._zr, kind=self.kind, **self.grid)
 
     def spline(self, t):
         """The spline at the centre of tile t."""
@@ -608,6 +605,8 @@ def field_psf_from_file(model, source, block, arrays=None, crop=None, tiles=None
                           oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
                           roisize=g['roisize'], z_range=tuple(g['z_range']))
     t = dict(tiles or {})
+    if 'backend' in g:
+        fp.spline_grid['backend'] = g['backend']
     if g.get('dipole_components'):
         fp.spline_grid['dipole_components'] = True
     tp = fp.to_tiled(tile=t.get('tile_px', 128), extent=t.get('extent'))

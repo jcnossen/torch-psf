@@ -26,7 +26,7 @@ def sync_time(fn, rep=3):
 
 def routes(zc, d, th, names=('zcoef',)):
     big, small = C.model_vec(spl.Pl, zc), C.model_vec(C.P, zc)
-    spl.knots = spl.knots_from_vectorial(big, C.insitu_pos)
+    spl.knots = spl.sample(big, C.insitu_pos)
     gK, _ = F.knot_grad(spl, d, th)
     gk = spl.vjp_vectorial(big, C.insitu_pos, gK, names=names)
     # route V for all named parameters (buffers included)
@@ -103,7 +103,7 @@ del test
 print('== (c) route V cost per emitter (64 pupil, oversampling 3, 15 px), interleaved with the knot gradient')
 rois = torch.load('study/insitu/out_dev_A.pt', weights_only=False)['rois'].to(C.DEV)[:N]
 big = C.model_vec(spl.Pl, zs); small = C.model_vec(C.P, zs)
-spl.knots = spl.knots_from_vectorial(big, C.insitu_pos)
+spl.knots = spl.sample(big, C.insitu_pos)
 th, _ = localize(spl, rois)
 
 
@@ -145,7 +145,7 @@ for rnd in range(2):
                      ('V fast, fp32', lambda: vec_grad_fast(small, rois, th)),
                      ('K knot gradient', lambda: F.knot_grad(spl, rois, th)),
                      ('K vjp (fixed)', lambda: spl.vjp_vectorial(big, C.insitu_pos, F.knot_grad(spl, rois, th)[0])),
-                     ('K build (fixed)', lambda: spl.knots_from_vectorial(big, C.insitu_pos)),
+                     ('K build (fixed)', lambda: spl.sample(big, C.insitu_pos)),
                      ('localize 3 its (both)', lambda: localize(spl, rois, th, iters=3))):
         tt, _ = sync_time(fn, rep=2)
         res.setdefault(name, []).append(tt)

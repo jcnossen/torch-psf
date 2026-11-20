@@ -2,9 +2,7 @@
 
 The PSF is the main object: PSF (base class) with render, expected, fisher / crlb, fit (ROIs -> localizations),
 localize (movie -> localizations), save / PSF.load (also psf.zip: io.save_zip, docs/PSF_FORMAT.md) and to_spline;
-the models VectorialPSF, CubicSplinePSF,
-IntegratedSplinePSF (torch_psf.pixint: the integrated cubic B-spline of point samples of a vectorial model, exact pixel
-integral; psf.json type 'integrated_spline'), GaussianPSF and AstigmaticGaussianPSF, and the multi-channel models (MultiChannelPSF, torch_psf.multichannel; images
+the models VectorialPSF, SplinePSF (pixel and density tables), GaussianPSF and AstigmaticGaussianPSF, and the multi-channel models (MultiChannelPSF, torch_psf.multichannel; images
 [N, C, P, P], fit / crlb on all channels jointly): ChannelsPSF (independent channels) and the coherent 4Pi models
 FourPiPSF and FourPiSplinePSF (torch_psf.fourpi), and the field-dependent models (torch_psf.field: FieldZernikes, a
 polynomial of the field position per Zernike; FieldPSF, a VectorialPSF with it; TiledSplinePSF, its tiled spline
@@ -38,8 +36,7 @@ from torch_psf.camera import Camera, photon_transfer
 from torch_psf.movie import open_movie
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import CubicSplinePSF
-from torch_psf.pixint import IntegratedSplinePSF
+from torch_psf.spline import SplinePSF, to_spline
 from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
 from torch_psf.multichannel import MultiChannelPSF, ChannelsPSF
 from torch_psf.fourpi import FourPiPSF, FourPiSplinePSF
@@ -53,3 +50,4 @@ from torch_psf.multichannel_estimator import MultiChannelBeadEstimator
 from torch_psf.sofi import SOFIEstimator
 from torch_psf.dataset import Dataset, Drift
 from torch_psf import fit, estimation, simulate, spots, detect, io, zernike, optics, camera   # noqa: F401
+from torch_psf.psfzip import convert_calibration, is_psf_zip, save_zip

@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from torch_psf import ChannelsPSF, FourPiPSF, PSF
 from torch_psf import fit
-from torch_psf.pixint import build_pixel_spline
+from torch_psf.spline import to_spline
 
 OUT = Path(__file__).resolve().parent / 'out'
 MODEL = Path('C:/dev/simcode2-inspect/models/m1809/calib_1809_2_psf_v2.psf.zip')
@@ -115,7 +115,7 @@ def positions(n):
 def model(ref, name, s):
     if name in ('bs_int', 'cr_int'):
         # The five-tap integral at S=1 needs another pixel of lateral padding.
-        m = build_pixel_spline(ref, P, ZR, s, DZ, zpad=6, xy_limit=XL + (s == 1),
+        m = to_spline(ref, ZR, roisize=P, oversample=s, dz_um=DZ, value='density', zpad=6, xy_limit=XL + (s == 1),
                                kernel='bspline' if name == 'bs_int' else 'catmull', chunk=2)
         assert m.xmax >= XL
         m.xmax = XL

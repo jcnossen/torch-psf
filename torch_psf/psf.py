@@ -282,9 +282,9 @@ class PSF:
     @staticmethod
     def _has_angle_terms(psf):
         """True if the model has per-pattern-angle terms that PSF.load(angle=a) selects: VectorialPSF psf_dipole_M_angle /
-        psf_blur_angle_px2, IntegratedSplinePSF coefs_angle."""
+        psf_blur_angle_px2, SplinePSF coefs_angle."""
         return bool(getattr(psf, 'n_angles', 0)) or any(getattr(psf, k, None) is not None
-                                                        for k in ('dipM_angle', 'blur_angle', 'coefs_angle'))
+                                                        for k in ('dipM_angle', 'blur_angle'))
 
     @staticmethod
     def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
@@ -320,15 +320,9 @@ class PSF:
         return psf
 
     # ------------------------------------------------------------------ cubic spline
-    def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8):
-        """Tabulate the model as a CubicSplinePSF for roisize x roisize ROIs over z_range (um; default the model's
-        z range): knots every 1/oversample px and dz_um um, offsets up to xy_limit px. The model is rendered on the
-        larger ROI the knots need, at oversample x oversample sub-pixel shifts."""
-        CubicSplinePSF = PSF._registry['spline']
-        if self.n_dims == 2 and z_range is None:
-            raise ValueError('a 2D model has no z range: pass z_range (the spline is then constant in z)')
-        zr = self.z_range if z_range is None else z_range
-        spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
-                                 xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
-        spl.knots = spl.knots_from_model(self if self.roisize == spl.Pl else self.resized(spl.Pl), chunk=chunk)
-        return spl
+    def to_spline(self, roisize=None, z_range=None, **grid):
+        """Sample the optical model on a regular spline grid (see torch_psf.to_spline)."""
+        from torch_psf.spline import _tabulate
+        # Historical method calls without a kernel keep the file model's arithmetic.
+        grid.setdefault('backend', None)
+        return _tabulate(self, z_range, roisize=roisize, **grid)

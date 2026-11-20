@@ -317,7 +317,8 @@ def _rebuild_knots(meta, g, device=None):
     src_psf = FourPiPSF._from_file(src['model'], {}, device=device or reb.get('device'))
     sp = src_psf.to_spline(roisize=g['roisize'], z_range=tuple(g['z_range']), oversample=g['oversample'],
                            dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
-                           kind='integrated' if 'basis' in g else 'cubic', dipole_components=g.get('dipole_components', False))
+                           kind='integrated' if 'basis' in g else 'cubic', dipole_components=g.get('dipole_components', False),
+                           backend=g.get('backend'))
     return sp._stored_tables().detach().cpu().numpy().astype(np.float32)
 
 
@@ -650,7 +651,7 @@ def _channel_blocks(psf, source, names, spline_knots='float32'):
             raise ValueError("spline_knots='rebuild' needs the FourPiPSF source (source=, or a spline from to_spline)")
         chans = []
         for c in range(psf.n_channels):
-            g = dict(psf.luts[0][c].to_dict(), pixel_um=psf.pixel_um)
+            g = dict(psf.table.to_dict(), pixel_um=psf.pixel_um)
             if psf.default_dipM is not None:
                 g['default_dipM'] = psf.default_dipM
             grid_key = 'integrated_spline' if 'basis' in g else 'spline'
@@ -663,8 +664,7 @@ def _channel_blocks(psf, source, names, spline_knots='float32'):
                 members = {k: f'{names(c)}/{k}.npy' for k in _phase_arrays(g)}
                 dt = np.float16 if spline_knots == 'float16' else np.float32
                 for comp, k in enumerate(members):
-                    lut = psf.luts[comp][c]
-                    table = lut.dipole_knots if psf.dipole_components else lut.knots
+                    table = psf._stored_tables()[comp, c]
                     arrays[members[k]] = table.detach().cpu().numpy().astype(dt)
                 ch['arrays'] = members
             chans.append(ch)
@@ -939,7 +939,7 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
     optics also when the model does not use them (Gaussian); PSF-model keys the model does not use go to
     provenance['unused_model_keys']. Values of the model / optics / camera blocks that equal a value of the json at
     float32 precision are written as in the json. Paths in the json (maps, arrays) resolve against the json's folder.
-    integrated_spline: None, or a dict of IntegratedSplinePSF.from_vectorial options (z_range required; roisize,
+    integrated_spline: None, or a dict of to_spline options (z_range required; roisize,
     xy_limit, oversample, dz_um, zpad): channel 0 is then the integrated cubic B-spline of the calibration's vectorial
     model (type 'integrated_spline', one coefficient set per pattern angle when the json has per-angle terms), with
     the vectorial model as its source (the calibration keys are kept there). kw: passed to save_zip. Returns the
@@ -1001,8 +1001,8 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
             meta['camera'] = _prefer(meta['camera'], ocam, top=True)
     model, source = psf, None
     if integrated_spline is not None:
-        from torch_psf.pixint import IntegratedSplinePSF
-        opts = dict(integrated_spline)
+        from torch_psf.spline import to_spline
+        opts = dict(kernel='bspline', value='density') | dict(integrated_spline)
         n_ang = max((len(orig[k]) for k in ('psf_dipole_M_angle', 'psf_blur_angle_px2') if orig.get(k) is not None),
                     default=0)
         os.chdir(os.path.dirname(json_path))
@@ -1010,7 +1010,7 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
             vecs = [io.load(json_path, roisize=roisize, device=device, angle=a) for a in range(n_ang)] if n_ang else psf
         finally:
             os.chdir(cwd)
-        model, source = IntegratedSplinePSF.from_vectorial(vecs, **opts), psf
+        model, source = to_spline(vecs, **opts), psf
     meta = save_zip(out_path, model, camera=cam, provenance=prov, patterns=patterns, acquisition=rest or None,
                     optics=optics, source=source, _meta_hook=hook, **kw)
     return meta

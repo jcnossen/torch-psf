@@ -39,8 +39,8 @@ psf.save('insitu.json')
 
 - Model Zernike aberrations, pupil maps and per-pattern-angle dipole emission and blur with `tp.VectorialPSF`.
 - Render pixel-integrated 2D and astigmatic 3D Gaussians with `tp.GaussianPSF` and `tp.AstigmaticGaussianPSF`.
-- Build a 3D cubic spline from a model with `psf.to_spline` or from measured planes with `tp.CubicSplinePSF.from_zstack`.
-- Integrate a cubic B-spline over each pixel with `tp.IntegratedSplinePSF`, optionally using coefficients per angle.
+- Build a 3D cubic spline from a model with `psf.to_spline` or from measured planes with `tp.SplinePSF.from_zstack`.
+- Integrate a cubic B-spline over each pixel with `tp.to_spline(model, kernel='bspline', value='density', **grid)`, optionally using coefficients per angle.
 - Fit multiple channels jointly with `tp.ChannelsPSF`.
 - Model two-objective interference with `tp.FourPiPSF` or its spline form, `tp.FourPiSplinePSF`.
 - Integrate exactly over each pixel (spectral or Gauss-Legendre) in vectorial, 4Pi and field-dependent models.
@@ -160,7 +160,7 @@ python -m torch_psf localize movie.tif --psf insitu.json --gain 0.5 --offset 100
 ```
 
 **A spline directly from a measured z-stack** ([examples/zstack_spline.py](examples/zstack_spline.py)):
-`tp.CubicSplinePSF.from_zstack(stack, z0_um, dz_um, roisize)` uses the stack planes as knots.
+`tp.SplinePSF.from_zstack(stack, z0_um, dz_um, roisize)` uses the stack planes as knots.
 
 **Look at a PSF**: `python -m torch_psf view [psf.json]` starts a viewer on localhost (3D isosurfaces and slice planes,
 pixel images, gradients, CRLB vs z; API in [docs/VIEWER_API.md](docs/VIEWER_API.md)). The page itself is built from
@@ -177,7 +177,7 @@ the `web/` project (`scripts/build_viewer.sh`).
 |---|---|
 | `vectorial.py` | `VectorialPSF`: dipole emission with Fresnel transmission and supercritical-angle fluorescence, refractive-index mismatch, Zernike aberrations (also per emitter), free pupil phase / amplitude maps, image-plane (line) blur, emission-dipole tensor (photoselection), diattenuation; chirp-z transform to an oversampled grid and pixel integration. |
 | `psf.py` | `PSF`: the base class (statistics, fitting, localization, files, to_spline). |
-| `spline.py` | `CubicSplinePSF`: Catmull-Rom (cubic) knots on a grid `oversample` times finer than the pixels; `render` (value and derivatives from one conv2d), knots from a vectorial model, the vector-Jacobian product back to its parameters, `from_zstack`. |
+| `spline.py` | `SplinePSF` and `to_spline`. Table-indexed Catmull-Rom and B-spline evaluation, analytic position gradients, optical VJPs and measured z-stacks. |
 | `gaussian.py` | `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D), pixel-integrated; `fit_gaussian_free_sigma`: spot fit with a free width (x, y, photons, bg, sigma; CRLB, chi2) for spot finding and width / chi2 filters. |
 | `fourpi.py` | `FourPiPSF` renders coherent two-objective interference channels with midpoint or exact spectral pixel integration. `FourPiSplinePSF` preserves analytic phase dependence with cubic pixel-value tables or integrated density splines. |
 | `zernike.py` | Zernike polynomials (Noll index and normalization). |

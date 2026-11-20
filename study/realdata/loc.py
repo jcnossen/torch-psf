@@ -14,7 +14,7 @@ usage: python loc.py --spline psf_spline.pt --gain 10.9 --offset 295 --out locs.
 import sys, time, argparse, json, math
 import numpy as np, torch, tifffile
 sys.path.insert(0, '.')
-from torch_psf import CubicSplinePSF
+from torch_psf import SplinePSF
 from torch_psf.fit import crlb as crlb_psf
 from torch_psf.fit import lm_poisson, model_and_jacobian
 from rdcommon import transfer_knots, DEV
@@ -41,7 +41,7 @@ P, h = A.P, A.P // 2
 
 # ------------------------------------------------------------------------------------------------ spline
 cal = torch.load(A.spline)
-spl = CubicSplinePSF(P, (cal['zlo'], cal['zhi']), oversample=cal['S'], dz_um=cal['hz'], zpad=cal['zpad'], xy_limit=A.xmax, device=DEV)
+spl = SplinePSF(P, (cal['zlo'], cal['zhi']), oversample=cal['S'], dz_um=cal['hz'], zpad=cal['zpad'], xy_limit=A.xmax, device=DEV)
 assert spl.nz == cal['nz'] and abs(spl.z0 - cal['z0']) < 1e-9
 spl.knots = transfer_knots(cal['knots'].to(DEV), cal['c'], spl.c, cal['S'])
 ZLO, ZHI = -A.zlim, A.zlim

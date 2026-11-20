@@ -34,7 +34,7 @@ import torch_psf.estimation.knots as _knots              # noqa: E402
 import torch_psf.estimation.heldout as _heldout          # noqa: E402
 from torch_psf.fit import localize as _localize          # noqa: E402
 from torch_psf.vectorial import VectorialPSF             # noqa: E402
-from torch_psf.spline import CubicSplinePSF              # noqa: E402
+from torch_psf.spline import SplinePSF              # noqa: E402
 from torch_psf.estimation import fit_zernike_knots, spot_deviance, split_checkerboard   # noqa: E402
 
 ZSTARTS = 9
@@ -67,7 +67,7 @@ class Fitter:
 
     def fit(self, v0, rois, var, iters):
         """fit_zernike_knots, overlap rejection, refit; returns (vectorial, report)"""
-        spl = CubicSplinePSF(self.a.roisize, self.zr, device=self.dev, **self.grid)
+        spl = SplinePSF(self.a.roisize, self.zr, device=self.dev, **self.grid)
         r = fit_zernike_knots(spl, rois, v0, iters=iters, lr=self.a.lr, var=var)
         v = r['psf']
         dv, _ = spot_deviance(self.spline(v), rois, var)

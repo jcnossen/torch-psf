@@ -1,7 +1,7 @@
-"""CubicSplinePSF: accuracy against the vectorial model, derivatives, knot gradient, z-stacks."""
+"""SplinePSF: accuracy against the vectorial model, derivatives, knot gradient, z-stacks."""
 import torch
 from conftest import DEV
-from torch_psf import VectorialPSF, CubicSplinePSF, GaussianPSF, AstigmaticGaussianPSF
+from torch_psf import VectorialPSF, SplinePSF, GaussianPSF, AstigmaticGaussianPSF
 
 
 def test_spline_matches_vectorial():
@@ -32,7 +32,7 @@ def test_spline_derivatives():
 
 
 def test_knot_gradient_matches_reference_indexing():
-    spl = CubicSplinePSF(11, (0.0, 0.5), device=DEV)
+    spl = SplinePSF(11, (0.0, 0.5), device=DEV)
     spl.knots = torch.rand_like(spl.knots)
     pos = torch.rand(20, 3, device=DEV) * torch.tensor([1.0, 1.0, 0.5], device=DEV) - torch.tensor([0.5, 0.5, 0], device=DEV)
     w = torch.randn(20, 11, 11, device=DEV)
@@ -53,7 +53,7 @@ def test_from_zstack_reproduces_the_stack_at_grid_points():
     g = AstigmaticGaussianPSF(21, sigma_px=1.5, gamma_um=0.2, d_um=0.4, z_range=(-0.5, 0.5), device='cpu')
     zs = torch.linspace(-0.5, 0.5, 21)
     stack = g.render(torch.stack([torch.zeros(21), torch.zeros(21), zs], 1))
-    spl = CubicSplinePSF.from_zstack(stack, z0_um=-0.5, dz_um=0.05, roisize=11)
+    spl = SplinePSF.from_zstack(stack, z0_um=-0.5, dz_um=0.05, roisize=11)
     pos = torch.tensor([[0.0, 0.0, 0.0], [1.0, -1.0, 0.1]])
     a = spl.render(pos)
     c = (21 - 11) // 2
@@ -71,7 +71,7 @@ def test_even_roi_and_wrapped_knots():
     b = even.render(pos + torch.tensor([0.5, 0.5, 0.0], device=DEV))
     assert torch.allclose(b[:, 1:16, 1:16], a, atol=1e-6)
     # wrap the stored knots with an explicit origin and z origin: identical images
-    w = CubicSplinePSF(15, odd.z_range, oversample=odd.S, dz_um=odd.hz, knots=odd.knots, knot_u0_px=odd.u0,
+    w = SplinePSF(15, odd.z_range, oversample=odd.S, dz_um=odd.hz, backend=odd.backend, knots=odd.knots, knot_u0_px=odd.u0,
                            knot_z0_um=odd.z0, device=DEV)
     assert torch.equal(w.render(pos), a) and w.xmax == odd.xmax
 

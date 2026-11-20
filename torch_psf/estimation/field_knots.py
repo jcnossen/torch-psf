@@ -3,7 +3,7 @@
 The field model (torch_psf.field.FieldZernikes) gives every emitter the Zernikes base + poly(x, y). The knot route
 needs one spline per PSF, so the field is split into tiles: per tile t one spline is built from the Zernikes at the
 tile's centre c_t (the mean field position of its spots), its spots are localized on it, and the knot gradient of
-their NLL is passed to the Zernikes by one VJP through the knot build (CubicSplinePSF.vjp_vectorial):
+their NLL is passed to the Zernikes by one VJP through the knot build (SplinePSF.vjp_vectorial):
 
     g_t = d NLL_t / d zcoef   at  zcoef_t = base + field(c_t)
     d NLL / d base = sum_t g_t,     d NLL / d coef = sum_t g_t . d field(c_t) / d coef     (+ the ridge prior)
@@ -86,7 +86,7 @@ def fit_field_knots(spline, rois, xy, vectorial, field, tile=256.0, extent=None,
                     log=None, stop=None):
     """Joint in-situ fit of the base Zernikes of `vectorial` and the field polynomial `field` (FieldZernikes; its
     modes must be modes of the model) from SMLM ROIs [N, P, P] (photons) at field positions xy [N, 2] (camera px,
-    e.g. the ROI centres). spline: CubicSplinePSF that defines the knot grid (roisize P; its knots are overwritten).
+    e.g. the ROI centres). spline: SplinePSF that defines the knot grid (roisize P; its knots are overwritten).
     tile (px) / extent: the tile grid (tile_assign; default extent = the field box of `field`); tiles with fewer than
     min_spots spots are merged into the nearest kept tile. lr / lr_field (default lr): Adam steps (waves) of the base
     and of the polynomial coefficients; fit_base: also fit the base (the constant terms). loc_iters / zstarts: the
@@ -144,7 +144,7 @@ def fit_field_knots(spline, rois, xy, vectorial, field, tile=256.0, extent=None,
             it_ = torch.as_tensor(ii, device=dev)
             with torch.no_grad():
                 big.zcoef.copy_(zc + off[k])
-            spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=spl.nz)
+            spl.knots = spl.sample(big, pos_fn, chunk=spl.nz)
             dt, vt = d[it_], _sub(var, ii)
             if first:
                 tt, nl = localize(spl, dt, None, var=vt, iters=30, zstarts=zstarts)

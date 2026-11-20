@@ -6,7 +6,7 @@ import common as C, fit as F
 from torch_psf.fit import localize
 for scn in 'AB':
     spl = F.new_spline()
-    Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+    Ktrue = spl.sample(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
     test = C.sim_test(scn, 6000)
     spl.knots = Ktrue; _, nll_true = localize(spl, test['d'])
     rois = C.sim_test(scn, 11000, seed=7)['d']

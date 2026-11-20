@@ -219,7 +219,7 @@ if A.method in ('c', 'd'):
     jdump(stv, f'{OUT}/state_{A.tag}.json')
     print('timing', log['timing'], flush=True)
     print('zcoef', {j: round(c, 4) for j, c in zip(st['noll'], stv['zcoef'])}, flush=True)
-    save(spl.knots, dict(vec_state=stv, D=A.D))
+    save(spl.knots[0], dict(vec_state=stv, D=A.D))
     sys.exit(0)
 
 if A.method == 'e':

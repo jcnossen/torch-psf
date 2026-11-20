@@ -23,11 +23,10 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from torch_psf import (AstigmaticGaussianPSF, ChannelsPSF, FourPiPSF, GaussianPSF,
-                       IntegratedSplinePSF, VectorialPSF, io)
+                       to_spline, VectorialPSF, io)
 from torch_psf.field import FieldPSF, FieldZernikes
 from torch_psf.sofi.model import GridPSF
 from torch_psf.orientation import FocusZ, Polychromatic, dipole_M, fit_orientation, from_angles, model_and_jacobian
-from torch_psf.pixint import build_pixel_spline
 
 FILE = ROOT / 'tests/data/unify_pins.json'
 POS = torch.tensor([[.23, -.31, .012], [-.37, .18, .033]])
@@ -71,16 +70,16 @@ def models():
     yield 'gauss3d', AstigmaticGaussianPSF(7, (1.15, 1.4), pixel_um=.108, device='cpu'), {}
     yield 'cubic', v.to_spline(**GRID), {}
     yield 'cubic_dipole', v.to_spline(**GRID, dipole_components=True), dict(dipM=M)
-    yield 'integrated', IntegratedSplinePSF.from_vectorial(v, **GRID), {}
+    yield 'integrated', to_spline(v, kernel='bspline', value='density', **GRID), {}
     other = vec().set_zernike({6: -.03})
-    integrated = IntegratedSplinePSF.from_vectorial([v, other], **GRID)
+    integrated = to_spline([v, other], kernel='bspline', value='density', **GRID)
     yield 'integrated_angle', integrated.for_angle(1), {}
     yield 'integrated_angle_mean', integrated, {}
-    yield 'integrated_dipole', IntegratedSplinePSF.from_vectorial(v, **GRID, dipole_components=True), dict(dipM=M)
-    comps = IntegratedSplinePSF.from_vectorial([v, other], **GRID, dipole_components=True)
+    yield 'integrated_dipole', to_spline(v, kernel='bspline', value='density', **GRID, dipole_components=True), dict(dipM=M)
+    comps = to_spline([v, other], kernel='bspline', value='density', **GRID, dipole_components=True)
     yield 'integrated_angle_dipole', comps.for_angle(1), dict(dipM=M)
     for kernel in ('catmull', 'bspline'):
-        s = build_pixel_spline(v, 7, GRID['z_range'], 2, dz_um=.015, xy_limit=.75, kernel=kernel)
+        s = to_spline(v, GRID['z_range'], roisize=7, oversample=2, value='density', dz_um=.015, xy_limit=.75, kernel=kernel)
         yield 'pixel_' + kernel, s, {}
         conv = copy(s)
         conv.backend = 'conv'

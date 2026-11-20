@@ -164,3 +164,7 @@ phase_spline, field) so old files and SIMCODE's models keep working.
   stage 1: torch_psf.vectorial.gauss_blur_os and VectorialPSF.BLUR_PAD are gone (now torch_psf.integrate
   PixelIntegrator); SIMCODE uses them in simcode/psf/__init__.py (re-export) and simcode/fourpi/coherent_psf.py
   (SIMCODE's own PSF4Pi blur). Replace with the PixelIntegrator 'box' mode, or replace PSF4Pi by torch_psf FourPiPSF.
+- Per-stage SIMCODE check also covers 4Pi (SIMCODE c09480a7 uses torch_psf FourPiPSF / FourPiSplinePSF): the NPC_f_dxy15
+  bead-fit state, FourPiPSF.from_state renders with grad and to_spline(roisize 15, z_range (-0.6, 0.6), oversample 4,
+  dz_um 0.01, zpad 3) knots and spline renders: bit-identical to 4b0ffc3 at stage 1 (4724130).
+  SIMCODE's stage-1 migration item (gauss_blur_os, BLUR_PAD) is gone: SIMCODE no longer has its own 4Pi PSF.

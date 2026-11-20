@@ -40,7 +40,7 @@ torch_psf/
   dataset.py       Dataset (the localizations; csv / hdf5 / Picasso / .smlm, FRC) and Drift (per-movie drift estimate)
   psf.py           PSF (base class; type registry used by PSF.load)
   vectorial.py     VectorialPSF (+ gauss_blur_os, dipole_tensor, photosel_tensor)
-  spline.py        CubicSplinePSF (+ geometry_matrix, emitter_height_pos_fn, stage_scan_pos_fn)
+  spline.py        SplinePSF (+ geometry_matrix, emitter_height_pos_fn, stage_scan_pos_fn)
   gaussian.py      GaussianPSF (2D), AstigmaticGaussianPSF
   multichannel.py  MultiChannelPSF (base of the [N, C, P, P] models), ChannelsPSF
   fourpi.py        FourPiPSF, FourPiSplinePSF
@@ -66,11 +66,11 @@ estimators -> viewer, `__main__`. Model classes register themselves by their fil
   the index mismatch, Zernike aberrations (`zcoef`, Noll), optional free pupil maps (`pupil_phase`, `pupil_amp`),
   image-plane blur, diattenuation and the emission-dipole tensor, chirp-z / matrix DFT, oversampling and pixel
   integration. Derivatives by forward-mode autodiff (`torch.func.jvp`).
-- `CubicSplinePSF`: Catmull-Rom knots [nz, nv, nu] on a grid S times finer than the pixels (spacing `dz_um` in z); a
-  P x P patch is one strided, grouped conv2d of the 4x4x4 kernels over the knot block around the emitter, which gives the
-  value and the three derivatives together. Knots are free parameters (`render(..., knots=K)`), built from a vectorial
-  model (`knots_from_vectorial`; a knot gradient is moved onto the vectorial parameters with one VJP,
-  `vjp_vectorial`), or a measured z-stack (`from_zstack`). `xy_limit` (>= 3 px recommended) bounds the emitter offset.
+- `SplinePSF` stores a knot bank [T, nz, nv, nu] and an integer table map. The evaluator gathers
+  all requested (spot, table) pairs and applies separable interpolation or grouped convolution.
+  Pixel tables sample rendered pixels and density tables integrate the spline across each pixel.
+  The builder `to_spline` samples optical models, and `from_zstack` wraps measured planes.
+  The in-situ estimators use `vjp_vectorial` to propagate knot gradients to the optical model.
 - `GaussianPSF` (2D) and `AstigmaticGaussianPSF` (3D calibration curves).
 - `MultiChannelPSF`: an emitter seen in C channels ([N, C, P, P]); theta = (x, y, z, I, bg_0 .. bg_{C-1}, extra);
   joint fit, Fisher matrix and CRLB; per-channel offsets. `ChannelsPSF` holds C independent single-channel models

@@ -24,7 +24,7 @@ writes it; load / PSF.load read it like a json.
 """
 from torch_psf.camera import Camera
 from torch_psf.psf import PSF
-from torch_psf.spline import CubicSplinePSF
+from torch_psf.spline import SplinePSF
 from torch_psf import psfzip
 from torch_psf.psfzip import PSFZip, save_zip   # noqa: F401
 
@@ -48,7 +48,7 @@ def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=No
 
 def load_spline_source(path, device=None):
     """The vectorial model a saved spline was built from (None if it was not stored)."""
-    return CubicSplinePSF.load_source(path, device=device)
+    return SplinePSF.load_source(path, device=device)
 
 
 def load_camera(path, load_maps=True):

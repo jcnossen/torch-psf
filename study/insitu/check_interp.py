@@ -1,7 +1,7 @@
 """Interpolation error of the knot spline against the vectorial model, for several knot spacings."""
 import sys, time, torch
 from torch_psf import VectorialPSF
-from torch_psf import CubicSplinePSF
+from torch_psf import SplinePSF
 dev = 'cuda'
 P, F0 = 15, 0.45
 kw = dict(pixel_um=0.108, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68, npupil=64, oversample=3, device=dev)
@@ -15,11 +15,11 @@ with torch.no_grad():
     ref = torch.cat([small(off[s:s + 250], torch.full((len(off[s:s+250]),), F0, device=dev)) for s in range(0, N, 250)])
 for S in (1, 2, 3, 4):
     for hz in (0.08, 0.04, 0.02):
-        spl = CubicSplinePSF(P, (0.0, 0.8), oversample=S, dz_um=hz, xy_limit=1.5, device=dev)
+        spl = SplinePSF(P, (0.0, 0.8), oversample=S, dz_um=hz, xy_limit=1.5, device=dev)
         big = VectorialPSF(spl.Pl, **kw)
         with torch.no_grad(): big.zcoef.copy_(zc.to(dev))
         t = time.time()
-        spl.knots = spl.knots_from_vectorial(big, lambda z: (z, torch.full_like(z, F0)))
+        spl.knots = spl.sample(big, lambda z: (z, torch.full_like(z, F0)))
         torch.cuda.synchronize(); tb = time.time() - t
         g = spl.render_batched(off)
         err = (g - ref).flatten(1)

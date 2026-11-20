@@ -302,7 +302,7 @@ class CallableStack:
 
 
 def spline_stack(spline, R=None, knots=None):
-    """CallableStack of a CubicSplinePSF (bead-stack convention z = -focus, see ZStackEstimator): fits its knots
+    """CallableStack of a SplinePSF (bead-stack convention z = -focus, see ZStackEstimator): fits its knots
     (a copy, `knots` param; the knots are the PSF, so this refines a spline with the object profiled out)."""
     K0 = (spline.knots if knots is None else knots).detach().clone()
     Rr = int(R or spline.roisize)

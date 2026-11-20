@@ -14,7 +14,7 @@ scn = sys.argv[1] if len(sys.argv) > 1 else 'A'
 which = sys.argv[2] if len(sys.argv) > 2 else 'abcd'
 P, h = C.P, (C.P - 1) // 2
 spl = F.new_spline()
-Ktrue = spl.knots_from_vectorial(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
+Ktrue = spl.sample(C.make_vec(spl.Pl, scn, 'insitu'), C.insitu_pos)
 test = C.sim_test(scn, 6000)
 spl.knots = Ktrue; _, nll_true = localize(spl, test['d'])
 zc_s = F.fit_vec_stack(C.sim_stack(scn))

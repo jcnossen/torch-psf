@@ -259,7 +259,7 @@ def test_to_spline_bakes_offsets(spline4pi):
     with torch.no_grad():
         a, b = spl.render(pos, phi=PHI), p.render(pos, phi=PHI)
     assert float((a - b).abs().max() / b.abs().max()) < 1e-2
-    zk = float(spl.luts[0][0].zs[5])
+    zk = float(spl.table.zs[5])
     pk = torch.tensor([[0.0, 0.0, zk], [0.5, -0.5, zk]])
     with torch.no_grad():
         a, b = spl.render(pk, phi=PHI[:2]), p.render(pk, phi=PHI[:2])

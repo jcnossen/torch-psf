@@ -21,7 +21,7 @@ from torch_psf.camera import Camera
 from torch_psf.fit import poisson_nll
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import CubicSplinePSF, stage_scan_pos_fn
+from torch_psf.spline import SplinePSF, stage_scan_pos_fn
 from torch_psf.gaussian import AstigmaticGaussianPSF
 from torch_psf.movie import open_movie
 from torch_psf.spots import extract_spots
@@ -107,7 +107,7 @@ class Estimator:
 class ZStackEstimator(Estimator):
     """PSF from bead z-stacks.
 
-    model: 'vectorial' (Zernike fit of a VectorialPSF), 'spline' (a CubicSplinePSF whose knots are fitted to the
+    model: 'vectorial' (Zernike fit of a VectorialPSF), 'spline' (a SplinePSF whose knots are fitted to the
     stacks, regularised towards the vectorial fit with weight `regularize`), or 'astig_gauss' (the astigmatic
     Gaussian calibration curves). start (VectorialPSF or PSF file) or optics: the starting vectorial model.
     camera: Camera / calibration json / None (stacks in photons). roisize (px), nbeads (per stack, the brightest
@@ -213,7 +213,7 @@ class ZStackEstimator(Estimator):
         dz = self.spline_dz_um or max(abs(float(focus[1] - focus[0])), 0.02)
         spl = vec.to_spline(self.roisize, (zlo + dz, zhi - dz), oversample=self.oversample, dz_um=dz, zpad=2,
                             xy_limit=self.xy_limit, pos_fn=stage_scan_pos_fn(0.0, 1.0))
-        K0 = spl.knots.clone()
+        K0 = spl.knots[0].clone()
         keep = sid != self.holdout if self.holdout is not None else torch.ones_like(sid, dtype=torch.bool)
         z_nom = -focus
         inr = (z_nom >= spl.z_limits[0]) & (z_nom <= spl.z_limits[1])
@@ -467,7 +467,7 @@ class InSituEstimator(Estimator):
     the field model (its tiled spline, score_tile px tiles) is a held-out candidate ('field') and is returned (as a
     torch_psf.field.FieldPSF) when it wins. Held-out spots are scored at their own field positions.
 
-    estimate(movie, frames=None) -> PSF (VectorialPSF, or the refined CubicSplinePSF when refine=True and it
+    estimate(movie, frames=None) -> PSF (VectorialPSF, or the refined SplinePSF when refine=True and it
     wins on the held-out spots); its provenance holds the settings and the report. report: n_spots, n_train, n_test,
     frames_requested, frames_read, frame_span, deviance (median, scale, threshold, rejected_fraction), n_rejected,
     at_limit, z_scale / z_offset_um (fit vs start), scan, heldout (NLL per pixel of start / vectorial / refined),
@@ -563,7 +563,7 @@ class InSituEstimator(Estimator):
                            spots_per_frame=len(sp) / max(sp.frames_read, 1), warnings=warnings)
         if len(tr) < self.nspots:
             warnings.append(f'only {len(tr)} training spots (nspots {self.nspots}): the whole range was read')
-        spline = CubicSplinePSF(R, zr, device=self.dev, **self.grid)
+        spline = SplinePSF(R, zr, device=self.dev, **self.grid)
 
         zs = self.zstarts
 
@@ -638,7 +638,7 @@ class InSituEstimator(Estimator):
             xy_tr = xy_all[torch.as_tensor(tr_kept, device=xy_all.device)]
             xy_te = xy_all[torch.as_tensor(te, device=xy_all.device)]
             fz, fkw = field_from_spec(spec, vec.zidx, xy_tr)
-            rf = fit_field_knots(CubicSplinePSF(R, zr, device=self.dev, **self.grid), rois, xy_tr, vec, fz,
+            rf = fit_field_knots(SplinePSF(R, zr, device=self.dev, **self.grid), rois, xy_tr, vec, fz,
                                  tile=fkw['tile'], iters=fkw['iters'], lr=fkw['lr'], zstarts=zs, var=var,
                                  log=self._log('field'), stop=self.stop)
             fres = dict(psf=rf['psf'], tiled=rf['psf'].to_tiled(tile=fkw['score_tile'], roisize=R, z_range=zr,
@@ -648,7 +648,7 @@ class InSituEstimator(Estimator):
                                         block=rf['psf'].field_block(), score_tile=fkw['score_tile'])
         if self.refine and not self._stopped():
             s_ref = vec.to_spline(R, zr, **self.grid)          # a separate grid object: the fit overwrites its knots
-            K_vec = s_ref.knots.clone()
+            K_vec = s_ref.knots[0].clone()
             rr = fit_free_knots(s_ref, K_vec, rois=rois, var=var, ref=K_vec, lam_ref=self.refine_lam_ref,
                                 lam_s=self.refine_lam_s, outer=self.refine_outer, log=self._log('refine'),
                                 stop=self.stop)

@@ -46,7 +46,6 @@ from torch_psf.optics import default_device, Optics
 from torch_psf.integrate import PixelIntegrator, pixel_integration_mode, spectral_cutoff, uniform_grid
 from torch_psf._dipole import contract_fields
 from torch_psf.psf import PSF, render_with_grad
-from torch_psf.spline import CubicSplinePSF
 
 
 def _list(v):
@@ -339,26 +338,6 @@ class VectorialPSF(torch.nn.Module, PSF):
         grad=True also returns d/dx, d/dy (per px) and d/dz (per um), by forward-mode automatic differentiation."""
         f = self.focus_um if focus is None else focus
         return render_with_grad(lambda p: self(p, f, dipM=dipM), pos, grad)
-
-    def to_spline(self, roisize=None, z_range=None, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, chunk=8,
-                  pos_fn=None, dipole_components=False):
-        """CubicSplinePSF of this model (see PSF.to_spline). pos_fn: knot z -> (emitter z, focus) (default: the
-        emitter height at self.focus_um; e.g. spline.stage_scan_pos_fn for a bead-stack geometry).
-        dipole_components=True also tabulates xx, yy, zz, xy, xz, yz for per-emitter dipM rendering."""
-        zr = self.z_range if z_range is None else z_range
-        spl = CubicSplinePSF(roisize or self.roisize, zr, oversample=oversample, dz_um=dz_um, zpad=zpad,
-                                 xy_limit=xy_limit, device=self.dev, pixel_um=self.pixel_um)
-        big = self.resized(spl.Pl) if self.roisize != spl.Pl or dipole_components else self
-        if dipole_components:
-            from torch_psf._dipole import default_weights, unit_tensors
-            tables = []
-            for M in unit_tensors(big.dev):
-                big.dipM = M
-                tables.append(spl.knots_from_vectorial(big, pos_fn, chunk=chunk))
-            spl._set_dipole_knots(torch.stack(tables), default_weights(self.dipM, self.dipw))
-        else:
-            spl.knots = spl.knots_from_vectorial(big, pos_fn, chunk=chunk)
-        return spl
 
     def _apply(self, fn, *args, **kwargs):
         """torch.nn.Module semantics for .to(device / dtype), .cuda(), .cpu(), .float(): parameters and buffers are

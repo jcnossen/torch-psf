@@ -5,7 +5,7 @@ import sys, time, json, torch
 sys.path.insert(0, 'study/insitu')
 import common as C, fit as F
 spl = F.new_spline()
-spl.knots = spl.knots_from_vectorial(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
+spl.knots = spl.sample(C.make_vec(spl.Pl, 'A', 'insitu'), C.insitu_pos)
 N, NB = 200000, 5000
 g = torch.Generator(device=C.DEV).manual_seed(1)
 r = lambda: torch.rand(N, generator=g, device=C.DEV)
@@ -16,7 +16,7 @@ S, P, Lw = spl.S, spl.roisize, spl.Lw
 
 def prep(off):
     tz = ((off[:, 2] - spl.z0) / spl.hz).clamp(1, spl.nz - 2 - 1e-4)
-    t = torch.stack([tz, spl.oS0 - off[:, 1] * S, spl.oS0 - off[:, 0] * S], 1)
+    t = torch.stack([tz, spl.t0 - off[:, 1] * S, spl.t0 - off[:, 0] * S], 1)
     ix = torch.floor(t); fr = t - ix; i0 = ix.long() - 1
     idx = ((i0[:, 0] * spl.nv * spl.nu + i0[:, 1] * spl.nu + i0[:, 2])[:, None] + spl.pat[None]).reshape(-1)
     wa = spl._axis(fr, False)

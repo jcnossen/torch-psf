@@ -124,13 +124,19 @@ block as a calibration). Optional per-pattern-angle terms (SIMCODE): `psf_dipole
 Arrays (optional; absent = neutral): `pupil_phase` [npupil, npupil] float32 waves, `pupil_amp` [npupil, npupil]
 float32 factor; pupil grid: sample i at (i - (npupil - 1) / 2) / (npupil / 2) of the pupil radius, x = column.
 
-**spline** (`CubicSplinePSF`): `spline` {roisize, z_range [2] um, oversample S (knots per px), dz_um, zpad, xy_limit
+Python reads scalar, dipole and per-angle spline arrays into one `SplinePSF.knots[T,nz,nv,nu]` bank.
+The array names and ranks below describe the on-disk format. A `phase_spline` channel selects the
+corresponding channel and phase components in the shared 4Pi bank. The optional grid key `backend`
+records an explicit change of contraction order. Its historical defaults are `conv` for pixel samples
+and `sep` for integrated coefficients.
+
+**spline** (`SplinePSF`): `spline` {roisize, z_range [2] um, oversample S (knots per px), dz_um, zpad, xy_limit
 (px), c (stored half width, px), z0_um (z of knot plane 0), nz, u0_px (lateral offset of knot 0 from the PSF centre,
 px), pixel_um}. A scalar spline stores `knots` [nz, n, n] float32 (n = (2c + 1) S), Catmull-Rom knots of the pixel-integrated PSF
 g(u, v, z), knot (k, i, j) at z = z0_um + k dz_um, v = u0_px + i / S, u = u0_px + j / S. z: the coordinate the spline
 was tabulated in (emitter height for in-situ models; -focus for bead stacks).
 
-**integrated_spline** (`IntegratedSplinePSF`, torch_psf/pixint.py): a different representation from `spline`, under its
+**integrated_spline** (`SplinePSF` with `kernel='bspline', value='density'`): a different representation from `spline`, under its
 own type name and array names so that readers that do not know it refuse it (an unknown `type`) instead of reading
 its coefficients as `spline` knots. `integrated_spline` {basis `"cubic_bspline"`, value `"pixel_integral"`, roisize,
 z_range [2] um (the heights it is accurate on), oversample S (knots per px), dz_um, zpad (knot planes outside z_range),
@@ -150,7 +156,7 @@ the knots beyond the stored grid are not defined: readers clamp |x|, |y| to the 
 `psf_blur_angle_px2`): one coefficient set per pattern angle, selected per frame by the parameter `angle` (Python:
 `PSF.load(path, angle=a)`); the model without an angle is the mean of the angle coefficient sets (= the mean of the
 angle images). `source` (optional): the vectorial model the coefficients were built from
-(`IntegratedSplinePSF.from_vectorial`: the point density of the exact band-limited image, prefiltered with the cubic
+(`to_spline(..., kernel='bspline', value='density')`: the point density of the exact band-limited image, prefiltered with the cubic
 B-spline, mirror boundary in all three axes).
 
 **gaussian** (`GaussianPSF`, 2D): `gaussian` {sigma_px [2], pixel_um}, `roisize`. No arrays.

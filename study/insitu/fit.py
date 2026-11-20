@@ -10,7 +10,7 @@ study's scoring.
 import math, time
 import torch
 import common as C
-from torch_psf import CubicSplinePSF
+from torch_psf import SplinePSF
 from torch_psf.fit import localize
 from torch_psf.estimation import (fit_beads, fit_free_knots, fit_zernike_knots, fit_pupil_knots, bead_theta,
                               knot_gradient, vectorial_gradient, limit_fraction)
@@ -19,7 +19,7 @@ from torch_psf.estimation import (fit_beads, fit_free_knots, fit_zernike_knots, 
 def new_spline(S=2, hz=0.04, xmax=3.0):
     # zpad 5: knots cover the bead stack range. xmax 3 px: the detection peak of a defocused, aberrated spot lies up
     # to 3 px from the emitter; with the old default (1.5 px) the offset clamp biased flexible PSF fits (CRITIC C-01).
-    return CubicSplinePSF(C.P, C.ZR, oversample=S, dz_um=hz, zpad=5, xy_limit=xmax, device=C.DEV)
+    return SplinePSF(C.P, C.ZR, oversample=S, dz_um=hz, zpad=5, xy_limit=xmax, device=C.DEV)
 
 
 def clamp_fraction(spl, th):
@@ -29,7 +29,7 @@ def clamp_fraction(spl, th):
 
 def knots_from(spl, zc, cond='insitu'):
     big = C.model_vec(spl.Pl, zc)
-    return spl.knots_from_vectorial(big, C.insitu_pos if cond == 'insitu' else C.bead_pos)
+    return spl.sample(big, C.insitu_pos if cond == 'insitu' else C.bead_pos)
 
 
 def fit_vec_stack(stack, iters=300, lr=3e-3):

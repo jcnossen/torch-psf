@@ -42,19 +42,19 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
 ├── VectorialPSF(roisize, pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices, npupil, oversample,
 │                focus_um, z_range, pixel_integration='box' | 'spectral' | 'gauss_legendre' | 'point')  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
 │                from_optics, optics, to_spline(..., pos_fn))
-├── CubicSplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [nz, nv, nu]; render(..., knots=);
-│                knots_from_model, knots_from_vectorial, vjp_vectorial, from_zstack
+├── SplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [T, nz, nv, nu]; render(..., knots=);
+│                to_spline, sample, vjp_vectorial, from_zstack
 ├── FieldPSF(base, field), TiledSplinePSF(field_psf, tile, ...)   field-dependent (see Field-dependent PSFs)
 └── MultiChannelPSF: ChannelsPSF, FourPiPSF, FourPiSplinePSF   images [N, C, P, P] (see Multi-channel PSFs)
 
 Estimator (torch_psf.estimators)             report (dict), history (list), data (dict), progress / stop hooks
 ├── ZStackEstimator(model='vectorial' | 'spline' | 'astig_gauss', start=None, optics=None, camera=None, roisize=21,
 │                   nbeads=8, sign=1.0, iters=300, holdout=None, drift=True, regularize=3000.0, ...)
-│     .estimate(stacks, dz_um) -> VectorialPSF | CubicSplinePSF | AstigmaticGaussianPSF
+│     .estimate(stacks, dz_um) -> VectorialPSF | SplinePSF | AstigmaticGaussianPSF
 └── InSituEstimator(start=None, optics=None, camera=None, focus_um=None, roisize=15, z_range=(0, 0.8), nspots=8000,
                     nheldout=4000, method='zernike', iters=80, reject_overlap=True, deviance_k=3.0, refine=False,
                     detector=None, zstarts=5, field=None, ...)
-      .estimate(movie, frames=None) -> VectorialPSF (or the refined CubicSplinePSF if it wins on held-out spots)
+      .estimate(movie, frames=None) -> VectorialPSF (or the refined SplinePSF if it wins on held-out spots)
 ```
 
 VectorialPSF forms the emitter pupil, transforms its six fields onto the image grid, and contracts the
@@ -216,21 +216,44 @@ progress=None, **detect_kw)`
 `mu[b, t] = I[b, t] psf[b] + bg[b, group[b, t]]` by `iters` rounds of weighted linear least squares (weights
 `1 / (mu + rn2)`), I clamped >= I_min; masked frames give I = 0.
 
-## The convolutional cubic spline (`torch_psf.spline.CubicSplinePSF`)
+## Spline tables
 
-`CubicSplinePSF(roisize, z_range, oversample=2, dz_um=0.04, zpad=2, xy_limit=3.0, device=None)`: knots
-`[nz, nv, nu]`, nz = round((hi - lo) / dz) + 1 + 2 zpad, plane k at z0 + k dz, z0 = lo - zpad dz;
-c = ceil(h + xy_limit) + 2 (h = (roisize - 1) / 2), Pl = 2c + 1, nv = nu = Pl * oversample; knot index j of u is at
-u = u0 + j / S, u0 = -(c S + S - 1) / S.
-- `render(pos, grad=False, knots=None)`: patch[i, j] = g(o_j - x, o_i - y, z) by the Catmull-Rom spline (tau 0.5,
-  per-axis weights `[1, t, t^2, t^3] @ G`) over the 4 x 4 x 4 knots around the emitter, as one conv2d with stride S;
-  x, y clamped to +-xy_limit; derivatives d/dx = -S (conv with d/du weights), d/dy likewise, d/dz = (conv with d/dt
-  weights) / dz, set to 0 outside the knot z range. The knot block is read with `index_select`.
-- `knots_from_vectorial(vectorial, pos_fn=None, chunk=4)`: renders the vectorial model (roisize Pl) at the S x S
-  sub-pixel shifts (a / S, b / S) for every knot plane and interleaves them (knot j S + (S - 1 - a) <- pixel j, shift
-  a). `pos_fn(z_knot) -> (emitter z, focus)`, default emitter height at `vectorial.focus_um`.
-- `vjp_vectorial(vectorial, pos_fn, grad_knots, names=('zcoef',), chunk=4)`: (d knots / d parameters)^T grad_knots.
-- `vectorial.to_spline(roisize, z_range=None, ...)` (any model: `PSF.to_spline`), `from_zstack(zstack, z0_um, dz_um, roisize)`.
+`torch_psf.to_spline(model, z_range, *, roisize, kernel, value, oversample, dz_um, zpad, xy_limit)`
+samples an optical model. The method form is `model.to_spline(roisize, z_range, **grid)`.
+Use `kernel='catmull'` for interpolating samples or `kernel='bspline'` for coefficients with a mirror-boundary
+prefilter. With `value='pixel'` each sample is a rendered pixel. With `value='density'` the builder samples
+point density and the evaluator integrates the spline over the pixel. The existing scalar optical default
+is Catmull-Rom on pixel values at two knots per pixel. The 4Pi and field builders retain their
+integration-mode-dependent defaults.
+
+```python
+from torch_psf import PSF, to_spline
+
+angles = [PSF.load(calibration, angle=k) for k in (0, 1)]
+spline = to_spline(angles, (0, 0.4), roisize=41, kernel='bspline', value='density',
+                   oversample=4, dz_um=0.01, zpad=6, xy_limit=2.0)
+image, dx, dy, dz = spline.for_angle(1).render(pos, grad=True)
+```
+
+- `SplinePSF.knots` is one tensor of shape `[T, nz, nv, nu]`. `axes` names the dimensions of the integer
+  `table_map`, whose entries select volumes. Knot spacings are `1 / S` pixels laterally and `hz` micrometres axially.
+  The first knot is at `(u0, u0, z0)`.
+- `render(pos, grad=True)` returns the value and the x, y and z derivatives evaluated at the clamped position.
+  `render(pos, weights={axis: weights, ...})` accepts shared or per-spot axis weights and differentiates through
+  the weights and the knot bank. `evaluate_tables(pos, indices)` evaluates individual (position, table) pairs.
+- Build with `components='dipole'` for `dipole_basis(pos)` and `render(pos, dipM=M)`. The six images are ordered
+  xx, yy, zz, xy, xz, yz and cross images include both symmetric terms.
+- The legacy file blocks store Catmull-Rom pixel samples and B-spline density coefficients.
+  Other kernel/value combinations and general weighted layouts can be used in memory.
+- A sequence of optical models supplies the angle axis. `for_angle(None)` selects the calibration average.
+  `for_angle(k)` and `resized(roisize)` share the knot tensor. `to(device, dtype)` moves the model in place.
+- `backend='sep'` contracts along z, x and y. `backend='conv'` uses grouped convolution. Explicit kernel/value
+  builds default to `sep`. Historical pixel-sample builds and files retain convolution for numerical compatibility.
+- A `FourPiSplinePSF` is a multichannel view over `.table`, a single spline with phase and channel axes
+  and an optional dipole axis. The phase weights are `(1, cos(phi), -sin(phi))`.
+- `SplinePSF.from_zstack(...)` wraps measured planes. For optical stacks, `pos_fn(z)` supplies emitter height
+  and focus for each plane. `sample(resized_optics, pos_fn, differentiable=True)` retains the optical graph.
+  `vjp_vectorial(...)` pulls a coefficient gradient through the prefilter and the optical sampler in z chunks.
 
 ## PSF estimation (`torch_psf.estimation`; used by `ZStackEstimator`, `InSituEstimator`)
 
@@ -275,7 +298,7 @@ FieldZernikes(noll, order=1, norm=(cx, cy, sx, sy), ref=None, prior_sd=0.05, cla
     penalty(), to_block(waves_at_ref), from_block(d) -> (field, const)
 FieldPSF(base: VectorialPSF, field)                   PSF; render(pos, grad=False, xy=None), at(x, y),
     zernikes_at(xy), fit(rois, corners=, xy=), bind(xy), to_tiled(tile, extent, roisize, z_range, **grid)
-TiledSplinePSF(field_psf, tile, extent, roisize, z_range, lazy=True, **grid)   one CubicSplinePSF per tile
+TiledSplinePSF(field_psf, tile, extent, roisize, z_range, lazy=True, **grid)   one SplinePSF per tile
     render(pos, grad, xy), tile_index(xy), spline(t), fit(rois, corners=, xy=)
 ```
 - W_j(x, y) = W_j(ref) + sum_{1 <= i + k <= o_j} c_{j,ik} (u^i v^k - u_ref^i v_ref^k), u = clip((x - cx) / sx, -1, 1),
