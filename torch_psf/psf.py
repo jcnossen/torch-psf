@@ -8,9 +8,7 @@ the conversion to a cubic-spline model.
 Parameter vector of an emitter: theta = (x px, y px, z um, photons, bg photons / px), x, y relative to the ROI centre
 (pixel centres at integers, x = column, y = row). 2D models (z_range None) keep z fixed (any value).
 
-Files: every subclass sets the class attribute type_name (its psf.json `type`) and is registered when its class is
-defined (PSF.__init_subclass__); PSF.load looks the type up in that registry, so this module never imports its
-subclasses. Importing torch_psf (also implicitly, e.g. `import torch_psf.psf`, which runs the package __init__ first)
+Files: serializable models register their psf.json type names with PSF. PSF.load dispatches through this registry. Importing torch_psf (also implicitly, e.g. `import torch_psf.psf`, which runs the package __init__ first)
 registers all of them.
 """
 import json
@@ -23,7 +21,22 @@ from torch_psf.movie import open_movie
 from torch_psf.spots import Spots, extract_spots
 from torch_psf.dataset import Dataset, _plain
 
-FORMAT, VERSION = 'torch-psf', '0.1.0'
+FORMAT = 'torch-psf'
+READ_VERSIONS = ((0, 2), (0, 3), (0, 4), (0, 5))
+
+
+def version_string(version):
+    major, minor = version
+    return f'{major}.{minor}.0'
+
+
+def check_version(version, supported, container):
+    parts = str(version).split('.')
+    if len(parts) in (2, 3) and all(p.isascii() and p.isdecimal() for p in parts):
+        if (int(parts[0]), int(parts[1])) in supported:
+            return
+    versions = ', '.join(f'{major}.{minor}.x' for major, minor in supported)
+    raise ValueError(f'{container} version {version}: this reader supports {versions}')
 
 
 def render_with_grad(fn, pos, grad=False, **extra):
@@ -69,7 +82,7 @@ class PSF:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         name = cls.__dict__.get('type_name')
-        if name:
+        if isinstance(name, str):
             PSF._registry[name] = cls
 
     # ------------------------------------------------------------------ the model
@@ -267,6 +280,17 @@ class PSF:
         return ds
 
     # ------------------------------------------------------------------ files
+    def format_version(self, source=None):
+        """Minimum (major, minor) for the serialized features, including any stored source."""
+        if self.type_name is None:
+            raise NotImplementedError(f'{type(self).__name__} has no model file block')
+        return (0, 2)
+
+    def json_format_version(self, source=None):
+        """Minimum version in the standalone layout, which predates the 0.2 channel container."""
+        version = self.format_version(source)
+        return (0, 1) if version == (0, 2) else version
+
     def _file_dict(self, source=None):
         """(json dict without format / version / type, {name: array} for the .npz) of this model; subclasses."""
         raise NotImplementedError
@@ -282,7 +306,7 @@ class PSF:
         built from (its parameters are stored too). camera: optional Camera. provenance: dict stored with the model
         (default: self.provenance, which the estimators set to their settings and report). Returns the json dict."""
         d, arrays = self._file_dict(source)
-        d = dict(format=FORMAT, version=VERSION, type=self.type_name, **d)
+        d = dict(format=FORMAT, version=version_string(self.json_format_version(source)), type=self.type_name, **d)
         if camera is not None:
             d['camera'] = camera.to_dict()
         d['provenance'] = _plain(provenance if provenance is not None else (self.provenance or {}))
@@ -310,11 +334,12 @@ class PSF:
             with open(path) as f:
                 d = json.load(f)
             base = os.path.dirname(path)
-        arrays = dict(np.load(os.path.join(base, d['arrays']))) if d.get('arrays') else None
         if d.get('format') == FORMAT:
+            check_version(d.get('version', '0.1.0'), ((0, 1), *READ_VERSIONS), 'psf.json')
             typ = d.get('type', 'vectorial')
         else:                    # plain calibration json: vectorial, or a 2D Gaussian with psf_gauss_sigma_um
             typ = 'gaussian' if d.get('psf_gauss_sigma_um') is not None else 'vectorial'
+        arrays = dict(np.load(os.path.join(base, d['arrays']))) if d.get('arrays') else None
         return d, arrays, typ
 
     @staticmethod
@@ -326,10 +351,8 @@ class PSF:
 
     @staticmethod
     def load(path, roisize=None, device=None, angle=None, npupil=None, oversample=None):
-        """Read a PSF json (type 'vectorial' | 'spline' | 'gaussian' | 'astig_gaussian' | 'fourpi' | 'fourpi_spline'), a
-        psf.zip (docs/PSF_FORMAT.md; independent multi-channel files: torch_psf.io.load(path, channel=c)) or a plain
-        calibration json and
-        return the model of that type; path may also be the parsed dict (array files are then resolved against the
+        """Read a single-model PSF json, a psf.zip or a plain calibration json. For one independent channel use
+        torch_psf.io.load(path, channel=c). The path may also be the parsed dict (array files are then resolved against the
         current directory). roisize: for vectorial / Gaussian models (default: the stored one, or 15 for a
         calibration json). angle: for calibrations with per-pattern-angle PSF terms: 0 / 1 = that angle, None = the
         average. npupil / oversample override the stored pupil sampling of a vectorial model. A calibration with

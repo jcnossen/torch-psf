@@ -8,12 +8,14 @@ from torch_psf._dipole import M_to_m6, combine_tables, default_weights, unit_ten
 from torch_psf.integrate import PixelIntegrator, spectral_min_oversample
 
 
-# Existing builder defaults, including the finer sampling for density and phase tables.
-DEFAULT_GRID = {
-    'pixel': ('catmull', 'pixel', 2, .04, 2, 3.0, 8),
-    'density': ('bspline', 'density', 4, .01, 6, 2.0, 4),
-    'phase_pixel': ('catmull', 'pixel', 4, .01, 3, None, 128),
-    'phase_density': ('bspline', 'density', 4, .01, 6, None, 128),
+DEFAULT_SPLINE = ('catmull', 'pixel', 2)  # kernel, value, knots/px for newly built plain tables
+
+# Sampling presets for an explicitly requested value or a phase table: kernel, S, dz, zpad, xy_limit, chunk.
+_GRID_PROFILES = {
+    'pixel': ('catmull', 2, .04, 2, 3.0, 8),
+    'density': ('bspline', 4, .01, 6, 2.0, 4),
+    'phase_pixel': ('catmull', 4, .01, 3, None, 128),
+    'phase_density': ('bspline', 4, .01, 6, None, 128),
 }
 
 
@@ -99,8 +101,8 @@ class SplinePSF(PSF):
     the interpolant over each pixel. The separable and grouped-convolution
     backends share coordinate, weight and gather code.
     """
-    type_name = 'spline'
     BASIS = 'cubic_bspline'
+    FILE_TYPES = ('spline_table', 'integrated_spline', 'spline')
 
     def __init__(self, roisize, z_range, oversample=2, dz_um=.04, zpad=2, xy_limit=3.0, device=None,
                  dtype=torch.float32, knots=None, knot_u0_px=None, knot_z0_um=None, pixel_um=None, *,
@@ -109,7 +111,6 @@ class SplinePSF(PSF):
         if kernel not in ('catmull', 'bspline') or value not in ('pixel', 'density') or backend not in ('sep', 'conv'):
             raise ValueError('unknown spline kernel, value or backend')
         self.kernel, self.value, self.backend = kernel, value, backend
-        self.type_name = 'integrated_spline' if value == 'density' else 'spline'
         self.chunk_elems = 2 ** 24
         self.pixel_um = None if pixel_um is None else float(pixel_um)
         zlo, zhi = float(z_range[0]), float(z_range[1])
@@ -500,15 +501,59 @@ class SplinePSF(PSF):
             return self.evaluate_tables(pos, self.table_map.new_zeros(()), grad, volume)
         return tuple(_weighted(v, w) for v in basis) if grad else _weighted(basis, w)
 
+    @property
+    def type_name(self):
+        if self.kernel == 'bspline' and self.value == 'density':
+            return 'integrated_spline'
+        if self.kernel == 'catmull' and self.value == 'pixel' and not self.n_angles:
+            return 'spline'
+        return 'spline_table'
+
+    def format_version(self, source=None):
+        if self.type_name == 'spline_table':
+            version = (0, 5)
+        elif self.has_dipole:
+            version = (0, 4)
+        elif self.value == 'density':
+            version = (0, 3)
+        else:
+            version = (0, 2)
+        return version if source is None else max(version, source.format_version())
+
+    @classmethod
+    def file_grid(cls, block):
+        """Find and validate a named grid in a channel or a standalone model."""
+        typ = block.get('type') or next((k for k in cls.FILE_TYPES if k in block), None)
+        if typ not in cls.FILE_TYPES or typ not in block:
+            raise ValueError('missing spline grid')
+        g = block[typ]
+        if typ == 'spline_table' and not ('basis' in g and g.get('value') in ('pixel', 'density')):
+            raise ValueError('spline_table requires explicit basis / value')
+        if typ == 'integrated_spline' and (g.get('basis'), g.get('value')) != (cls.BASIS, 'pixel_integral'):
+            raise ValueError('integrated_spline: unknown basis / value')
+        return typ, g
+
+    @classmethod
+    def grid_interpolant(cls, g):
+        """Decode a stored grid without consulting the defaults for newly built tables."""
+        if 'basis' not in g and 'value' not in g:
+            return 'catmull', 'pixel'
+        if (g.get('basis'), g.get('value')) == (cls.BASIS, 'pixel_integral'):
+            return 'bspline', 'density'
+        kernels = {'catmull_rom': 'catmull', cls.BASIS: 'bspline'}
+        if g.get('basis') in kernels and g.get('value') in ('density', 'pixel'):
+            return kernels[g['basis']], g['value']
+        raise ValueError(f"unknown spline basis / value: {g.get('basis')!r}, {g.get('value')!r}")
+
     def to_dict(self):
-        if (self.kernel, self.value) not in (('catmull', 'pixel'), ('bspline', 'density')):
-            raise ValueError('this kernel/value combination has no legacy file block')
         density = self.value == 'density'
         g = dict(basis=self.BASIS, value='pixel_integral') if density else {}
+        if self.type_name == 'spline_table':
+            g = dict(basis='catmull_rom' if self.kernel == 'catmull' else self.BASIS, value=self.value)
         g.update(roisize=self.roisize, z_range=list(self.z_range), oversample=self.S, dz_um=self.hz,
                  zpad=self.zpad, xy_limit=self.xmax, c=self.c, z0_um=self.z0, nz=self.nz, u0_px=self.u0,
                  pixel_um=self.pixel_um)
-        if density:
+        if density or self.n_angles:
             g['n_angles'] = self.n_angles
         if self.has_dipole:
             g['dipole_components'] = True
@@ -522,8 +567,6 @@ class SplinePSF(PSF):
             raise ValueError('these axes have no single-channel file block')
         if self.axes == ('component',) and self.table_map.numel() != 1:
             raise ValueError('a scalar file block requires one coefficient volume')
-        if self.n_angles and self.value == 'pixel':
-            raise ValueError('the pixel-sample file block has no angle axis')
         d, arrays = ({}, {}) if source is None else source._file_dict()
         g = self.to_dict()
         d[self.type_name] = g
@@ -541,13 +584,11 @@ class SplinePSF(PSF):
 
     @classmethod
     def _from_file(cls, d, arrays, roisize=None, device=None, angle=None, **kw):
-        typ = d.get('type', 'integrated_spline' if 'integrated_spline' in d else 'spline')
-        density = typ == 'integrated_spline'
-        g = d['integrated_spline' if density else 'spline']
+        typ, g = cls.file_grid(d)
+        kernel, value = ('catmull', 'pixel') if typ == 'spline' else cls.grid_interpolant(g)
+        density = value == 'density'
         arrays = arrays or {}
         key = 'coefs' if density else 'knots'
-        if density and (g.get('basis'), g.get('value')) != (cls.BASIS, 'pixel_integral'):
-            raise ValueError('integrated_spline: unknown basis / value')
         weights = g.get('default_weights')
         per_angle = arrays.get(key + '_angle')
         na = int(g.get('n_angles', len(per_angle) if per_angle is not None else 0))
@@ -578,7 +619,7 @@ class SplinePSF(PSF):
         model = cls(g['roisize'], g['z_range'], g['oversample'], g['dz_um'], g['zpad'], g['xy_limit'],
                     device=device, knots=tables, knot_u0_px=g.get('u0_px'), knot_z0_um=g.get('z0_um'),
                     pixel_um=g.get('pixel_um') or (d.get('optics') or {}).get('pixel_um'),
-                    kernel='bspline' if density else 'catmull', value='density' if density else 'pixel',
+                    kernel=kernel, value=value,
                     backend=g.get('backend', 'sep' if density else 'conv'), axes=axes, table_map=ids, angle=angle,
                     component_weights=weights)
         if model.nz != g.get('nz', model.nz) or model.c != g.get('c', model.c):
@@ -737,7 +778,8 @@ class IndexedSplines:
         return tuple(contract(v) for v in images) if grad else contract(images)
 
 
-PSF._registry['integrated_spline'] = SplinePSF
+for _type in SplinePSF.FILE_TYPES:
+    PSF._registry[_type] = SplinePSF
 
 
 def _weighted(images, weights):
@@ -792,10 +834,15 @@ def _tabulate(model, z_range=None, *, roisize=None, kernel=None, value=None, com
         default = spline_kind(kind, first.pixel_integration)
         if value is None:
             value = 'density' if default == 'integrated' else 'pixel'
-    profile = ('phase_' if phase else '') + (value or 'pixel')
-    if profile not in DEFAULT_GRID:
+    elif value is None:
+        default_kernel, value, default_sampling = DEFAULT_SPLINE
+        kernel = default_kernel if kernel is None else kernel
+        if oversample is None:
+            oversample = default_sampling
+    profile = ('phase_' if phase else '') + value
+    if profile not in _GRID_PROFILES:
         raise ValueError('value must be pixel or density')
-    k, value, S, dz, pad, xl, batch = DEFAULT_GRID[profile]
+    k, S, dz, pad, xl, batch = _GRID_PROFILES[profile]
     kernel = k if kernel is None else kernel
     S = S if oversample is None else oversample
     dz = dz if dz_um is None else dz_um

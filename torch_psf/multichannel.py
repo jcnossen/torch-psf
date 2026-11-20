@@ -802,6 +802,9 @@ class ChannelsPSF(MultiChannelPSF):
     def at_wavelength(self, wavelength):
         return self.map_models(lambda m: m.at_wavelength(wavelength))
 
+    def format_version(self, source=None):
+        return max(m.format_version() for m in self.models)
+
     def _maps_copy(self):
         return None if not self.mapped else [m.copy() for m in self.mappings]
 

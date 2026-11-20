@@ -88,7 +88,7 @@ def test_bilinear_field(tmp_path, monkeypatch):
     assert loaded.blend == 'bilinear'
     torch.testing.assert_close(loaded.render(POS, xy=xy, dipM=M), got[0])
     # Also exercise the version feature in isolation from dipole components.
-    assert psfzip._zip_version(dict(channels=[{}], provenance=dict(field_tiles=m.tiles_info()))) == '0.4.0'
+    assert exact.to_tiled(tile=10., blend='bilinear', **GRID).format_version() == (0, 4)
     monkeypatch.setattr(psfzip, 'READ_VERSIONS', ((0, 2), (0, 3)))
     with pytest.raises(ValueError, match='0.4.0'):
         PSF.load(path)

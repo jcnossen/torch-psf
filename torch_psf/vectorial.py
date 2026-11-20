@@ -421,6 +421,9 @@ class VectorialPSF(torch.nn.Module, PSF):
                 + (f', pixel_integration={self.pixel_integration!r}' if self.pixel_integration != 'box' else '') + ')')
 
     # ------------------------------------------------------------------ files
+    def format_version(self, source=None):
+        return (0, 2) if self.pixel_integration == 'box' else (0, 3)
+
     def _file_dict(self, source=None):
         o = self.optics
         d = dict(optics=o.to_dict(), zernike_noll=list(self.zidx), zernike_waves=_list(self.zcoef),

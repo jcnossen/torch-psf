@@ -440,6 +440,9 @@ class FieldPSF(PSF):
     def field_block(self):
         return self.field.to_block(dict(zip(self.base.zidx, self.base.zcoef.detach().cpu().double().tolist())))
 
+    def format_version(self, source=None):
+        return self.base.format_version()
+
     def file_model(self):
         """(model written to the channel, source or None) for io.save_zip"""
         return self.base, None
@@ -640,6 +643,23 @@ class TiledSplinePSF(FieldPSF):
         return self.source.at_wavelength(wavelength).to_tiled(
             self.tile, self.extent, self.roisize, self.z_range, kind=self.kind, blend=self.blend, **self.grid)
 
+    @staticmethod
+    def tile_version(value, blend):
+        if blend == 'bilinear' or value == 'density':
+            return (0, 4)
+        return (0, 2)
+
+    @classmethod
+    def channel_version(cls, model, field, tiles):
+        """Tile features supplied as raw channel metadata to save_zip."""
+        value = getattr(model, 'value', None) if (field or {}).get('type') == 'zernike_poly' else None
+        return cls.tile_version(value, (tiles or {}).get('blend'))
+
+    def format_version(self, source=None):
+        source = self.base if source is None else source
+        model = self.reference_spline()
+        return max(model.format_version(source), self.tile_version(model.value, self.blend))
+
     def tiles_info(self):
         info = dict(tile_px=self.tile, extent=list(self.extent), roisize=self.roisize)
         if self.blend != 'nearest':
@@ -687,14 +707,11 @@ def field_psf_from_file(model, source, block, arrays=None, crop=None, tiles=None
     fp = FieldPSF(vec, fz)
     if hasattr(model, 'zidx'):
         return fp
-    g = model.to_dict()
-    fp.spline_grid = dict(kind='integrated' if model.type_name == 'integrated_spline' else 'cubic',
-                          oversample=g['oversample'], dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
-                          roisize=g['roisize'], z_range=tuple(g['z_range']))
+    fp.spline_grid = dict(kind='integrated' if model.value == 'density' else 'cubic',
+                          kernel=model.kernel, backend=model.backend, oversample=model.S, dz_um=model.hz,
+                          zpad=model.zpad, xy_limit=model.xy_limit, roisize=model.roisize, z_range=model.z_range)
     t = dict(tiles or {})
-    if 'backend' in g:
-        fp.spline_grid['backend'] = g['backend']
-    if g.get('dipole_components'):
+    if model.has_dipole:
         fp.spline_grid['dipole_components'] = True
     tp = fp.to_tiled(tile=t.get('tile_px', 128), extent=t.get('extent'), blend=t.get('blend', 'nearest'))
     tp._ref = model

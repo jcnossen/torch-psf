@@ -1,4 +1,4 @@
-"""psf.zip: the shared PSF export (format 'torch-psf', versions 0.2.x to 0.4.x; see docs/PSF_FORMAT.md).
+"""psf.zip: the shared PSF export (format 'torch-psf', versions 0.2.x to 0.5.x; see docs/PSF_FORMAT.md).
 
 One zip holds every channel of a setup:
     psf.json         format / version, optics, camera, provenance, emitter_params, channels (model, arrays, mapping to
@@ -13,8 +13,7 @@ One zip holds every channel of a setup:
     pz = PSFZip.read('psf.zip'); pz.channels[1].to_ref(x, y); pz.channels[0].model_at(x, y)
 
 The reader turns a single-channel (or coupled) zip into the 0.1.0 json dict of that model (legacy), so every
-model class reads it with its own _from_file; this module therefore needs no model class (the registry of PSF
-supplies them) and PSF.read_file imports it lazily.
+model class reads it with its own _from_file; PSF.read_file imports this module lazily and dispatches through the PSF registry.
 """
 import dataclasses
 import io as _io
@@ -23,13 +22,10 @@ import warnings
 import zipfile
 import numpy as np
 import torch
-from torch_psf.psf import PSF, FORMAT
+from torch_psf.psf import PSF, FORMAT, READ_VERSIONS, check_version, version_string
+from torch_psf.spline import SplinePSF
 from torch_psf.dataset import _plain
 
-ZIP_VERSION = '0.2.0'
-ZIP_VERSION_3 = '0.3.0'
-ZIP_VERSION_4 = '0.4.0'
-READ_VERSIONS = ((0, 2), (0, 3), (0, 4))
 JSON_NAME, ZSTACK_NAME, PREVIEW_NAME, REPORT_NAME = 'psf.json', 'zstack.tif', 'preview.png', 'fit_report.pdf'
 COUPLED = ('fourpi', 'fourpi_spline')
 UNITS = dict(x='px', y='px', z='um', I='photons', bg='photons / px', phi='rad')
@@ -225,19 +221,15 @@ def _field(d, arrays, crop):
 def _check_version(meta):
     if meta.get('format') != FORMAT:
         raise ValueError(f"not a torch-psf psf.json (format {meta.get('format')!r})")
-    v = str(meta.get('version', '0'))
-    major_minor = tuple(int(p) for p in v.split('.')[:2])
-    if major_minor not in READ_VERSIONS:
-        supported = ', '.join(f'{major}.{minor}.x' for major, minor in READ_VERSIONS)
-        raise ValueError(f'psf.zip version {v}: this reader supports {supported}')
+    check_version(meta.get('version'), READ_VERSIONS, 'psf.zip')
 
 
 def read_zip(path):
     """(psf.json dict, {member name: numpy array} of every .npy in the zip)."""
     with zipfile.ZipFile(str(path)) as z:
         meta = json.loads(z.read(JSON_NAME).decode('utf-8'))
+        _check_version(meta)
         arrays = {n: np.load(_io.BytesIO(z.read(n)), allow_pickle=False) for n in z.namelist() if n.endswith('.npy')}
-    _check_version(meta)
     return meta, arrays
 
 
@@ -260,7 +252,7 @@ def legacy(meta, arrays, channel=None):
     src = meta.get('source')
     if types == {'phase_spline'}:
         model = chans[0]['model']
-        grid = model['integrated_spline'] if 'integrated_spline' in model else model['spline']
+        _, grid = SplinePSF.file_grid(model)
         g = dict(grid, n_channels=len(chans), tau=[c['model'].get('tau') for c in chans])
         if any(t is None for t in g['tau']):
             g['tau'] = None
@@ -315,10 +307,11 @@ def _rebuild_knots(meta, g, device=None):
         raise ValueError('phase_spline channels without knots need the FourPiPSF source to rebuild them')
     reb = meta['channels'][0].get('rebuild') or {}
     src_psf = FourPiPSF._from_file(src['model'], {}, device=device or reb.get('device'))
+    kernel, value = SplinePSF.grid_interpolant(g)
     sp = src_psf.to_spline(roisize=g['roisize'], z_range=tuple(g['z_range']), oversample=g['oversample'],
                            dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
-                           kind='integrated' if 'basis' in g else 'cubic', dipole_components=g.get('dipole_components', False),
-                           backend=g.get('backend'))
+                           kernel=kernel, value=value, dipole_components=g.get('dipole_components', False),
+                           backend=g.get('backend', 'sep' if value == 'density' else 'conv'))
     return sp._stored_tables().detach().cpu().numpy().astype(np.float32)
 
 
@@ -338,7 +331,7 @@ def camera_from_meta(meta, arrays):
 
 
 def _model_from_block(block, arrays, roisize=None, device=None):
-    d = dict(block['model'])
+    d = dict(block['model'], type=block['type'])
     return PSF._registry[block['type']]._from_file(d, _arrays_of(block, arrays), roisize=roisize, device=device)
 
 
@@ -468,29 +461,6 @@ class PSFZip:
 
 
 # ====================================================================================================== rendering
-def _zip_version(meta):
-    """Smallest minor version that can interpret every channel and source block."""
-    if any((_field_tiles(meta.get('provenance'), c) or {}).get('blend') == 'bilinear'
-           for c in range(len(meta['channels']))):
-        return ZIP_VERSION_4
-    version = ZIP_VERSION
-    blocks = [meta.get('source')] + [b for c in meta['channels'] for b in (c, c.get('source'))]
-    for b in blocks:
-        if not b:
-            continue
-        m = b.get('model') or {}
-        integrated = 'integrated_spline' in m
-        if any(m.get(key, {}).get('dipole_components') for key in ('spline', 'integrated_spline')):
-            return ZIP_VERSION_4
-        if integrated and (b.get('type') == 'phase_spline' or (b.get('field') or {}).get('type') == 'zernike_poly'):
-            return ZIP_VERSION_4
-        if (m.get('fourpi') or {}).get('meta', {}).get('pixel_integration', 'box') != 'box':
-            return ZIP_VERSION_4
-        if integrated or m.get('pixel_integration', 'box') not in (None, 'box'):
-            version = ZIP_VERSION_3
-    return version
-
-
 def _channel_models(psf):
     return list(psf) if isinstance(psf, (list, tuple)) else [psf]
 
@@ -622,8 +592,9 @@ def _emitter_params(model):
     return p + (['phi'] if model.type_name in COUPLED else [])
 
 
-def _channel_blocks(psf, source, names, spline_knots='float32'):
-    """(channels, top-level source block or None, {member: array}) of the model(s)"""
+def _channel_blocks(psf, source, names, spline_knots, owners):
+    """Channels, top-level source, member arrays and maximum declared version.
+    owners are the original channel models, including any field compositions."""
     arrays = {}
     t = getattr(psf, 'type_name', None)
     if t == 'fourpi':
@@ -633,7 +604,7 @@ def _channel_blocks(psf, source, names, spline_knots='float32'):
                       model=dict(pol=int(psf.pol[c]), phi_rad=float(psf.phi[c].detach()),
                                  tau=float(psf.tau[c].detach())))
                  for c in range(psf.n_channels)]
-        return chans, sb, arrays
+        return chans, sb, arrays, psf.format_version()
     if t == 'fourpi_spline':
         if psf.has_offsets():
             raise ValueError('psf.zip has no field for FourPiSplinePSF channel offsets: bake them into the tables '
@@ -654,7 +625,7 @@ def _channel_blocks(psf, source, names, spline_knots='float32'):
             g = dict(psf.table.to_dict(), pixel_um=psf.pixel_um)
             if psf.default_dipM is not None:
                 g['default_dipM'] = psf.default_dipM
-            grid_key = 'integrated_spline' if 'basis' in g else 'spline'
+            grid_key = psf.table.type_name
             ch = dict(name=names(c), type='phase_spline', model=_plain({grid_key: g, 'tau': float(psf.tau[c].detach())}),
                       phase_param='phi')
             if spline_knots == 'rebuild':
@@ -668,23 +639,26 @@ def _channel_blocks(psf, source, names, spline_knots='float32'):
                     arrays[members[k]] = table.detach().cpu().numpy().astype(dt)
                 ch['arrays'] = members
             chans.append(ch)
-        return chans, sb, arrays
+        return chans, sb, arrays, psf.format_version(source)
     models = _channel_models(psf)
     sources = list(source) if isinstance(source, (list, tuple)) else [source] + [None] * (len(models) - 1)
     if len(sources) != len(models):
         raise ValueError('source: one per channel')
     chans = []
+    version = (0, 2)
     for c, (m, s) in enumerate(zip(models, sources)):
+        version = max(version, owners[c].format_version(s))
         if m.type_name in COUPLED:
             raise ValueError('a coupled (4Pi) model is one psf.zip of its own, not one of several channels')
         blk, a = _model_block(m, names(c))
         arrays.update(a)
         if s is not None:
+            version = max(version, s.format_version())
             sblk, a = _model_block(s, f'{names(c)}/source')
             arrays.update(a)
             blk['source'] = sblk
         chans.append(dict(name=names(c), **blk))
-    return chans, None, arrays
+    return chans, None, arrays, version
 
 
 def _np_cpu(v):
@@ -788,13 +762,19 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     Optics scalars that are exactly float32 values are written as their shortest float32 decimal (1.33, not
     1.3300000429). The zip is byte-reproducible (fixed member times, no PDF creation date)."""
     from torch_psf import psfreport
+    from torch_psf.field import TiledSplinePSF
+    owners = _channel_models(psf)
     psf, source, channels, tiles = _unwrap_field(psf, source, channels)
     models = _channel_models(psf)
     extras = list(channels or [])
-    chans, sb, arrays = _channel_blocks(
-        psf, source, lambda c: str(extras[c].get('name') or f'ch{c}') if c < len(extras) else f'ch{c}', spline_knots)
+    chans, sb, arrays, version = _channel_blocks(
+        psf, source, lambda c: str(extras[c].get('name') or f'ch{c}') if c < len(extras) else f'ch{c}',
+        spline_knots, owners)
     if len(extras) > len(chans):
         raise ValueError(f'channels: {len(extras)} entries for {len(chans)} channels')
+    prov = provenance if provenance is not None else (models[0].provenance or {})
+    if tiles is not None:
+        prov = dict(prov or {}, field_tiles=tiles)
     for i, ch in enumerate(chans):
         ch.setdefault('mapping', {'type': 'identity'})
         ch.setdefault('intensity_ratio', 1.0)
@@ -807,12 +787,22 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
                     if v is not None:
                         ch['field'] = _plain(v)
                         _check_field(ch['field'], ch, ch.get('crop') or ex.get('crop'), arrays)
+                elif k in ('type', 'model', 'arrays', 'source'):
+                    if _plain(v) != ch.get(k):
+                        raise ValueError(f"channels[{i}].{k} conflicts with the serialized PSF or source")
                 else:
                     ch[k] = _plain(v)
+        # The public API also accepts the field composition as explicit channel metadata.
+        field = extras[i].get('field') if i < len(extras) else None
+        tile = _field_tiles(prov, i)
+        if field or tile:
+            model = models[i] if len(models) > 1 else models[0]
+            version = max(version, TiledSplinePSF.channel_version(model, field, tile))
     names = [c['name'] for c in chans]
     if len(set(names)) != len(names):
         raise ValueError(f'channel names must be unique: {names}')
-    meta = dict(format=FORMAT, version=ZIP_VERSION, psf_type=models[0].type_name if len(models) == 1 else 'channels',
+    meta = dict(format=FORMAT, version=version_string(version),
+                psf_type=models[0].type_name if len(models) == 1 else 'channels',
                 n_dims=models[0].n_dims, emitter_params=_emitter_params(models[0]), units=UNITS)
     if len(chans) > 1:
         meta['per_channel_params'] = ['bg']
@@ -823,9 +813,6 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
         meta['optics'] = optics
     if camera is not None:
         meta['camera'] = _camera_block(camera, arrays)
-    prov = provenance if provenance is not None else (models[0].provenance or {})
-    if tiles is not None:
-        prov = dict(prov or {}, field_tiles=tiles)
     meta['provenance'] = _plain(prov)
     meta['channels'] = chans
     if sb is not None:
@@ -840,7 +827,6 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     if _meta_hook is not None:
         _meta_hook(meta)
         optics = meta.get('optics')
-    meta['version'] = _zip_version(meta)
     # zstack, preview, report
     stack, zs = render_zstack(psf, zstack_planes, zstack_px)
     px = (optics or {}).get('pixel_um')

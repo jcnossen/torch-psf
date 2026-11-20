@@ -78,7 +78,7 @@ psf.save('insitu.json')
 **Data and file formats**
 
 - Read multipart TIFF movies and NumPy stacks with `tp.open_movie`.
-- Read and write psf.zip 0.2.x, 0.3.x and 0.4.x calibrations with `tp.PSF.load` and `tp.io.save_zip`.
+- Read and write psf.zip calibrations from 0.2.x through 0.5.x with `tp.PSF.load` and `tp.io.save_zip`.
 - Filter and render localizations with `tp.Dataset`; estimate drift (DME v2) as a `tp.Drift` with `ds.estimate_drift` and apply it with `ds.drift_corrected`. Read and write HDF5, Picasso and ThunderSTORM CSV.
 - Read frames and camera metadata from a PSF grab recording with `torch_psf.auto.read_psfgrab`.
 
