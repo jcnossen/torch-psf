@@ -156,8 +156,59 @@ def missing(data):
 
 
 # ---------------------------------------------------------------------------------------------------------- pages
+def at_a_glance(pdf, data):
+    os_ = data['optical_os']
+    f = page(pdf, 'Single-PSF models in torch-psf', f"At a glance   /   {data['model']}   /   {data['gpu']}")
+    crlb = data['crlb_nm']['5000']
+    heading(f, .80, f"10,000 spots; bias at 5,000 photons (CRLB {fmt3(crlb)} nm in x / y / z)")
+    picks = [('spectral', os_, 'Vectorial, exact', f'{os_} samples / px'),
+             ('gauss_legendre', os_, 'Vectorial, Gauss–Legendre', f'{os_} nodes / px'),
+             ('box', os_, 'Vectorial, midpoint', f'{os_} samples / px'),
+             ('box', 1, 'Point sampling (what most codes do)', '1 sample / px'),
+             ('bs_int', 2, 'Integrated B-spline (default)', '2 knots / px'),
+             ('cr_pix', 2, 'Catmull–Rom spline', '2 knots / px'),
+             ('astig', None, 'Astigmatic Gaussian', 'fitted')]
+    rows, got = [], {}
+    for name, s, title, setting in picks:
+        r = acc_row(data, name, s)
+        if not r:
+            continue
+        got[(name, s)] = r
+        z = r['bias_nm']['5000']['rms'][2]
+        err = 'reference' if name == 'spectral' else '—' if name == 'astig' else f"{r['value']['max']:.2g}"
+        rows.append([title, setting, err, '≈ 0' if z < .005 else f'{z:.3g} nm' if z >= 1 else f'{z:.2g} nm',
+                     speed_cells(data, name, s, ops=OPS[:2])])
+    table(f, .44, .32, ['Model', 'Setting', 'Max error / peak', 'RMS z bias', 'Forward / value + derivatives (k spots/s)'],
+          rows, [.27, .13, .14, .13, .33], size=9.5)
+    para(f, .425, 'Max error: worst |model − exact model| relative to the spot\'s peak (— for the Gaussian: model mismatch, '
+         'see its page). † = 1,000 spots; ~ = disturbed timing window. Spline rates from the interleaved run.')
+    def sp(name, s, op):
+        r = headline_timing(data, name, op) if name in TABLES else selected_timing(data, name, op, 10000, s)
+        return r['spots_s'] if r and 'spots_s' in r else None
+    notes = []
+    pt, bs, ex, ast = got.get(('box', 1)), got.get(('bs_int', 2)), got.get(('spectral', os_)), got.get(('astig', None))
+    if pt:
+        notes.append(f"Point sampling, the usual choice elsewhere, biases z by {pt['bias_nm']['5000']['rms'][2]:.2g} nm RMS, "
+                     f"{pt['bias_nm']['5000']['rms'][2] / crlb[2]:.0%} of the CRLB: integrating over the pixel matters.")
+    if bs and ex and sp('bs_int', 2, 'forward') and sp('spectral', os_, 'forward') and sp('spectral', os_, 'grad'):
+        notes.append(f"The integrated B-spline is {sp('bs_int', 2, 'forward') / sp('spectral', os_, 'forward'):.0f}× "
+                     f"faster than the exact model forward and {sp('bs_int', 2, 'grad') / sp('spectral', os_, 'grad'):.0f}× "
+                     f"for value plus derivatives (what fitting needs), with its z bias "
+                     f"{crlb[2] / max(bs['bias_nm']['5000']['rms'][2], 1e-9):,.0f}× below the CRLB.")
+    notes.append(f'Gauss–Legendre at {os_} nodes per pixel is as accurate as exact integration and needs no FFT; midpoint '
+                 'converges slowly (error ∝ 1/S²).')
+    if ast:
+        notes.append(f"A fitted astigmatic Gaussian biases z by {ast['bias_nm']['5000']['rms'][2]:.0f} nm RMS, "
+                     f"{ast['bias_nm']['5000']['rms'][2] / crlb[2]:.0f}× the CRLB, on this calibration.")
+    y = .34
+    for n in notes:
+        para(f, y, '•  ' + n, width=150)
+        y -= .05 if len(n) < 150 else .07
+    finish(pdf, f)
+
+
 def overview(pdf, data):
-    f = page(pdf, 'Single-PSF models in torch-psf', f"{data['model']}   /   {data['gpu']}   /   one emitter per "
+    f = page(pdf, 'Models and method', f"{data['model']}   /   {data['gpu']}   /   one emitter per "
              f"{data['roisize']} × {data['roisize']} ROI")
     heading(f, .80, 'Models compared')
     rows = [['Vectorial PSF', 'Pupil model; pixel = point sample or midpoint / exact / Gauss–Legendre integral',
@@ -395,6 +446,7 @@ def main():
     output = args.output or args.input.with_suffix('.pdf')
     output.parent.mkdir(parents=True, exist_ok=True)
     with PdfPages(output, metadata={'Author': 'Jelmer Cnossen', 'Title': 'Single-PSF models in torch-psf'}) as pdf:
+        at_a_glance(pdf, data)
         overview(pdf, data)
         vectorial(pdf, data)
         gaussians(pdf, data)
