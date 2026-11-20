@@ -30,10 +30,10 @@ def test_indexed_channels(components):
     pc = psf.channel_positions(POS)
     dipM = M + .02 if components else None
     reference = [m.render(pc[:, i], grad=True, dipM=dipM) for i, m in enumerate(models)]
-    table = psf.indexed.table
+    table = psf.indexed.spline
     assert table.axes[0] == 'channel'
     table.knots.requires_grad_()
-    with patch.object(table, 'evaluate_tables', wraps=table.evaluate_tables) as evaluate:
+    with patch.object(table, 'evaluate_splines', wraps=table.evaluate_splines) as evaluate:
         actual = psf.render(POS, grad=True, dipM=dipM)
         evaluate.assert_called_once()
     for part, expected in zip(actual, zip(*reference)):
@@ -113,7 +113,7 @@ def test_spectrum_and_zmode():
     torch.testing.assert_close(m.render(POS, dipM=M), expected)
     torch.testing.assert_close(ZMode(base, 'emitter').render(POS), base.render(POS))
     torch.testing.assert_close(original, base.pupil_phase, atol=0., rtol=0.)
-    table = m.to_spline(**GRID, value='density', components='dipole')
+    table = m.to_spline(**GRID, integrated=True, components='dipole')
     assert table.knots.shape[0] == 6
     torch.testing.assert_close(table.render(POS, dipM=M), expected, atol=.0015, rtol=.01)
 
@@ -127,7 +127,7 @@ def test_coupled_spectrum():
     images = spectrum.render(POS, phi=phase, dipM=M)
     table = spectrum.to_spline(**GRID, components='dipole')
     torch.testing.assert_close(table.render(POS, phi=phase, dipM=M), images, rtol=.015, atol=.0003)
-    assert table.table.axes == ('phase', 'channel', 'dipole')
+    assert table.spline.axes == ('phase', 'channel', 'dipole')
 
 
 def test_joint_channel_tile_bank():
@@ -138,8 +138,8 @@ def test_joint_channel_tile_bank():
     pc = channels.channel_positions(POS)
     expected = [m.render(pc[:, i], True, xy=xy[:, i]) for i, m in enumerate(models)]
     channels.render(POS, xy=xy)
-    table = channels._tile_bank.table
-    with patch.object(table, 'evaluate_tables', wraps=table.evaluate_tables) as evaluate:
+    table = channels._tile_bank.spline
+    with patch.object(table, 'evaluate_splines', wraps=table.evaluate_splines) as evaluate:
         actual = channels.render(POS, True, xy=xy)
         evaluate.assert_called_once()
     for v, rows in zip(actual, zip(*expected)):
@@ -149,7 +149,7 @@ def test_joint_channel_tile_bank():
 def test_angles_and_dipoles_by_index():
     a, b = optics(), optics().set_zernike({6: .1})
     from torch_psf import to_spline
-    s = to_spline([a, b], value='density', components='dipole', **GRID)
+    s = to_spline([a, b], integrated=True, components='dipole', **GRID)
     channels = ChannelsPSF([s, s], channel_offsets=[[.1, .2], [.2, -.3]])
     angle = torch.tensor([1, 0])
     pc = channels.channel_positions(POS)

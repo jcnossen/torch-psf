@@ -74,7 +74,7 @@ reference('spline_nonbox_source', v.to_spline(roisize=5, z_range=(0.1, 0.2), ove
 v2 = v.resized(5)
 v2.set_zernike({6: -0.18})
 for name, models in [('integrated', v), ('integrated_angles', [v, v2])]:
-    model = to_spline(models, (0.1, 0.2), kernel='bspline', value='density', oversample=2, dz_um=0.05, xy_limit=0.5, zpad=2)
+    model = to_spline(models, (0.1, 0.2), kernel='bspline', integrated=True, oversample=2, dz_um=0.05, xy_limit=0.5, zpad=2)
     reference(name, model, source=v if isinstance(models, list) else None)
 # A SIMCODE-style spectral calibration with a non-diagonal covariance and dipole tensor.
 v.pixel_integration = 'exact'

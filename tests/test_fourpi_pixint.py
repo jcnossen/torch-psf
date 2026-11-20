@@ -66,7 +66,7 @@ def test_fourpi_integrated_round_trip(tmp_path, monkeypatch):
     pos = torch.tensor([[.23, -.17, -.0023], [-.14, .38, .012]], device=DEV)
     phase = torch.tensor([.61, -1.51], device=DEV)
     spline = model.to_spline(oversample=5, dz_um=.005, xy_limit=1, zpad=6, chunk=12)
-    assert isinstance(spline.table, SplinePSF) and spline.table.value == 'density'
+    assert isinstance(spline.spline, SplinePSF) and spline.spline.integrated
     ref = model.render(pos, phi=phase)
     assert torch.all((spline.render(pos, phi=phase) - ref).abs().amax((-2, -1)) / ref.amax((-2, -1)) < 2e-5)
     for psf in (model, spline):

@@ -168,7 +168,13 @@ test('psfzip: refuse unknown versions, integration modes and invalid spline coef
     reject(m => {
       m.channels[0].type = 'spline_table';
       m.channels[0].model = { spline_table: { basis, value } };
-    }, 'cannot render this spline basis and value');
+    }, 'cannot render this spline kernel / integration');
+  }
+  for (const [kernel, integrated] of [['catmull', true], ['bspline', false]]) {
+    reject(m => {
+      m.channels[0].type = 'cubic_spline';
+      m.channels[0].model = { cubic_spline: { kernel, integrated } };
+    }, 'cannot render this spline kernel / integration');
   }
   reject(m => m.channels[0].source.model.pixel_integration = 'unknown_rule', 'unknown_rule');
   reject(m => m.channels[0].model.integrated_spline.basis = 'unknown_basis', 'unknown_basis');

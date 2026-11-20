@@ -104,7 +104,7 @@ def test_state_and_file_round_trip(tmp_path):
 def test_spline_matches_model_and_phase():
     p = model(asym=True, R=11)
     spl = p.to_spline(11, (-0.2, 0.2), oversample=3, dz_um=0.02, zpad=3)
-    assert isinstance(spl, FourPiSplinePSF) and spl.table.table_map.shape == (3, 4)
+    assert isinstance(spl, FourPiSplinePSF) and spl.spline.spline_index.shape == (3, 4)
     pos = torch.tensor([[0.2, -0.3, 0.05], [-0.4, 0.1, -0.13], [0.33, 0.0, 0.17]])
     Phi = torch.tensor([0.5, 2.0, 4.0])
     with torch.no_grad():
@@ -112,7 +112,7 @@ def test_spline_matches_model_and_phase():
     assert a.shape == b.shape == (3, 4, 11, 11)
     assert float((a - b).abs().max() / b.abs().max()) < 1e-2
     # at the knots (sub-pixel shift 0, knot z) the table reproduces the model up to float32 noise
-    zk = float(spl.table.zs[5])
+    zk = float(spl.spline.zs[5])
     pk = torch.tensor([[0.0, 0.0, zk], [1.0 / 3, -2.0 / 3, zk]])
     with torch.no_grad():
         a, b = spl.render(pk, phi=Phi[:2]), p(pk, phi=Phi[:2])

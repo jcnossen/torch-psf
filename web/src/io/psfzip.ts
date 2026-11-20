@@ -180,8 +180,8 @@ export function psfFromMeta(meta: Record<string, any>, arrays: Record<string, Nd
   const ch = chans[0];
   if (ch.model?.spline?.dipole_components || ch.model?.integrated_spline?.dipole_components)
     throw new Error('dipole-component spline (dipole_components): not supported by the web app');
-  if (ch.type === 'spline_table' || ch.model?.spline_table)
-    throw new Error('spline_table: the web app cannot render this spline basis and value');
+  if (ch.type === 'cubic_spline' || ch.model?.cubic_spline || ch.type === 'spline_table' || ch.model?.spline_table)
+    throw new Error('cubic_spline: the web app cannot render this spline kernel / integration');
   const common = { channelType: ch.type, camera: meta.camera ?? null, meta, arrays, notes };
   for (const block of [meta.source, ...chans.flatMap(c => [c, c.source])]) integrationMode(block?.model?.pixel_integration);
   let spline: SplineModel | null = null;

@@ -315,7 +315,7 @@ def spline_stack(spline, R=None, knots=None):
         pos[:, 2] = -focus.reshape(-1)
         lo, hi = spline.z_limits
         pos[:, 2] = pos[:, 2].clamp(lo, hi)
-        return spline.render_tables(pos, knots=K0).reshape(n, K, Rr, Rr)
+        return spline.render_splines(pos, knots=K0).reshape(n, K, Rr, Rr)
     return CallableStack(fn, dict(knots=K0), Rr)
 
 

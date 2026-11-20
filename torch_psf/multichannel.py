@@ -426,7 +426,7 @@ class MultiChannelPSF(PSF):
             xy = -self._offsets(N, offsets).to(rois.dtype).expand(N, C, 2).mean(1)        # [N, 2]
         cols = [xy, torch.full((N, 1), float(z), device=rois.device), torch.ones(N, 1, device=rois.device), bg]
         if self.extra_params:
-            ex = torch.zeros(N, self.n_extra, device=rois.device) if extra is None else \
+            ex = torch.zeros(N, self.n_extra, device=rois.device) if extra is None else\
                 _as_t(extra, rois.device).reshape(-1, self.n_extra).expand(N, self.n_extra)
             cols.append(ex)
         th = self.clamp_theta(torch.cat(cols, 1), offsets, corners=corners)
@@ -653,7 +653,7 @@ class ChannelsPSF(MultiChannelPSF):
             else:
                 indices = torch.full((n, 1), -1, device=self.dev, dtype=torch.long)
                 w = pos_c.new_ones(n, 1)
-            # Include the reference table for an empty batch so output shape and dtype are preserved.
+            # Include the reference spline for an empty batch so output shape and dtype are preserved.
             rows = torch.empty_like(indices)
             for tile in indices.unique().tolist() or [-1]:
                 key = (k, tile)
@@ -813,7 +813,7 @@ class ChannelsPSF(MultiChannelPSF):
 
     def to_spline(self, roisize=None, z_range=None, **grid):
         """ChannelsPSF of the channel models' to_spline (the same offsets, ratios and mappings; the offsets stay a
-        channel property, they are not baked into the tables). A FieldPSF channel becomes the spline of its reference
+        channel property, they are not baked into the splines). A FieldPSF channel becomes the spline of its reference
         point (use to_tiled per channel for the field dependence)."""
         return ChannelsPSF([m.to_spline(roisize, z_range, **grid) for m in self.models], self.channel_offsets,
                            self.intensity_ratio, self.names, self._maps_copy())

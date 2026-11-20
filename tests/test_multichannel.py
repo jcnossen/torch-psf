@@ -76,12 +76,12 @@ def test_spline_offsets_and_knots_override():
         a = spl.render(POS, phi=PHI)
     assert float((a - ref).abs().max() / ref.abs().max()) < 1e-6
     K = spl.knots.clone().requires_grad_(True)
-    v = spl.render_tables(POS, phi=PHI, knots=K)
+    v = spl.render_splines(POS, phi=PHI, knots=K)
     assert torch.allclose(v, a, atol=1e-7)
     (v ** 2).sum().backward()
     assert K.grad is not None and float(K.grad.abs().max()) > 0
     with torch.no_grad():
-        assert torch.allclose(spl.render_tables(POS, phi=PHI, knots=2 * spl.knots), 2 * a, atol=1e-6)
+        assert torch.allclose(spl.render_splines(POS, phi=PHI, knots=2 * spl.knots), 2 * a, atol=1e-6)
 
 
 def test_channels_psf_render_and_offsets():
@@ -260,7 +260,7 @@ def test_to_spline_bakes_offsets(spline4pi):
     with torch.no_grad():
         a, b = spl.render(pos, phi=PHI), p.render(pos, phi=PHI)
     assert float((a - b).abs().max() / b.abs().max()) < 1e-2
-    zk = float(spl.table.zs[5])
+    zk = float(spl.spline.zs[5])
     pk = torch.tensor([[0.0, 0.0, zk], [0.5, -0.5, zk]])
     with torch.no_grad():
         a, b = spl.render(pk, phi=PHI[:2]), p.render(pk, phi=PHI[:2])

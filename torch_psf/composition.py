@@ -198,5 +198,5 @@ class _CoupledSpectrum(Polychromatic, MultiChannelPSF):
     tau = property(lambda self: self.base.tau)
 
     def state(self):
-        # A monochromatic source block cannot regenerate a spectrum-averaged table.
+        # A monochromatic source block cannot regenerate a spectrum-averaged spline.
         return None

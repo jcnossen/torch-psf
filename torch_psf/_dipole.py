@@ -1,4 +1,4 @@
-"""Tensor convention shared by dipole-aware channel models and spline tables."""
+"""Tensor convention shared by dipole-aware channel models and splines."""
 import torch
 
 
@@ -63,9 +63,9 @@ def default_weights(M=None, dipw=None):
         M = torch.diag(w) / 3
     M = torch.as_tensor(M)
     if M.shape != (3, 3):
-        raise ValueError('a spline needs one default dipole tensor per table')
+        raise ValueError('a spline needs one default dipole tensor per spline')
     return M_to_m6(M).detach()
 
 
-def combine_tables(weights, tables):
+def combine_splines(weights, tables):
     return torch.einsum('...k,...kzyx->...zyx', weights, tables)

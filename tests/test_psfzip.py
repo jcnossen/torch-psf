@@ -50,7 +50,7 @@ def models():
         v.pupil_amp.copy_(1 + 0.1 * v.mask * v.py)
     v.blur = torch.tensor([0.1, 0.05, 0.01])
     v.dipM = torch.diag(torch.tensor([0.3, 0.3, 0.4]))
-    s = vectorial().to_spline(11, kernel='catmull', value='pixel')
+    s = vectorial().to_spline(11, kernel='catmull', integrated=False)
     fp = fourpi()
     return dict(vectorial=(v, None), spline=(s, vectorial()), gaussian=(GaussianPSF(11, 1.3, DEV, pixel_um=0.1), None),
                 astig_gaussian=(AstigmaticGaussianPSF(11, (1.2, 1.4), 0.2, 0.4, device=DEV, pixel_um=0.1), None),

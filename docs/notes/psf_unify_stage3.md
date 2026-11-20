@@ -16,13 +16,13 @@ composition and spline indexing. The numerical comparison used CPU float32 with 
 | `torch_psf.orientation.Polychromatic` | `torch_psf.Polychromatic(model, wavelengths_um, weights)`. Tabulation stores the weighted response once per output component. |
 | `field_xy=` | `xy=` in camera pixels. For a mapped channel stack supply ROI centres as `xy[N,C,2]` in render. Fit continues to take ROI corners. |
 | `render(..., offsets=..., corners=...)` | `render_geometry(..., offsets=..., corners=...)` for explicit acquisition geometry. Fixed model offsets apply automatically in `render`. |
-| Spline `render(..., knots=..., weights=...)` | `render_tables(..., knots=..., weights=...)` for explicit coefficient adjoints and custom table weights. |
+| Spline `render(..., knots=..., weights=...)` | `render_splines(..., knots=..., weights=...)` for explicit coefficient adjoints and custom table weights. |
 | Optical `resized(P, oversample=..., pixel_integration=...)` | `resampled(P, oversample=..., pixel_integration=...)`. All models expose `resized(roisize)`, `to(device=None, dtype=None)` and `to_spline(roisize=None, z_range=None, **grid)`. |
 | Orientation fitter with externally evaluated field Zernikes | Compose `FieldPSF` and pass `xy=` to the fitter. The fitter also accepts measured per-spot `zcoef_offset` for studies supplying coefficients directly. |
 | Private `field._Bound` | `field_model.bind(xy)` returns a `Bound` model. Tiled fits use the same fixed coordinates and batching as exact field fits. |
 
 The old keyword aliases and orientation wrapper imports are removed. The stage-2 SIMCODE calls for
-`to_spline(per_angle_models, kernel='bspline', value='density', **grid)`, `PSF.load(path, angle=k)`,
+`to_spline(per_angle_models, kernel='bspline', integrated=True, **grid)`, `PSF.load(path, angle=k)`,
 `convert_calibration` and `save_zip` retain their meaning.
 
 ## Accuracy and reference checks

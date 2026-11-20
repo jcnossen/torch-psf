@@ -54,7 +54,7 @@ def knot_loss(spline, knots, rois, theta, batch=4000, backward=True, weight=1.0,
     tot = 0.0
     for s in range(0, len(rois), batch):
         t = theta[s:s + batch]
-        mu = t[:, 3, None, None] * spline.render_tables(t[:, :3], knots=knots) + t[:, 4, None, None]
+        mu = t[:, 3, None, None] * spline.render_splines(t[:, :3], knots=knots) + t[:, 4, None, None]
         v = var[s:s + batch] if (torch.is_tensor(var) and var.dim() > 0) else var
         l = weight * poisson_nll(rois[s:s + batch], mu, v).sum()
         if backward:

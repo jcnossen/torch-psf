@@ -644,21 +644,21 @@ class TiledSplinePSF(FieldPSF):
             self.tile, self.extent, self.roisize, self.z_range, kind=self.kind, blend=self.blend, **self.grid)
 
     @staticmethod
-    def tile_version(value, blend):
-        if blend == 'bilinear' or value == 'density':
+    def tile_version(integrated, blend):
+        if blend == 'bilinear' or integrated:
             return (0, 4)
         return (0, 2)
 
     @classmethod
     def channel_version(cls, model, field, tiles):
         """Tile features supplied as raw channel metadata to save_zip."""
-        value = getattr(model, 'value', None) if (field or {}).get('type') == 'zernike_poly' else None
-        return cls.tile_version(value, (tiles or {}).get('blend'))
+        integrated = getattr(model, 'integrated', False) if (field or {}).get('type') == 'zernike_poly' else False
+        return cls.tile_version(integrated, (tiles or {}).get('blend'))
 
     def format_version(self, source=None):
         source = self.base if source is None else source
         model = self.reference_spline()
-        return max(model.format_version(source), self.tile_version(model.value, self.blend))
+        return max(model.format_version(source), self.tile_version(model.integrated, self.blend))
 
     def tiles_info(self):
         info = dict(tile_px=self.tile, extent=list(self.extent), roisize=self.roisize)
@@ -707,7 +707,7 @@ def field_psf_from_file(model, source, block, arrays=None, crop=None, tiles=None
     fp = FieldPSF(vec, fz)
     if hasattr(model, 'zidx'):
         return fp
-    fp.spline_grid = dict(kind='integrated' if model.value == 'density' else 'cubic',
+    fp.spline_grid = dict(kind='integrated' if model.integrated else 'cubic',
                           kernel=model.kernel, backend=model.backend, oversample=model.S, dz_um=model.hz,
                           zpad=model.zpad, xy_limit=model.xy_limit, roisize=model.roisize, z_range=model.z_range)
     t = dict(tiles or {})

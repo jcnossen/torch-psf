@@ -70,18 +70,18 @@ def models():
     yield 'polychromatic', Polychromatic(v, [.64, .72], [.3, .7]), {}
     yield 'gauss2d', GaussianPSF(7, (1.15, 1.4), pixel_um=.108, device='cpu'), {}
     yield 'gauss3d', AstigmaticGaussianPSF(7, (1.15, 1.4), pixel_um=.108, device='cpu'), {}
-    yield 'cubic', v.to_spline(kernel='catmull', value='pixel', **GRID), {}
-    yield 'cubic_dipole', v.to_spline(kernel='catmull', value='pixel', **GRID, dipole_components=True), dict(dipM=M)
-    yield 'integrated', to_spline(v, kernel='bspline', value='density', **GRID), {}
+    yield 'cubic', v.to_spline(kernel='catmull', integrated=False, **GRID), {}
+    yield 'cubic_dipole', v.to_spline(kernel='catmull', integrated=False, **GRID, dipole_components=True), dict(dipM=M)
+    yield 'integrated', to_spline(v, kernel='bspline', integrated=True, **GRID), {}
     other = vec().set_zernike({6: -.03})
-    integrated = to_spline([v, other], kernel='bspline', value='density', **GRID)
+    integrated = to_spline([v, other], kernel='bspline', integrated=True, **GRID)
     yield 'integrated_angle', integrated.for_angle(1), {}
     yield 'integrated_angle_mean', integrated, {}
-    yield 'integrated_dipole', to_spline(v, kernel='bspline', value='density', **GRID, dipole_components=True), dict(dipM=M)
-    comps = to_spline([v, other], kernel='bspline', value='density', **GRID, dipole_components=True)
+    yield 'integrated_dipole', to_spline(v, kernel='bspline', integrated=True, **GRID, dipole_components=True), dict(dipM=M)
+    comps = to_spline([v, other], kernel='bspline', integrated=True, **GRID, dipole_components=True)
     yield 'integrated_angle_dipole', comps.for_angle(1), dict(dipM=M)
     for kernel in ('catmull', 'bspline'):
-        s = to_spline(v, GRID['z_range'], roisize=7, oversample=2, value='density', dz_um=.015, xy_limit=.75, kernel=kernel)
+        s = to_spline(v, GRID['z_range'], roisize=7, oversample=2, integrated=True, dz_um=.015, xy_limit=.75, kernel=kernel)
         yield 'pixel_' + kernel, s, {}
         conv = copy(s)
         conv.backend = 'conv'

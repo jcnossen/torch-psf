@@ -15,8 +15,8 @@ Python accepts zip minors 0.2 through 0.5 and standalone minors 0.1 through 0.5.
 zip minors 0.2 and 0.3. In particular, a 0.4 reader assumes fixed interpolation rules when it rebuilds
 a phase table or a field tile. A new minor prevents that assumption from changing the pixels.
 
-A Catmull-Rom density grid stores `basis="catmull_rom"`, `value="density"` and density samples in
-`coefs`. A B-spline pixel grid stores `basis="cubic_bspline"`, `value="pixel"` and prefiltered
+A Catmull-Rom density grid stores `basis="catmull_rom"`, `integrated=True` and density samples in
+`coefs`. A B-spline pixel grid stores `basis="cubic_bspline"`, `integrated=False` and prefiltered
 pixel coefficients in `knots`. Each scalar volume is `[nz,n,n]`. The phase, angle, dipole and field
 layouts are specified in the [format reference](../PSF_FORMAT.md#model-types-channelscmodel-sourcemodel).
 

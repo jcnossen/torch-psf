@@ -79,10 +79,10 @@ def test_sofi_grid_pin(models):
 # The spline repr in fit_report.pdf changed at stage 3. On the original writer stack every
 # other member, including psf.json, zstack.tif and preview.png, was verified byte for byte.
 REPORT_REPR_HASHES = {
-    'cubic': '17c25cdfc1cadb699ea50cba046d37c371fb32c3f7b59058296985198dff02fe',
-    'integrated': '661e35644b556eb596e43ee4ff7c95f7686ded7cdf05bb67a2958fc375f68d6d',
-    'integrated_angle_dipole': '751a71226188756967c20ba0bdb607f07349d68ddff16b5b621fbbe9e4203c51',
-    'tiles': '2d91900b74c0cfc430c6cf2ad3b24dff89da01e59eabb33c88d8ff4278217fa0',
+    'cubic': 'a18d345f3f5d9525a1dbcaba4f9395bf7e5ebf47d791d2d977f83664f57ed43c',
+    'integrated': '6068ca711fd60bec9c9067f11a3be5f0eeafbf1bcce27ca78c567d7abb0e1069',
+    'integrated_angle_dipole': 'df07efa37bbb35220e2e3cdee1d13ffe07fcf04e65d656623a07108404b37af1',
+    'tiles': '6b9cbfd626c813970ab3ab07123a1b5ce84c7d8adf07a0fe80c07fe927c4766d',
 }
 
 

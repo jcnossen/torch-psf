@@ -35,7 +35,7 @@ the optical state embedded in a phase spline. Readers check the major and minor 
 | Gaussian, box vectorial or 4Pi, scalar Catmull-Rom pixel grid (including phase), channel geometry, nearest pixel tiles | 0.2.0 | 0.1.0 for a single model |
 | Non-box vectorial integration, independent B-spline density grid (including per-angle) | 0.3.0 | 0.3.0 |
 | Non-box 4Pi, integrated phase grid, spline dipole components, integrated or bilinearly blended field tiles | 0.4.0 | 0.4.0 for a single model |
-| Explicit `spline_table` grid, including its use for a phase channel or a tile | 0.5.0 | 0.5.0 |
+| Explicit `cubic_spline` grid (earlier name `spline_table`), including its use for a phase channel or a tile | 0.5.0 | 0.5.0 |
 
 Python reads zip minors 0.2 through 0.5. Standalone files have a top-level `type` and optional sidecar
 `.npz`. Python also reads historical standalone 0.1 files, including those that already contained newer
@@ -96,8 +96,8 @@ Channel entry:
 | key | type | required | meaning |
 |---|---|---|---|
 | `name` | str | yes | unique name (`ch0`, `ch1`, ... by default; e.g. `plane0`, `red`, `top`) |
-| `type` | str | yes | model type: `vectorial`, `spline`, `integrated_spline`, `spline_table`, `gaussian`, `astig_gaussian` (independent), `phase_spline`, `source_output` (coupled) |
-| `model` | dict | yes | the model's parameters: exactly the keys of the standalone JSON of that type, without `format` / `version` / `type` / `camera` / `provenance` / `arrays` (tables below) |
+| `type` | str | yes | model type: `vectorial`, `spline`, `integrated_spline`, `cubic_spline` (read also: `spline_table`), `gaussian`, `astig_gaussian` (independent), `phase_spline`, `source_output` (coupled) |
+| `model` | dict | yes | the model's parameters: exactly the keys of the standalone JSON of that type, without `format` / `version` / `type` / `camera` / `provenance` / `arrays` (splines below) |
 | `arrays` | {name: member} | no | the model's arrays by their standalone npz names (`pupil_phase`, `pupil_amp`, `knots`; `coefs` / `coefs_angle` for integrated_spline; `inc` / `cr` / `ci` for phase_spline) |
 | `source` | {type, model, arrays} | no | independent channels: the model this channel was derived from (e.g. the vectorial model a spline was tabulated from) |
 | `index` | int | source_output | the output index of the source model |
@@ -143,7 +143,7 @@ px), pixel_um}. A scalar spline stores `knots` [nz, n, n] float32 (n = (2c + 1) 
 g(u, v, z), knot (k, i, j) at z = z0_um + k dz_um, v = u0_px + i / S, u = u0_px + j / S. z: the coordinate the spline
 was tabulated in (emitter height for in-situ models; -focus for bead stacks).
 
-**integrated_spline** (`SplinePSF` with `kernel='bspline', value='density'`): a different representation from `spline`, under its
+**integrated_spline** (`SplinePSF` with `kernel='bspline', integrated=True`): a different representation from `spline`, under its
 own type name and array names so that readers that do not know it refuse it (an unknown `type`) instead of reading
 its coefficients as `spline` knots. `integrated_spline` {basis `"cubic_bspline"`, value `"pixel_integral"`, roisize,
 z_range [2] um (the heights it is accurate on), oversample S (knots per px), dz_um, zpad (knot planes outside z_range),
@@ -163,12 +163,16 @@ the knots beyond the stored grid are not defined: readers clamp |x|, |y| to the 
 `psf_blur_angle_px2`): one coefficient set per pattern angle, selected per frame by the parameter `angle` (Python:
 `PSF.load(path, angle=a)`); the model without an angle is the mean of the angle coefficient sets (= the mean of the
 angle images). `source` (optional): the vectorial model the coefficients were built from
-(`to_spline(..., kernel='bspline', value='density')`: the point density of the exact band-limited image, prefiltered with the cubic
+(`to_spline(..., kernel='bspline', integrated=True)`: the point density of the exact band-limited image, prefiltered with the cubic
 B-spline, mirror boundary in all three axes).
 
-**spline_table** (0.5.0) uses the same knot origins, dimensions, spacing and optional backend as the
-older grids. The grid is stored under `channels[c].model.spline_table` or, in a standalone file, under
-`spline_table` with top-level `type="spline_table"`. Both `basis` and `value` are required.
+**cubic_spline** (0.5.0) uses the same knot origins, dimensions, spacing and optional backend as the
+older grids. The grid is stored under `channels[c].model.cubic_spline` or, in a standalone file, under
+`cubic_spline` with top-level `type="cubic_spline"`. Both `kernel` (`"catmull"` or `"bspline"`) and `integrated`
+(true: the arrays are the point density and a pixel value is the exact integral of the spline over the pixel; false:
+the arrays are pixel values at sub-pixel shifts, interpolated pointwise) are required. Files written by 0.5.0 builds
+before this name used the block `spline_table` with `basis` (`catmull_rom` / `cubic_bspline`) and `value`
+(`density` / `pixel`) instead; readers still accept it. The spline below gives the arrays per combination.
 
 | Builder kernel and value | Stored basis | Stored value | Scalar array and evaluation |
 |---|---|---|---|
@@ -178,11 +182,11 @@ older grids. The grid is stored under `channels[c].model.spline_table` or, in a 
 An independent channel references each array by member name, for example `ch0/coefs.npy`. A
 standalone model references the same array by key in its sidecar. Readers use the stored samples or
 coefficients directly. Per-angle arrays add a leading angle dimension and the suffix `_angle`, with
-`n_angles` in the grid. Per-angle Catmull-Rom pixel tables also use this block (`catmull_rom`, `pixel`,
-`knots_angle`). Dipole tables prefix the array name with `dipole_` and add a six-component dimension
+`n_angles` in the grid. Per-angle Catmull-Rom pixel-value splines also use this block (`catmull_rom`, `pixel`,
+`knots_angle`). Dipole splines prefix the array name with `dipole_` and add a six-component dimension
 immediately before `nz`. The default weights and any fixed response follow the existing dipole layout.
 
-A 0.5 phase channel uses `model.spline_table` for its three phase arrays. Standalone phase files
+A 0.5 phase channel uses `model.cubic_spline` for its three phase arrays. Standalone phase files
 carry the same basis and value in `fourpi_spline`. Field channels rebuild each tile from the reference
 grid's basis, value, backend and sampling. The plain builder default is `torch_psf.spline.DEFAULT_SPLINE`
 (kernel, value, knots per pixel): the integrated B-spline at 2 knots/px ('integrated_spline' block, psf.zip 0.3.0);
@@ -244,16 +248,16 @@ the image is the mean of the first three components.
 
 | Channel and grid | Additional or replacement arrays | Shape and meaning |
 |---|---|---|
-| `spline` | `dipole_knots` | `[6,nz,n,n]` Catmull–Rom tables of pixel values |
+| `spline` | `dipole_knots` | `[6,nz,n,n]` Catmull–Rom splines of pixel values |
 | `integrated_spline` | `dipole_coefs` or `dipole_coefs_angle` | `[6,nz,n,n]` or `[A,6,nz,n,n]` density coefficients, integrated over the pixel |
 | `phase_spline` with either grid | `dipole_inc`, `dipole_cr`, `dipole_ci` replace the three scalar phase arrays | Each is `[6,nz,n,n]`. Apply the same phase formula to each dipole component. |
 
 For an independent channel, the grid's `default_weights` holds the six tensor entries in basis order
-(one row per angle for angle tables). Their weighted sum gives the default table. Average angle-specific
+(one row per angle for angle splines). Their weighted sum gives the default spline. Average angle-specific
 default responses after weighting. If the weights are absent, use the stored `knots`, `coefs` or
 `coefs_angle` default from the file. A phase grid can store
 `default_dipM` (a 3 × 3 tensor) for this purpose, with isotropic emission as the default when absent. Phase files
-using `rebuild` regenerate all six tables per phase component. The standalone `fourpi_spline` JSON/NPZ form
+using `rebuild` regenerate all six splines per phase component. The standalone `fourpi_spline` JSON/NPZ form
 stacks the phase arrays as `dipole_knots[3,C,6,nz,n,n]`. Dipole components require at least version 0.4.0,
 including cubic grids built from a box-integrated source.
 

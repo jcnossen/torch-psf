@@ -11,7 +11,7 @@ from torch_psf import psf as psf_module
 
 POS = torch.tensor([[.21, -.16, .014], [-.27, .31, .033]])
 GRID = dict(dz_um=.02, xy_limit=.5)
-NEW = [('catmull', 'density'), ('bspline', 'pixel')]
+NEW = [('catmull', True), ('bspline', False)]
 
 
 def vectorial(mode='midpoint'):
@@ -25,44 +25,44 @@ def equal_render(actual, expected, **options):
         assert torch.equal(a, b)
 
 
-@pytest.mark.parametrize('kernel,value,version', [
-    ('catmull', 'pixel', '0.2.0'), ('bspline', 'density', '0.3.0'),
-    ('catmull', 'density', '0.5.0'), ('bspline', 'pixel', '0.5.0'),
+@pytest.mark.parametrize('kernel,integrated,version', [
+    ('catmull', False, '0.2.0'), ('bspline', True, '0.3.0'),
+    ('catmull', True, '0.5.0'), ('bspline', False, '0.5.0'),
 ])
-def test_default_round_trip(tmp_path, monkeypatch, kernel, value, version):
-    monkeypatch.setattr(spline, 'DEFAULT_SPLINE', (kernel, value, 2))
+def test_default_round_trip(tmp_path, monkeypatch, kernel, integrated, version):
+    monkeypatch.setattr(spline, 'DEFAULT_SPLINE', (kernel, integrated, 2))
     src = vectorial()
     model = src.to_spline(**GRID)
-    assert (model.kernel, model.value, model.S) == (kernel, value, 2)
+    assert (model.kernel, model.integrated, model.S) == (kernel, integrated, 2)
     # Loading ignores the current builder policy.
-    monkeypatch.setattr(spline, 'DEFAULT_SPLINE', ('bspline', 'density', 4))
+    monkeypatch.setattr(spline, 'DEFAULT_SPLINE', ('bspline', True, 4))
     for ext in ('json', 'zip'):
         path = tmp_path / ('model.' + ext)
         meta = (model.save(path, source=src) if ext == 'json' else
                 psfzip.save_zip(path, model, source=src, zstack_planes=2))
         assert meta['version'] == ('0.1.0' if ext == 'json' and version == '0.2.0' else version)
         loaded = PSF.load(path, device='cpu')
-        assert (loaded.kernel, loaded.value, loaded.S, loaded.backend) == (kernel, value, 2, model.backend)
+        assert (loaded.kernel, loaded.integrated, loaded.S, loaded.backend) == (kernel, integrated, 2, model.backend)
         assert torch.equal(loaded.knots, model.knots)
         equal_render(loaded, model)
         if version == '0.5.0':
             block = meta if ext == 'json' else meta['channels'][0]['model']
-            assert block['spline_table']['basis'] == ('catmull_rom' if kernel == 'catmull' else 'cubic_bspline')
-            assert block['spline_table']['value'] == value
+            assert block['cubic_spline']['kernel'] == kernel
+            assert block['cubic_spline']['integrated'] == integrated
             with monkeypatch.context() as old:
                 old.setattr(psfzip if ext == 'zip' else psf_module, 'READ_VERSIONS', ((0, 2), (0, 3), (0, 4)))
                 with pytest.raises(ValueError, match=r'version 0\.5\.0: this reader supports'):
                     PSF.load(path)
 
 
-@pytest.mark.parametrize('kernel,value', NEW + [('catmull', 'pixel')])
-def test_angle_component_tables(tmp_path, kernel, value):
+@pytest.mark.parametrize('kernel,integrated', NEW + [('catmull', False)])
+def test_angle_component_tables(tmp_path, kernel, integrated):
     models = [vectorial(), vectorial().set_zernike({6: .03})]
-    model = spline.to_spline(models, kernel=kernel, value=value, components='dipole', oversample=2, **GRID)
+    model = spline.to_spline(models, kernel=kernel, integrated=integrated, components='dipole', oversample=2, **GRID)
     path = tmp_path / 'angles.zip'
     meta = psfzip.save_zip(path, model, zstack_planes=2)
     assert meta['version'] == '0.5.0'
-    key = 'dipole_coefs_angle' if value == 'density' else 'dipole_knots_angle'
+    key = 'dipole_coefs_angle' if integrated else 'dipole_knots_angle'
     assert set(meta['channels'][0]['arrays']) == {key}
     for angle in (None, 0, 1):
         loaded = PSF.load(path, device='cpu', angle=angle)
@@ -70,12 +70,12 @@ def test_angle_component_tables(tmp_path, kernel, value):
         equal_render(loaded, model.for_angle(angle), dipM=torch.diag(torch.tensor([.2, .5, .3])))
 
 
-@pytest.mark.parametrize('kernel,value', NEW)
-def test_phase_and_field_grids(tmp_path, monkeypatch, kernel, value):
+@pytest.mark.parametrize('kernel,integrated', NEW)
+def test_phase_and_field_grids(tmp_path, monkeypatch, kernel, integrated):
     # Rebuild evaluates the optical model on the available device. Compare within one arithmetic stack.
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
     optics = FourPiPSF(5, npupil=16, oversample=2, pol=(0, 1), device='cpu', z_range=(0., .04))
-    grid = dict(kernel=kernel, value=value, oversample=2, **GRID)
+    grid = dict(kernel=kernel, integrated=integrated, oversample=2, **GRID)
     model = optics.to_spline(**grid)
     for storage in ('json', 'float32', 'rebuild'):
         path = tmp_path / ('phase.json' if storage == 'json' else 'phase.zip')
@@ -83,7 +83,7 @@ def test_phase_and_field_grids(tmp_path, monkeypatch, kernel, value):
                 psfzip.save_zip(path, model, zstack_planes=2, spline_knots=storage))
         assert meta['version'] == '0.5.0'
         loaded = PSF.load(path, device='cpu')
-        assert (loaded.table.kernel, loaded.table.value) == (kernel, value)
+        assert (loaded.spline.kernel, loaded.spline.integrated) == (kernel, integrated)
         assert torch.equal(loaded.knots, model.knots)
         equal_render(loaded, model, phi=.41)
 
@@ -99,7 +99,7 @@ def test_source_and_channel_maximum(tmp_path):
     src = vectorial('exact')
     table = vectorial().to_spline(**GRID)
     assert table.save(tmp_path / 'model.json', source=src)['version'] == '0.3.0'
-    new = vectorial().to_spline(kernel='bspline', value='pixel', **GRID)
+    new = vectorial().to_spline(kernel='bspline', integrated=False, **GRID)
     for models in ([table, new], [new, table]):
         assert ChannelsPSF(models).format_version() == (0, 5)
         assert psfzip.save_zip(tmp_path / 'channels.zip', models, zstack_planes=2)['version'] == '0.5.0'
@@ -119,14 +119,14 @@ def test_source_and_channel_maximum(tmp_path):
     assert psfzip.save_zip(tmp_path / 'phase.zip', phase, source=fourpi, zstack_planes=2)['version'] == '0.2.0'
 
 
-@pytest.mark.parametrize('value,blend,version', [
-    ('pixel', 'nearest', '0.2.0'), ('pixel', 'bilinear', '0.4.0'),
-    ('density', 'nearest', '0.4.0'), ('density', 'bilinear', '0.4.0'),
+@pytest.mark.parametrize('integrated,blend,version', [
+    (False, 'nearest', '0.2.0'), (False, 'bilinear', '0.4.0'),
+    (True, 'nearest', '0.4.0'), (True, 'bilinear', '0.4.0'),
 ])
-def test_explicit_field_metadata(tmp_path, value, blend, version):
+def test_explicit_field_metadata(tmp_path, integrated, blend, version):
     src = vectorial()
     field = FieldPSF(src, FieldZernikes([6], 1, norm=(10., 10., 10., 10.), device='cpu'))
-    grid = src.to_spline(value=value, oversample=2, **GRID)
+    grid = src.to_spline(integrated=integrated, oversample=2, **GRID)
     meta = psfzip.save_zip(tmp_path / 'tiles.zip', [src, grid], source=[None, src], zstack_planes=2,
                            channels=[{}, dict(field=field.field_block())],
                            provenance=dict(field_tiles=[None, dict(tile_px=10., blend=blend)]))
@@ -146,7 +146,7 @@ def test_channel_extras_cannot_replace_versioned_model(tmp_path):
 
 
 def test_old_single_model_and_future_minor(tmp_path):
-    model = vectorial('exact').to_spline(kernel='bspline', value='density', oversample=2, **GRID)
+    model = vectorial('exact').to_spline(kernel='bspline', integrated=True, oversample=2, **GRID)
     path = tmp_path / 'old.json'
     old = model.save(path)
     old['version'] = '0.1.0'  # All single-model files through stage 3 used this header.

@@ -307,12 +307,12 @@ def _rebuild_knots(meta, g, device=None):
         raise ValueError('phase_spline channels without knots need the FourPiPSF source to rebuild them')
     reb = meta['channels'][0].get('rebuild') or {}
     src_psf = FourPiPSF._from_file(src['model'], {}, device=device or reb.get('device'))
-    kernel, value = SplinePSF.grid_interpolant(g)
+    kernel, integrated = SplinePSF.grid_interpolant(g)
     sp = src_psf.to_spline(roisize=g['roisize'], z_range=tuple(g['z_range']), oversample=g['oversample'],
                            dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'],
-                           kernel=kernel, value=value, dipole_components=g.get('dipole_components', False),
-                           backend=g.get('backend', 'sep' if value == 'density' else 'conv'))
-    return sp._stored_tables().detach().cpu().numpy().astype(np.float32)
+                           kernel=kernel, integrated=integrated, dipole_components=g.get('dipole_components', False),
+                           backend=g.get('backend', 'sep' if integrated else 'conv'))
+    return sp._stored_splines().detach().cpu().numpy().astype(np.float32)
 
 
 def camera_from_meta(meta, arrays):
@@ -607,7 +607,7 @@ def _channel_blocks(psf, source, names, spline_knots, owners):
         return chans, sb, arrays, psf.format_version()
     if t == 'fourpi_spline':
         if psf.has_offsets():
-            raise ValueError('psf.zip has no field for FourPiSplinePSF channel offsets: bake them into the tables '
+            raise ValueError('psf.zip has no field for FourPiSplinePSF channel offsets: bake them into the splines '
                              '(FourPiPSF.to_spline of a source with channel_offsets)')
         if source is not None:
             sb, a = _model_block(source, 'source')
@@ -622,10 +622,10 @@ def _channel_blocks(psf, source, names, spline_knots, owners):
             raise ValueError("spline_knots='rebuild' needs the FourPiPSF source (source=, or a spline from to_spline)")
         chans = []
         for c in range(psf.n_channels):
-            g = dict(psf.table.to_dict(), pixel_um=psf.pixel_um)
+            g = dict(psf.spline.to_dict(), pixel_um=psf.pixel_um)
             if psf.default_dipM is not None:
                 g['default_dipM'] = psf.default_dipM
-            grid_key = psf.table.type_name
+            grid_key = psf.spline.type_name
             ch = dict(name=names(c), type='phase_spline', model=_plain({grid_key: g, 'tau': float(psf.tau[c].detach())}),
                       phase_param='phi')
             if spline_knots == 'rebuild':
@@ -635,7 +635,7 @@ def _channel_blocks(psf, source, names, spline_knots, owners):
                 members = {k: f'{names(c)}/{k}.npy' for k in _phase_arrays(g)}
                 dt = np.float16 if spline_knots == 'float16' else np.float32
                 for comp, k in enumerate(members):
-                    table = psf._stored_tables()[comp, c]
+                    table = psf._stored_splines()[comp, c]
                     arrays[members[k]] = table.detach().cpu().numpy().astype(dt)
                 ch['arrays'] = members
             chans.append(ch)
@@ -988,7 +988,7 @@ def convert_calibration(json_path, out_path, roisize=None, device=None, provenan
     model, source = psf, None
     if integrated_spline is not None:
         from torch_psf.spline import to_spline
-        opts = dict(kernel='bspline', value='density') | dict(integrated_spline)
+        opts = dict(kernel='bspline', integrated=True) | dict(integrated_spline)
         n_ang = max((len(orig[k]) for k in ('psf_dipole_M_angle', 'psf_blur_angle_px2') if orig.get(k) is not None),
                     default=0)
         os.chdir(os.path.dirname(json_path))
@@ -1024,7 +1024,7 @@ def _prefer(d, ref, top=False):
     for k, v in d.items():
         if isinstance(v, dict):
             out[k] = v if top else _prefer(v, ref)
-        elif k in ref and not isinstance(v, (str, bool)) and v is not None and not isinstance(ref[k], (str, bool, dict)) \
+        elif k in ref and not isinstance(v, (str, bool)) and v is not None and not isinstance(ref[k], (str, bool, dict))\
                 and _agree32(v, ref[k]):
             out[k] = ref[k]
         elif k == 'pixel_um' and 'pixelsize_um' in ref and _agree32(v, ref['pixelsize_um']):

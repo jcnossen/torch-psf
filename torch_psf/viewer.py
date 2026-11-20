@@ -147,7 +147,7 @@ class Engine:
             out = (self.loaded, self.loaded)
         else:
             spl = self._vectorial(p, R).to_spline(R, tuple(p['z_range']), oversample=2, dz_um=0.02, zpad=2,
-                                                  xy_limit=1.0, chunk=8, kernel='catmull', value='pixel')  # knots = the volume shown
+                                                  xy_limit=1.0, chunk=8, kernel='catmull', integrated=False)  # knots = the volume shown
             out = ((spl if p['model'] == 'spline' else self._vectorial(p, R)), spl)
         if len(self.cache) > 8:
             self.cache.clear()
@@ -162,7 +162,7 @@ class Engine:
         render, spl = self.models(p)
         R = int(p['roisize'])
         px = float(p['optics']['pixel_um'])
-        if spl is not None and (spl.kernel, spl.value) == ('catmull', 'pixel'):
+        if spl is not None and (spl.kernel, spl.integrated) == ('catmull', False):
             # Pixel samples directly give the oversampled image volume.
             zs = spl.zs.cpu().numpy()
             keep = (zs >= spl.zlo - 1e-9) & (zs <= spl.zhi + 1e-9)

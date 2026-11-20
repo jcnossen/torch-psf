@@ -110,7 +110,7 @@ def _gauss_spline(S, kernel, integrate, sigma=1.1, R=9):
     samples = plane[None].expand(geo.nz, -1, -1).float().contiguous()
     knots = bspline_prefilter(samples) if kernel == 'bspline' else samples
     return SplinePSF(R, geo.z_range, S, geo.hz, geo.zpad, geo.xmax, device='cpu', knots=knots,
-                     kernel=kernel, value='density' if integrate else 'pixel')
+                     kernel=kernel, integrated=bool(integrate))
 
 
 def _gauss_pixels(pos, sigma=1.1, R=9):
@@ -159,7 +159,7 @@ def test_derivatives_and_backends(integrate):
         assert float((x - y).abs().max() / y.abs().max()) < 1e-5
     # linear in the knots: autograd gradient
     K = spl.knots.clone().requires_grad_(True)
-    (spl.render_tables(pos, knots=K) ** 2).sum().backward()
+    (spl.render_splines(pos, knots=K) ** 2).sum().backward()
     assert K.grad is not None and float(K.grad.abs().sum()) > 0
 
 
@@ -168,7 +168,7 @@ def test_vectorial_integrated_spline_accuracy():
     """integrated B-spline (S = 3) of the vectorial point density vs the exact pixel integral"""
     torch.backends.cudnn.allow_tf32 = False
     vec = _vec(DEV, R=11)
-    spl = to_spline(vec, (0.0, 0.3), roisize=11, oversample=3, dz_um=0.01, kernel='bspline', value='density')
+    spl = to_spline(vec, (0.0, 0.3), roisize=11, oversample=3, dz_um=0.01, kernel='bspline', integrated=True)
     ref = vec.resampled(vec.roisize, oversample=3, pixel_integration='exact')
     pos = torch.rand(100, 3, device=DEV) * torch.tensor([1.0, 1.0, 0.3], device=DEV) - torch.tensor([0.5, 0.5, 0], device=DEV)
     with torch.no_grad():
@@ -230,7 +230,7 @@ def test_vectorial_pixel_integration_grad_and_file(tmp_path):
         assert float((w.render(pos) - vec.render(pos)).abs().max()) < 1e-7
         spl = vec.to_spline(z_range=(0.0, 0.3), oversample=4, dz_um=0.01, zpad=3, xy_limit=1.0)
         sb = _vec().resized(9).to_spline(z_range=(0.0, 0.3), oversample=4, dz_um=0.01, zpad=3, xy_limit=1.0,
-                                           kernel='catmull', value='pixel')
+                                           kernel='catmull', integrated=False)
         r = vec.render(pos)
         assert float((spl.render(pos) - r).abs().max() / r.max()) < float((sb.render(pos) - r).abs().max() / r.max())
 

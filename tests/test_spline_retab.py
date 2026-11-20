@@ -19,15 +19,15 @@ def rel(a, b):
     return float((a - b).abs().max() / b.abs().max())
 
 
-@pytest.mark.parametrize('kernel,value', [('bspline', 'density'), ('catmull', 'density'),
-                                          ('catmull', 'pixel'), ('bspline', 'pixel')])
-def test_subset_grid_matches_a_direct_build(kernel, value):
+@pytest.mark.parametrize('kernel,integrated', [('bspline', True), ('catmull', True),
+                                          ('catmull', False), ('bspline', False)])
+def test_subset_grid_matches_a_direct_build(kernel, integrated):
     v = optics()
-    s4 = to_spline(v, oversample=4, kernel=kernel, value=value, **GRID)
-    s2 = to_spline(v, oversample=2, kernel=kernel, value=value, **GRID)
+    s4 = to_spline(v, oversample=4, kernel=kernel, integrated=integrated, **GRID)
+    s2 = to_spline(v, oversample=2, kernel=kernel, integrated=integrated, **GRID)
     r = s4.to_spline(oversample=2)
     assert torch.equal(to_spline(s4, oversample=2).knots, r.knots)
-    assert r.knots.shape == s2.knots.shape and (r.kernel, r.value, r.xmax) == (s2.kernel, s2.value, s2.xmax)
+    assert r.knots.shape == s2.knots.shape and (r.kernel, r.integrated, r.xmax) == (s2.kernel, s2.integrated, s2.xmax)
     assert rel(r.knots, s2.knots) < 1e-6
     for a, b in zip(r.render(POS, grad=True), s2.render(POS, grad=True)):
         assert rel(a, b) < 1e-5
@@ -36,10 +36,10 @@ def test_subset_grid_matches_a_direct_build(kernel, value):
 
 def test_off_grid_resampling_adds_only_interpolation_error():
     v = optics()
-    s4 = to_spline(v, oversample=4, kernel='bspline', value='density', **GRID)
+    s4 = to_spline(v, oversample=4, kernel='bspline', integrated=True, **GRID)
     for change in (dict(oversample=3), dict(dz_um=.02), dict(oversample=2, dz_um=.015, zpad=2)):
         r = s4.resampled(**change)
-        direct = to_spline(v, oversample=r.S, kernel='bspline', value='density', dz_um=r.hz, zpad=r.zpad,
+        direct = to_spline(v, oversample=r.S, kernel='bspline', integrated=True, dz_um=r.hz, zpad=r.zpad,
                            xy_limit=GRID['xy_limit'])
         assert r.knots.shape == direct.knots.shape and r.zpad == change.get('zpad', 4 * .01 / r.hz // 1)
         # the extra error is the old spline's interpolation error at the new knots: small against the
@@ -49,11 +49,11 @@ def test_off_grid_resampling_adds_only_interpolation_error():
 
 def test_kernel_change_and_refusals():
     v = optics()
-    s4 = to_spline(v, oversample=4, kernel='bspline', value='density', **GRID)
-    cr = to_spline(v, oversample=2, kernel='catmull', value='density', **GRID)
+    s4 = to_spline(v, oversample=4, kernel='bspline', integrated=True, **GRID)
+    cr = to_spline(v, oversample=2, kernel='catmull', integrated=True, **GRID)
     assert rel(s4.resampled(oversample=2, kernel='catmull').knots, cr.knots) < 1e-6
     with pytest.raises(ValueError, match='optical model'):
-        s4.resampled(value='pixel')
+        s4.resampled(integrated=False)
     with pytest.raises(ValueError, match='beyond the stored spline'):
         s4.resampled(z_range=(-.2, .1))
 
@@ -63,12 +63,12 @@ def test_per_angle_tables(components):
     models = [optics(), optics()]
     for m, M in zip(models, torch.diag_embed(torch.tensor([[.6, .3, .1], [.2, .5, .3]]))):
         m.dipM = M
-    G = dict(kernel='bspline', value='density', components=components, **GRID)
+    G = dict(kernel='bspline', integrated=True, components=components, **GRID)
     s4 = to_spline(models, oversample=4, **G)
     s2 = to_spline(models, oversample=2, **G)
     assert s4.n_angles == 2
     r = s4.resampled(oversample=2)
-    assert r.axes == s2.axes and torch.equal(r.table_map, s2.table_map)
+    assert r.axes == s2.axes and torch.equal(r.spline_index, s2.spline_index)
     if components:
         torch.testing.assert_close(r.component_weights, s2.component_weights)
     assert rel(r.knots, s2.knots) < 1e-6
@@ -79,11 +79,11 @@ def test_per_angle_tables(components):
 def test_fourpi_component_tables():
     base = FourPiPSF(7, npupil=16, device='cpu', pol=(0, 1), z_range=(0., .1))
     base.top.set_zernike({6: .05})
-    G = dict(kernel='bspline', value='density', components='dipole', **GRID)
+    G = dict(kernel='bspline', integrated=True, components='dipole', **GRID)
     s4 = base.to_spline(oversample=4, **G)
     s2 = base.to_spline(oversample=2, **G)
     r = s4.resampled(oversample=2)
-    assert r.table.axes == s2.table.axes and r.S == 2
+    assert r.spline.axes == s2.spline.axes and r.S == 2
     assert rel(r.knots, s2.knots) < 1e-6
     phase = torch.rand(len(POS)) * 6.28
     assert rel(r.render(POS, phi=phase), s2.render(POS, phi=phase)) < 1e-5
@@ -91,13 +91,13 @@ def test_fourpi_component_tables():
 
 def test_loaded_psfzip(tmp_path):
     v = optics()
-    s4 = to_spline(v, oversample=4, kernel='bspline', value='density', **GRID)
+    s4 = to_spline(v, oversample=4, kernel='bspline', integrated=True, **GRID)
     path = tmp_path / 'm.psf.zip'
     s4.save(path, source=v)
     loaded = PSF.load(path, device='cpu')
     assert isinstance(loaded, SplinePSF) and torch.equal(loaded.knots, s4.knots)
     src = SplinePSF.load_source(path, device='cpu')
-    direct = src.to_spline(oversample=2, kernel='bspline', value='density', **GRID)
+    direct = src.to_spline(oversample=2, kernel='bspline', integrated=True, **GRID)
     r = loaded.to_spline(oversample=2)
     assert rel(r.knots, direct.knots) < 1e-5
     out = tmp_path / 'm2.psf.zip'

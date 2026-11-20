@@ -33,7 +33,7 @@ def _err(a, b):
 def test_matches_exact_vectorial():
     """max |spline - VectorialPSF 'exact'| < 5e-5 of the peak over the z range and offsets <= xy_limit, at S = 4"""
     v = _vec()
-    s = to_spline(v, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.5, oversample=4, dz_um=0.01)
+    s = to_spline(v, (0.0, 0.2), kernel='bspline', integrated=True, xy_limit=1.5, oversample=4, dz_um=0.01)
     pos = _pos()
     with torch.no_grad():
         assert _err(s.render(pos), v.render(pos)) < 5e-5
@@ -42,7 +42,7 @@ def test_matches_exact_vectorial():
 
 def test_gradients_and_chunks():
     v = _vec()
-    s = to_spline(v, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.5, oversample=3, dz_um=0.02)
+    s = to_spline(v, (0.0, 0.2), kernel='bspline', integrated=True, xy_limit=1.5, oversample=3, dz_um=0.02)
     pos = _pos(6).double().float()
     val, gx, gy, gz = s.render(pos, grad=True)
     e = 1e-3
@@ -57,7 +57,7 @@ def test_gradients_and_chunks():
 
 def test_angles_mean_and_selection():
     vs = [_vec(dip=d) for d in DIP]
-    s = to_spline(vs, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(vs, (0.0, 0.2), kernel='bspline', integrated=True, xy_limit=1.0, oversample=3, dz_um=0.02)
     assert s.n_angles == 2 and s.angle is None
     pos = _pos(8, xy=1.0)
     with torch.no_grad():
@@ -71,7 +71,7 @@ def test_angles_mean_and_selection():
 
 
 def test_resized_shares_coefficients():
-    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', value='density', roisize=15, xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', integrated=True, roisize=15, xy_limit=1.0, oversample=3, dz_um=0.02)
     r = s.resized(7)
     assert r.knots is s.knots and r.roisize == 7 and r.xy_limit > 4          # a smaller ROI: larger offsets
     pos = _pos(5, xy=1.0)
@@ -83,7 +83,7 @@ def test_resized_shares_coefficients():
 @pytest.mark.parametrize('kind', ['json', 'zip'])
 def test_round_trip(tmp_path, kind):
     vs = [_vec(dip=d) for d in DIP]
-    s = to_spline(vs, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(vs, (0.0, 0.2), kernel='bspline', integrated=True, xy_limit=1.0, oversample=3, dz_um=0.02)
     src = _vec(dip=np.mean(DIP, 0).tolist())
     f = tmp_path / ('m.json' if kind == 'json' else 'm.psf.zip')
     if kind == 'json':
@@ -109,7 +109,7 @@ def test_round_trip(tmp_path, kind):
 
 
 def test_single_model_round_trip(tmp_path):
-    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', integrated=True, xy_limit=1.0, oversample=3, dz_um=0.02)
     f = tmp_path / 'm.psf.zip'
     io.save_zip(f, s)
     meta, _ = psfzip.read_zip(f)
@@ -124,7 +124,7 @@ def test_single_model_round_trip(tmp_path):
 def test_readers_without_the_type_refuse(tmp_path, monkeypatch):
     """A reader that does not know 'integrated_spline' fails loudly: PSF.load / PSFZip.read raise (the type is not
     registered), and the coefficients are not where a 'spline' reader looks (no 'spline' block, no 'knots' array)"""
-    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', integrated=True, xy_limit=1.0, oversample=3, dz_um=0.02)
     f = tmp_path / 'm.psf.zip'
     io.save_zip(f, s, source=_vec())
     d, arrays, typ = PSF.read_file(f)
@@ -138,7 +138,7 @@ def test_readers_without_the_type_refuse(tmp_path, monkeypatch):
 
 
 def test_unknown_basis_or_arrays_refused(tmp_path):
-    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02)
+    s = to_spline(_vec(), (0.0, 0.2), kernel='bspline', integrated=True, xy_limit=1.0, oversample=3, dz_um=0.02)
     f = tmp_path / 'm.json'
     d = s.save(f)
     d['integrated_spline']['basis'] = 'quintic_bspline'
@@ -155,7 +155,7 @@ def test_unknown_basis_or_arrays_refused(tmp_path):
 def test_old_spline_files_unchanged(tmp_path):
     """the 'spline' type is written and read as before (SplinePSF, knots)"""
     v = _vec()
-    spl = v.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, xy_limit=2.0, kernel='catmull', value='pixel')
+    spl = v.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, xy_limit=2.0, kernel='catmull', integrated=False)
     f = tmp_path / 's.psf.zip'
     io.save_zip(f, spl, source=v)
     meta, _ = psfzip.read_zip(f)
@@ -194,10 +194,10 @@ def test_zip_version(tmp_path, monkeypatch):
     by a 0.2-only reader; 'midpoint' files stay 0.2.0"""
     box = VectorialPSF(11, npupil=32, oversample=2, device='cpu', focus_um=0.2, z_range=(0.0, 0.3), pixel_integration='midpoint')
     cases = dict(box=(box, None, '0.2.0'), spectral=(_vec(), None, '0.3.0'),
-                 spline=(to_spline(box, (0.0, 0.2), kernel='bspline', value='density', xy_limit=1.0, oversample=3, dz_um=0.02),
+                 spline=(to_spline(box, (0.0, 0.2), kernel='bspline', integrated=True, xy_limit=1.0, oversample=3, dz_um=0.02),
                          box, '0.3.0'),
-                 box_spline=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, kernel='catmull', value='pixel'), box, '0.2.0'),
-                 spectral_source=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, kernel='catmull', value='pixel'), _vec(), '0.3.0'))
+                 box_spline=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, kernel='catmull', integrated=False), box, '0.2.0'),
+                 spectral_source=(box.to_spline(11, (0.0, 0.2), oversample=2, dz_um=0.05, kernel='catmull', integrated=False), _vec(), '0.3.0'))
     for name, (m, src, ver) in cases.items():
         f = tmp_path / f'{name}.psf.zip'
         meta = io.save_zip(f, m, source=src)

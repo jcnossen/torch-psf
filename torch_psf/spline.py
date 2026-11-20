@@ -1,21 +1,23 @@
-"""Table-indexed tensor-product spline PSFs. Coordinates are x/y in pixels and z in micrometres."""
+"""Indexed tensor-product spline PSFs. Coordinates are x/y in pixels and z in micrometres."""
 import copy
 import math
 import torch
 from torch_psf.optics import resolve_device
 from torch_psf.psf import PSF
-from torch_psf._dipole import M_to_m6, combine_tables, default_weights, unit_tensors
+from torch_psf._dipole import M_to_m6, combine_splines, default_weights, unit_tensors
 from torch_psf.integrate import PixelIntegrator, spectral_min_oversample
 
 
-# The table built when to_spline gets no kernel / value: kernel, value, knots/px. Models that can render the point
+# The spline built when to_spline gets no kernel / integrated: kernel, integrated, knots/px. Models that can render the point
 # density (optical models and their wrappers) get the integrated cubic B-spline at 2 knots/px (study/psf_unify: faster
 # and more accurate than integrated Catmull-Rom at 2 knots/px); models that only render pixel values (GaussianPSF,
-# AstigmaticGaussianPSF) get a Catmull-Rom table of pixel values at 2 knots/px (psf.zip 0.2.0).
-DEFAULT_SPLINE = ('bspline', 'density', 2)
-DEFAULT_PIXEL_SPLINE = ('catmull', 'pixel', 2)
+# AstigmaticGaussianPSF) get a Catmull-Rom spline of pixel values at 2 knots/px (psf.zip 0.2.0).
+# integrated=True: the knots tabulate the point density and a pixel value is the exact integral of the spline over the
+# pixel; integrated=False: the knots tabulate pixel values at sub-pixel shifts, interpolated pointwise.
+DEFAULT_SPLINE = ('bspline', True, 2)
+DEFAULT_PIXEL_SPLINE = ('catmull', False, 2)
 
-# Sampling presets for an explicitly requested value or a phase table: kernel, S, dz, zpad, xy_limit, chunk.
+# Sampling presets for an explicitly requested value or a phase spline: kernel, S, dz, zpad, xy_limit, chunk.
 _GRID_PROFILES = {
     'pixel': ('catmull', 2, .04, 2, 3.0, 8),
     'density': ('bspline', 4, .01, 6, 2.0, 4),
@@ -101,21 +103,21 @@ class SplinePSF(PSF):
     """One bank of coefficient volumes on a shared grid.
 
     knots [T,nz,nv,nu] are samples for Catmull-Rom and prefiltered coefficients
-    for cubic B-splines. table_map indexes that bank along the named axes.
-    Pixel tables interpolate measured pixel values. Density tables integrate
+    for cubic B-splines. spline_index indexes that bank along the named axes.
+    Pixel splines interpolate measured pixel values. Density splines integrate
     the interpolant over each pixel. The separable and grouped-convolution
     backends share coordinate, weight and gather code.
     """
     BASIS = 'cubic_bspline'
-    FILE_TYPES = ('spline_table', 'integrated_spline', 'spline')
+    FILE_TYPES = ('cubic_spline', 'spline_table', 'integrated_spline', 'spline')   # 'spline_table': read only (0.5 files)
 
     def __init__(self, roisize, z_range, oversample=2, dz_um=.04, zpad=2, xy_limit=3.0, device=None,
                  dtype=torch.float32, knots=None, knot_u0_px=None, knot_z0_um=None, pixel_um=None, *,
-                 kernel='catmull', value='pixel', backend='sep', axes=None, table_map=None,
+                 kernel='catmull', integrated=False, backend='sep', axes=None, spline_index=None,
                  component_weights=None, angle=None):
-        if kernel not in ('catmull', 'bspline') or value not in ('pixel', 'density') or backend not in ('sep', 'conv'):
-            raise ValueError('unknown spline kernel, value or backend')
-        self.kernel, self.value, self.backend = kernel, value, backend
+        if kernel not in ('catmull', 'bspline') or not isinstance(integrated, bool) or backend not in ('sep', 'conv'):
+            raise ValueError('unknown spline kernel, integrated (a bool) or backend')
+        self.kernel, self.integrated, self.backend = kernel, integrated, backend
         self.chunk_elems = 2 ** 24
         self.pixel_um = None if pixel_um is None else float(pixel_um)
         zlo, zhi = float(z_range[0]), float(z_range[1])
@@ -143,16 +145,16 @@ class SplinePSF(PSF):
             bank = torch.as_tensor(knots, device=self.dev, dtype=dtype)
             self.knots = bank if bank.ndim == 4 else bank.reshape(-1, *shape)
         self.axes = tuple(axes) if axes is not None else ('component',)
-        if table_map is None:
-            table_map = torch.arange(len(self.knots))
-        self.table_map = torch.as_tensor(table_map, device=self.dev, dtype=torch.long)
-        if len(self.axes) != self.table_map.ndim:
-            raise ValueError('table_map needs one dimension per named axis')
+        if spline_index is None:
+            spline_index = torch.arange(len(self.knots))
+        self.spline_index = torch.as_tensor(spline_index, device=self.dev, dtype=torch.long)
+        if len(self.axes) != self.spline_index.ndim:
+            raise ValueError('spline_index needs one dimension per named axis')
         if (len(set(self.axes)) != len(self.axes)
-                or self.table_map.numel() == 0 or self.table_map.min() < 0 or self.table_map.max() >= len(self.knots)):
-            raise ValueError('table_map must index the knot bank along the named axes')
+                or self.spline_index.numel() == 0 or self.spline_index.min() < 0 or self.spline_index.max() >= len(self.knots)):
+            raise ValueError('spline_index must index the knot bank along the named axes')
         if 'dipole' in self.axes:
-            if self.table_map.shape[self.axes.index('dipole')] != 6:
+            if self.spline_index.shape[self.axes.index('dipole')] != 6:
                 raise ValueError('the dipole axis needs six volumes')
             if component_weights is None:
                 component_weights = default_weights()
@@ -160,7 +162,7 @@ class SplinePSF(PSF):
                     component_weights = component_weights.expand(self.n_angles, 6)
         self.component_weights = (None if component_weights is None else
                                   torch.as_tensor(component_weights, device=self.dev, dtype=dtype))
-        self._ordered = torch.equal(self.table_map.flatten(), torch.arange(len(self.knots), device=self.dev))
+        self._ordered = torch.equal(self.spline_index.flatten(), torch.arange(len(self.knots), device=self.dev))
         self.angle = self._angle(angle)
         self._roi(roisize, xmax)
 
@@ -180,10 +182,10 @@ class SplinePSF(PSF):
         self.roisize = int(roisize)
         self.h = (self.roisize - 1) / 2
         S = self.S
-        self.taps = S + 4 if self.value == 'density' else 4
+        self.taps = S + 4 if self.integrated else 4
         self.Lw = (self.roisize - 1) * S + self.taps
         self.t0 = (-self.h - self.u0) * S
-        if self.value == 'density':
+        if self.integrated:
             self.t0 -= S / 2
             lim = (self.nu - self.Lw - self.t0) / S - 1e-4
         else:
@@ -207,7 +209,7 @@ class SplinePSF(PSF):
     @property
     def z_limits(self):
         """z interval (um) on which the spline is defined (the fitter clamps z to it)."""
-        if self.value == 'density':
+        if self.integrated:
             return self.z_range
         return (self.z0 + self.hz, self.z0 + (self.nz - 2) * self.hz)
 
@@ -216,12 +218,12 @@ class SplinePSF(PSF):
         return self.xmax
 
     def __repr__(self):
-        return (f'SplinePSF(roisize={self.roisize}, kernel={self.kernel!r}, value={self.value!r}, '
+        return (f'SplinePSF(roisize={self.roisize}, kernel={self.kernel!r}, integrated={self.integrated}, '
                 f'axes={self.axes}, knots={tuple(self.knots.shape)})')
 
     @property
     def n_angles(self):
-        return self.table_map.shape[self.axes.index('angle')] if 'angle' in self.axes else 0
+        return self.spline_index.shape[self.axes.index('angle')] if 'angle' in self.axes else 0
 
     def _angle(self, angle):
         from torch_psf.vectorial import _angle_index
@@ -236,14 +238,14 @@ class SplinePSF(PSF):
 
     def resized(self, roisize):
         new = copy.copy(self)
-        limit = float('inf') if self.value == 'density' else self.xmax
+        limit = float('inf') if self.integrated else self.xmax
         new._roi(roisize, limit)
         return new
 
     def to(self, device=None, dtype=None):
         self.knots = self.knots.to(device=device, dtype=dtype)
         self.dev, self.dtype = self.knots.device, self.knots.dtype
-        self.table_map = self.table_map.to(self.dev)
+        self.spline_index = self.spline_index.to(self.dev)
         if self.component_weights is not None:
             self.component_weights = self.component_weights.to(self.knots)
         self._roi(self.roisize, self.xmax)
@@ -257,7 +259,7 @@ class SplinePSF(PSF):
 
     def _lat_weights(self, fr, deriv):
         """[N, T] lateral weights (or their d/dt) for the fractional knot offset fr [N]."""
-        if self.value == 'pixel':
+        if not self.integrated:
             return self._z_weights(fr, deriv)
         m = torch.arange(self.taps, device=fr.device, dtype=fr.dtype)
         k = self.kernel
@@ -269,29 +271,29 @@ class SplinePSF(PSF):
 
     def _weights(self, fr, deriv):
         """(z, y, x) weights [N, taps] (or their d/dt) for the fractional knot offsets fr [N, 3]. Catmull-Rom pixel
-        tables evaluate the three axes in ONE matmul ([N, 3, 4] @ [4, 4]), as the earlier CubicSplinePSF did: cuBLAS
+        splines evaluate the three axes in ONE matmul ([N, 3, 4] @ [4, 4]), as the earlier CubicSplinePSF did: cuBLAS
         picks its kernel by the batch shape, so per-axis products differ in the last bit for small N on CUDA."""
-        if self.kernel == 'catmull' and self.value == 'pixel':
+        if self.kernel == 'catmull' and not self.integrated:
             w = self._axis(fr, deriv)
             return w[:, 0], w[:, 1], w[:, 2]
         return self._z_weights(fr[:, 0], deriv), self._lat_weights(fr[:, 1], deriv), self._lat_weights(fr[:, 2], deriv)
 
     def _z_weights(self, fr, deriv):
-        if self.kernel == 'catmull' and self.value == 'pixel':
+        if self.kernel == 'catmull' and not self.integrated:
             return self._axis(fr, deriv)
         m = torch.arange(4, device=fr.device, dtype=fr.dtype)
         s = fr[:, None] + 1 - m[None]
         return _dkernel(s, self.kernel) if deriv else _kernel(s, self.kernel)
 
-    def evaluate_tables(self, pos, indices, grad=False, knots=None):
-        """Evaluate at broadcastable positions [...,3] and table indices [...]."""
+    def evaluate_splines(self, pos, indices, grad=False, knots=None):
+        """Evaluate at broadcastable positions [...,3] and spline indices [...]."""
         K = self.knots if knots is None else knots
         indices = torch.as_tensor(indices, device=self.dev)
         batch = torch.broadcast_shapes(pos.shape[:-1], indices.shape)
         shape = (*batch, self.roisize, self.roisize)
-        # Kernel weights are computed once per distinct position (before broadcasting to the tables) and gathered:
-        # the weight matmul then has the shape of a per-table evaluation, so results do not depend on how many
-        # tables share a position (cuBLAS picks its kernel by the batch shape).
+        # Kernel weights are computed once per distinct position (before broadcasting to the splines) and gathered:
+        # the weight matmul then has the shape of a per-spline evaluation, so results do not depend on how many
+        # splines share a position (cuBLAS picks its kernel by the batch shape).
         base = pos
         for dim in range(pos.dim() - 1):          # an expanded (stride 0) axis repeats one position: keep one copy
             if pos.shape[dim] > 1 and pos.stride(dim) == 0:
@@ -325,7 +327,7 @@ class SplinePSF(PSF):
         return t - ix, ix.long() - 1
 
     def _evaluate_block(self, pos, ids, grad, K, w=None, d=None):
-        """w, d: precomputed (z, y, x) weights and derivative weights of these rows (evaluate_tables), else computed."""
+        """w, d: precomputed (z, y, x) weights and derivative weights of these rows (evaluate_splines), else computed."""
         N, P, S, Lw, T = len(pos), self.roisize, self.S, self.Lw, self.taps
         if N == 0:
             empty = K.reshape(-1)[:0].reshape(0, P, P)
@@ -379,7 +381,7 @@ class SplinePSF(PSF):
             return self.resampled(roisize=roisize, z_range=z_range, **grid)
         return self if roisize in (None, self.roisize) else self.resized(roisize)
 
-    def _grid_settings(self, oversample, dz_um, z_range, zpad, xy_limit, kernel, value, roisize, backend):
+    def _grid_settings(self, oversample, dz_um, z_range, zpad, xy_limit, kernel, integrated, roisize, backend):
         S = self.S if oversample is None else int(oversample)
         hz = self.hz if dz_um is None else float(dz_um)
         # keep the axial padding in um when only dz changes (zpad counts planes)
@@ -387,11 +389,11 @@ class SplinePSF(PSF):
         return dict(oversample=S, dz_um=hz, zpad=pad,
                     z_range=self.z_range if z_range is None else (float(z_range[0]), float(z_range[1])),
                     xy_limit=self.xmax if xy_limit is None else float(xy_limit),
-                    kernel=kernel or self.kernel, value=value or self.value,
+                    kernel=kernel or self.kernel, integrated=self.integrated if integrated is None else bool(integrated),
                     roisize=self.roisize if roisize is None else int(roisize), backend=backend or self.backend)
 
     def resampled(self, *, oversample=None, dz_um=None, z_range=None, zpad=None, xy_limit=None, kernel=None,
-                    value=None, roisize=None, backend=None):
+                    integrated=None, roisize=None, backend=None):
         """This spline on another knot grid or with another kernel, e.g. an integrated B-spline at 4 knots/px ->
         2 knots/px. Unset arguments keep this spline's settings (zpad keeps the padding in um when dz_um changes).
 
@@ -399,15 +401,15 @@ class SplinePSF(PSF):
         for kernel='bspline', prefiltered again. When the new knots are a subset of the old ones (S_new dividing
         S_old, dz_new a multiple of dz_old, e.g. 4 -> 2 knots/px) the knot values are the old samples and the result
         equals a direct build up to float rounding; otherwise it adds the old spline's interpolation error at the
-        new knots. To change value (pixel <-> density) or extend the grid, build again from the optical model
+        new knots. To change integrated (pixel values <-> point density) or extend the grid, build again from the optical model
         (model.to_spline(...))."""
-        g = self._grid_settings(oversample, dz_um, z_range, zpad, xy_limit, kernel, value, roisize, backend)
-        if g['value'] != self.value:
-            raise ValueError("changing value ('pixel' <-> 'density') needs the optical model: model.to_spline(...)")
-        density = g['value'] == 'density'
+        g = self._grid_settings(oversample, dz_um, z_range, zpad, xy_limit, kernel, integrated, roisize, backend)
+        if g['integrated'] != self.integrated:
+            raise ValueError("changing integrated needs the optical model: model.to_spline(...)")
+        density = g['integrated']
         new = SplinePSF(g['roisize'], g['z_range'], g['oversample'], g['dz_um'], g['zpad'],
                         g['xy_limit'] + int(density), device=self.dev, dtype=self.dtype, pixel_um=self.pixel_um,
-                        kernel=g['kernel'], value=g['value'], backend=g['backend'])
+                        kernel=g['kernel'], integrated=g['integrated'], backend=g['backend'])
         new.xmax = min(g['xy_limit'], new.xmax)
         Wz = _interp_matrix((new.zs - self.z0) / self.hz, self.nz, self.kernel)
         u = new.u0 + torch.arange(new.nu, device=self.dev, dtype=torch.float64) / new.S
@@ -418,7 +420,7 @@ class SplinePSF(PSF):
         if new.kernel == 'bspline':
             K = bspline_prefilter(K)
         new.knots = K.to(self.dtype).contiguous()
-        new.axes, new.table_map = self.axes, self.table_map
+        new.axes, new.spline_index = self.axes, self.spline_index
         new.component_weights = self.component_weights
         new._ordered, new.angle = self._ordered, self.angle
         return new
@@ -448,11 +450,11 @@ class SplinePSF(PSF):
         return 'dipole' in self.axes or 'response' in self.axes
 
     def _volumes(self, knots=None):
-        """Logical table layout, including a separate default in older dipole files."""
+        """Logical spline layout, including a separate default in older dipole files."""
         bank = self.knots if knots is None else knots
         if self._ordered:
-            return bank.reshape(*self.table_map.shape, self.nz, self.nv, self.nu)
-        return bank[self.table_map]
+            return bank.reshape(*self.spline_index.shape, self.nz, self.nv, self.nu)
+        return bank[self.spline_index]
 
     def default_volume(self, knots=None):
         """The coefficient volume for the selected angle and the file's default dipole tensor. For the model's own
@@ -478,12 +480,12 @@ class SplinePSF(PSF):
             if weights is not None and weights.ndim == 2:
                 weights = weights[self.angle]
         if weights is not None:
-            tables = combine_tables(weights, tables)
+            tables = combine_splines(weights, tables)
         elif self.has_dipole:
             tables = tables.select(-4, 0)  # independently calibrated default
         elif not self.n_angles:
-            if self.table_map.numel() != 1:
-                raise ValueError('supply per-axis weights for a bank of component tables')
+            if self.spline_index.numel() != 1:
+                raise ValueError('supply per-axis weights for a bank of component splines')
             return tables.reshape(self.nz, self.nv, self.nu)
         return tables.mean(0) if self.n_angles and self.angle is None else tables
 
@@ -498,15 +500,15 @@ class SplinePSF(PSF):
         if dipole:
             return self._basis_indices_for_all_angles(), self.knots if knots is None else knots
         if self.component_weights is None:
-            ids = self.table_map[..., 0] if self.has_dipole else self.table_map
+            ids = self.spline_index[..., 0] if self.has_dipole else self.spline_index
             return ids, self.knots if knots is None else knots
-        bank = combine_tables(self.component_weights, self._volumes(knots))
+        bank = combine_splines(self.component_weights, self._volumes(knots))
         return torch.arange(len(bank), device=self.dev), bank
 
     def _basis_indices_for_all_angles(self):
         if not self.has_dipole:
             raise ValueError('build with components="dipole" (dipole_components=True)')
-        return self.table_map[..., -6:]
+        return self.spline_index[..., -6:]
 
     def _angle_images(self, pos, angle, grad, dipole, knots=None):
         from torch_psf.vectorial import angle_indices
@@ -514,7 +516,7 @@ class SplinePSF(PSF):
         a = angle_indices(angle, self.n_angles, self.dev)
         if a.shape != (len(pos),):
             raise ValueError('expected one angle per emitter')
-        return self.evaluate_tables(pos[:, None] if dipole else pos, ids[a], grad, bank)
+        return self.evaluate_splines(pos[:, None] if dipole else pos, ids[a], grad, bank)
 
     def _dipole_basis(self, pos, grad=False, *, angle=None, knots=None):
         if angle is not None and torch.as_tensor(angle).ndim:
@@ -527,16 +529,16 @@ class SplinePSF(PSF):
             # Taking the mean after interpolation changes small axial derivatives.
             volumes = self._volumes(knots)[..., -6:, :, :, :].mean(0)
             ids = torch.arange(6, device=self.dev)
-            return self.evaluate_tables(pos[:, None], ids, grad, volumes)
-        return self.evaluate_tables(pos[:, None], ids, grad, knots)
+            return self.evaluate_splines(pos[:, None], ids, grad, volumes)
+        return self.evaluate_splines(pos[:, None], ids, grad, knots)
 
     def _render(self, pos, grad=False, *, dipM=None, angle=None):
-        return self.render_tables(pos, grad, dipM=dipM, angle=angle)
+        return self.render_splines(pos, grad, dipM=dipM, angle=angle)
 
     def basis(self, pos, grad=False, *, weights=None, **options):
         if weights is None:
             return super().basis(pos, grad, **options)
-        images = self.evaluate_tables(pos[:, None], self.table_map.flatten(), grad)
+        images = self.evaluate_splines(pos[:, None], self.spline_index.flatten(), grad)
         return tuple(v[:, None] for v in images) if grad else images[:, None]
 
     def weights(self, pos, *, weights=None, **options):
@@ -546,35 +548,35 @@ class SplinePSF(PSF):
             if set(weights) != set(self.axes):
                 raise ValueError(f'expected weights for {self.axes}')
             product = pos.new_ones((len(pos), 1), dtype=self.dtype)
-            for axis, size in zip(self.axes, self.table_map.shape):
+            for axis, size in zip(self.axes, self.spline_index.shape):
                 w = torch.as_tensor(weights[axis], device=self.dev, dtype=self.dtype).reshape(-1, size)
                 product = (product[:, :, None] * w[:, None, :]).flatten(1)
             weights = product
-        w = torch.as_tensor(weights, device=self.dev, dtype=self.dtype).reshape(-1, self.table_map.numel())
+        w = torch.as_tensor(weights, device=self.dev, dtype=self.dtype).reshape(-1, self.spline_index.numel())
         return w[:, None].expand(len(pos), 1, -1)
 
-    def render_tables(self, pos, grad=False, knots=None, dipM=None, *, weights=None, angle=None):
+    def render_splines(self, pos, grad=False, knots=None, dipM=None, *, weights=None, angle=None):
         """Render patches and optionally their analytic x, y, z derivatives.
 
-        weights can be [T] or [N,T] in logical table order, or a dict of
+        weights can be [T] or [N,T] in logical spline order, or a dict of
         per-axis weights [size] / [N,size]. Angles and dipM select the
         calibrated response for the standard single-channel file layouts.
         """
         if angle is not None and torch.as_tensor(angle).ndim:
             if weights is not None:
-                raise ValueError('supply angle or table weights')
+                raise ValueError('supply angle or spline weights')
             if dipM is None:
                 return self._angle_images(pos, angle, grad, False, knots)
             images = self._angle_images(pos, angle, grad, True, knots)
             w = M_to_m6(torch.as_tensor(dipM).to(self.knots)).reshape(-1, 6)
             return tuple(_weighted(v, w) for v in images) if grad else _weighted(images, w)
         if angle is not None:
-            return self.for_angle(angle).render_tables(pos, grad, knots, dipM, weights=weights)
+            return self.for_angle(angle).render_splines(pos, grad, knots, dipM, weights=weights)
         if weights is not None:
             if dipM is not None:
                 raise ValueError('supply weights or dipM')
             w = self.weights(pos, weights=weights)[:, 0]
-            basis = self.evaluate_tables(pos[:, None], self.table_map.flatten(), grad, knots)
+            basis = self.evaluate_splines(pos[:, None], self.spline_index.flatten(), grad, knots)
             def contract(v):
                 return torch.einsum('nk,nkij->nij', w, v)
             return tuple(contract(v) for v in basis) if grad else contract(basis)
@@ -586,31 +588,31 @@ class SplinePSF(PSF):
             basis = self._dipole_basis(pos, grad, knots=knots)
         else:
             if knots is not None and knots.ndim == 3:
-                return self.evaluate_tables(pos, self.table_map.new_zeros(()), grad, knots)
-            if self.table_map.numel() == 1:
-                return self.evaluate_tables(pos, self.table_map.reshape(()), grad, knots)
+                return self.evaluate_splines(pos, self.spline_index.new_zeros(()), grad, knots)
+            if self.spline_index.numel() == 1:
+                return self.evaluate_splines(pos, self.spline_index.reshape(()), grad, knots)
             if self.n_angles and self.angle is not None and not self.has_dipole:
-                return self.evaluate_tables(pos, self.table_map[self.angle], grad, knots)
+                return self.evaluate_splines(pos, self.spline_index[self.angle], grad, knots)
             volume = self.default_volume(knots)
             if volume.numel() != self.nz * self.nv * self.nu:
-                raise ValueError('supply weights for a bank of component tables')
-            return self.evaluate_tables(pos, self.table_map.new_zeros(()), grad, volume)
+                raise ValueError('supply weights for a bank of component splines')
+            return self.evaluate_splines(pos, self.spline_index.new_zeros(()), grad, volume)
         return tuple(_weighted(v, w) for v in basis) if grad else _weighted(basis, w)
 
     @property
     def type_name(self):
-        if self.kernel == 'bspline' and self.value == 'density':
+        if self.kernel == 'bspline' and self.integrated:
             return 'integrated_spline'
-        if self.kernel == 'catmull' and self.value == 'pixel' and not self.n_angles:
+        if self.kernel == 'catmull' and not self.integrated and not self.n_angles:
             return 'spline'
-        return 'spline_table'
+        return 'cubic_spline'
 
     def format_version(self, source=None):
-        if self.type_name == 'spline_table':
+        if self.type_name == 'cubic_spline':
             version = (0, 5)
         elif self.has_dipole:
             version = (0, 4)
-        elif self.value == 'density':
+        elif self.integrated:
             version = (0, 3)
         else:
             version = (0, 2)
@@ -625,27 +627,31 @@ class SplinePSF(PSF):
         g = block[typ]
         if typ == 'spline_table' and not ('basis' in g and g.get('value') in ('pixel', 'density')):
             raise ValueError('spline_table requires explicit basis / value')
+        if typ == 'cubic_spline' and not (g.get('kernel') in ('catmull', 'bspline') and isinstance(g.get('integrated'), bool)):
+            raise ValueError('cubic_spline requires kernel and integrated')
         if typ == 'integrated_spline' and (g.get('basis'), g.get('value')) != (cls.BASIS, 'pixel_integral'):
             raise ValueError('integrated_spline: unknown basis / value')
         return typ, g
 
     @classmethod
     def grid_interpolant(cls, g):
-        """Decode a stored grid without consulting the defaults for newly built tables."""
+        """Decode a stored grid without consulting the defaults for newly built splines."""
+        if 'kernel' in g and 'integrated' in g:                     # 'cubic_spline'
+            return g['kernel'], bool(g['integrated'])
         if 'basis' not in g and 'value' not in g:
-            return 'catmull', 'pixel'
+            return 'catmull', False
         if (g.get('basis'), g.get('value')) == (cls.BASIS, 'pixel_integral'):
-            return 'bspline', 'density'
+            return 'bspline', True
         kernels = {'catmull_rom': 'catmull', cls.BASIS: 'bspline'}
-        if g.get('basis') in kernels and g.get('value') in ('density', 'pixel'):
-            return kernels[g['basis']], g['value']
+        if g.get('basis') in kernels and g.get('value') in ('density', 'pixel'):   # 'spline_table' (0.5 files)
+            return kernels[g['basis']], g['value'] == 'density'
         raise ValueError(f"unknown spline basis / value: {g.get('basis')!r}, {g.get('value')!r}")
 
     def to_dict(self):
-        density = self.value == 'density'
+        density = self.integrated
         g = dict(basis=self.BASIS, value='pixel_integral') if density else {}
-        if self.type_name == 'spline_table':
-            g = dict(basis='catmull_rom' if self.kernel == 'catmull' else self.BASIS, value=self.value)
+        if self.type_name == 'cubic_spline':
+            g = dict(kernel=self.kernel, integrated=self.integrated)
         g.update(roisize=self.roisize, z_range=list(self.z_range), oversample=self.S, dz_um=self.hz,
                  zpad=self.zpad, xy_limit=self.xmax, c=self.c, z0_um=self.z0, nz=self.nz, u0_px=self.u0,
                  pixel_um=self.pixel_um)
@@ -661,12 +667,12 @@ class SplinePSF(PSF):
         if self.axes not in (('component',), ('dipole',), ('response',), ('angle',),
                              ('angle', 'dipole'), ('angle', 'response')):
             raise ValueError('these axes have no single-channel file block')
-        if self.axes == ('component',) and self.table_map.numel() != 1:
+        if self.axes == ('component',) and self.spline_index.numel() != 1:
             raise ValueError('a scalar file block requires one coefficient volume')
         d, arrays = ({}, {}) if source is None else source._file_dict()
         g = self.to_dict()
         d[self.type_name] = g
-        key = 'coefs' if self.value == 'density' else 'knots'
+        key = 'coefs' if self.integrated else 'knots'
         suffix = '_angle' if self.n_angles else ''
         tables = self._volumes()
         if self.has_dipole:
@@ -681,8 +687,7 @@ class SplinePSF(PSF):
     @classmethod
     def _from_file(cls, d, arrays, roisize=None, device=None, angle=None, **kw):
         typ, g = cls.file_grid(d)
-        kernel, value = ('catmull', 'pixel') if typ == 'spline' else cls.grid_interpolant(g)
-        density = value == 'density'
+        kernel, density = ('catmull', False) if typ == 'spline' else cls.grid_interpolant(g)
         arrays = arrays or {}
         key = 'coefs' if density else 'knots'
         weights = g.get('default_weights')
@@ -715,8 +720,8 @@ class SplinePSF(PSF):
         model = cls(g['roisize'], g['z_range'], g['oversample'], g['dz_um'], g['zpad'], g['xy_limit'],
                     device=device, knots=tables, knot_u0_px=g.get('u0_px'), knot_z0_um=g.get('z0_um'),
                     pixel_um=g.get('pixel_um') or (d.get('optics') or {}).get('pixel_um'),
-                    kernel=kernel, value=value,
-                    backend=g.get('backend', 'sep' if density else 'conv'), axes=axes, table_map=ids, angle=angle,
+                    kernel=kernel, integrated=density,
+                    backend=g.get('backend', 'sep' if density else 'conv'), axes=axes, spline_index=ids, angle=angle,
                     component_weights=weights)
         if model.nz != g.get('nz', model.nz) or model.c != g.get('c', model.c):
             raise ValueError('coefficient arrays do not match the stored grid')
@@ -743,11 +748,11 @@ class SplinePSF(PSF):
         if hasattr(model, '_grid_sampler'):
             return model._grid_sampler(self, pos_fn, params, focus, blur, dipM)
         if not hasattr(model, '_image'):
-            if self.value == 'density' or pos_fn is not None or dipM is not None:
+            if self.integrated or pos_fn is not None or dipM is not None:
                 raise ValueError('this model supports tabulating pixel values only')
             return model.render
         pixels = None
-        if self.value == 'density':
+        if self.integrated:
             sampling = spectral_min_oversample(model.band_limit())
             if params is None:
                 pixels = PixelIntegrator(model, model.blur if blur is None else blur, mode='point', oversample=sampling)
@@ -768,7 +773,7 @@ class SplinePSF(PSF):
         return render
 
     def vjp_vectorial(self, vectorial, pos_fn, grad_knots, names=('zcoef',), chunk=4):
-        """Pull one table's coefficient adjoint back to optical parameters, one z chunk at a time."""
+        """Pull one spline's coefficient adjoint back to optical parameters, one z chunk at a time."""
         base = dict(vectorial.named_parameters())
         base.update(vectorial.named_buffers())
         prm = {k: v.detach().requires_grad_(k in names) for k, v in base.items()}
@@ -794,78 +799,78 @@ class IndexedSplines:
     def compatible(models):
         if not models or not all(isinstance(m, SplinePSF) for m in models):
             return False
-        keys = ('roisize', 'S', 'hz', 'z0', 'u0', 'nz', 'nv', 'xmax', 'kernel', 'value', 'dtype', 'dev')
+        keys = ('roisize', 'S', 'hz', 'z0', 'u0', 'nz', 'nv', 'xmax', 'kernel', 'integrated', 'dtype', 'dev')
         return all(all(getattr(m, k) == getattr(models[0], k) for k in keys) for m in models[1:])
 
     def __init__(self, models, axis):
-        self.table = copy.copy(models[0])
-        self.table.knots = torch.cat([m.knots for m in models])
+        self.spline = copy.copy(models[0])
+        self.spline.knots = torch.cat([m.knots for m in models])
         self.members = []
         self.slices = []
         start = 0
         for m in models:
             view = copy.copy(m)
             self.slices.append(slice(start, start + len(m.knots)))
-            view.knots = self.table.knots[self.slices[-1]]
+            view.knots = self.spline.knots[self.slices[-1]]
             self.members.append(view)
             start += len(m.knots)
-        self.starts = self.table.table_map.new_tensor([0] + [len(m.knots) for m in models]).cumsum(0)[:-1]
-        if all(m.axes == models[0].axes and m.table_map.shape == models[0].table_map.shape for m in models):
-            self.table.axes = (axis, *models[0].axes)
-            self.table.table_map = torch.stack([start + m.table_map for start, m in zip(self.starts, models)])
+        self.starts = self.spline.spline_index.new_tensor([0] + [len(m.knots) for m in models]).cumsum(0)[:-1]
+        if all(m.axes == models[0].axes and m.spline_index.shape == models[0].spline_index.shape for m in models):
+            self.spline.axes = (axis, *models[0].axes)
+            self.spline.spline_index = torch.stack([start + m.spline_index for start, m in zip(self.starts, models)])
         else:
-            self.table.axes = ('component',)
-            self.table.table_map = torch.arange(len(self.table.knots), device=self.table.dev)
-        self.table._ordered = torch.equal(self.table.table_map.flatten(),
-                                          torch.arange(len(self.table.knots), device=self.table.dev))
+            self.spline.axes = ('component',)
+            self.spline.spline_index = torch.arange(len(self.spline.knots), device=self.spline.dev)
+        self.spline._ordered = torch.equal(self.spline.spline_index.flatten(),
+                                          torch.arange(len(self.spline.knots), device=self.spline.dev))
 
     def evaluate(self, pos, member, grad=False, *, dipM=None, angle=None, basis=False):
         """pos [N,L,3] and member indices broadcast over [N,L]."""
         if angle is not None and torch.as_tensor(angle).ndim:
             from torch_psf.vectorial import angle_indices
             dipole = basis or dipM is not None
-            volumes = [self.table.knots[sl] for sl in self.slices]
+            volumes = [self.spline.knots[sl] for sl in self.slices]
             selections, banks = zip(*(m._angle_bank(dipole, bank) for m, bank in zip(self.members, volumes)))
-            a = angle_indices(angle, min(m.n_angles for m in self.members), self.table.dev)
+            a = angle_indices(angle, min(m.n_angles for m in self.members), self.spline.dev)
             if a.shape != (len(pos),):
                 raise ValueError('expected one angle per emitter')
             # Members may have different numbers of angles or independent calibrated defaults.
             direct = all(bank is v for bank, v in zip(banks, volumes))
-            bank = self.table.knots if direct else torch.cat(banks)
+            bank = self.spline.knots if direct else torch.cat(banks)
             lengths = [len(b) for b in banks]
             starts = self.starts if direct else self.starts.new_tensor([0, *lengths[:-1]]).cumsum(0)
             rows = [ids[a] + start for ids, start in zip(selections, starts)]
             mapping = torch.stack(rows, 1)
             n = torch.arange(len(pos), device=a.device)[:, None]
             ids = mapping[n, member]
-            images = self.table.evaluate_tables(pos.unsqueeze(-2) if dipole else pos, ids, grad, bank)
+            images = self.spline.evaluate_splines(pos.unsqueeze(-2) if dipole else pos, ids, grad, bank)
             if dipM is None:
                 return images
             return self._contract(images, pos, dipM, grad)
 
         members = self.members if angle is None else [m.for_angle(angle) for m in self.members]
         if not basis and dipM is None:
-            if all(m.table_map.numel() == 1 for m in members):
-                ids = self.starts + torch.stack([m.table_map.reshape(()) for m in members])
-                return self.table.evaluate_tables(pos, ids[member], grad)
-            bank = torch.stack([m.default_volume(self.table.knots[sl]) for m, sl in zip(members, self.slices)])
-            return self.table.evaluate_tables(pos, member, grad, bank)
+            if all(m.spline_index.numel() == 1 for m in members):
+                ids = self.starts + torch.stack([m.spline_index.reshape(()) for m in members])
+                return self.spline.evaluate_splines(pos, ids[member], grad)
+            bank = torch.stack([m.default_volume(self.spline.knots[sl]) for m, sl in zip(members, self.slices)])
+            return self.spline.evaluate_splines(pos, member, grad, bank)
 
         ids = [m._basis_indices() for m in members]
         if all(i.ndim == 1 for i in ids):
-            bank = self.table.knots
+            bank = self.spline.knots
             indices = torch.stack(ids) + self.starts[:, None]
         else:
-            bank = torch.cat([self.table.knots[sl][i].mean(0) if i.ndim == 2 else self.table.knots[sl][i]
+            bank = torch.cat([self.spline.knots[sl][i].mean(0) if i.ndim == 2 else self.spline.knots[sl][i]
                               for sl, i in zip(self.slices, ids)])
             indices = torch.arange(len(bank), device=bank.device).reshape(-1, 6)
-        images = self.table.evaluate_tables(pos.unsqueeze(-2), indices[member], grad, bank)
+        images = self.spline.evaluate_splines(pos.unsqueeze(-2), indices[member], grad, bank)
         if basis:
             return images
         return self._contract(images, pos, dipM, grad)
 
     def _contract(self, images, pos, dipM, grad):
-        M = torch.as_tensor(dipM).to(self.table.knots)
+        M = torch.as_tensor(dipM).to(self.spline.knots)
         if M.shape not in ((3, 3), (len(pos), 3, 3)):
             raise ValueError('dipM must have shape [3,3] or [N,3,3]')
         w = M_to_m6(M).reshape(-1, 1, 6, 1, 1)
@@ -911,35 +916,36 @@ def _sample_grid(grid, render, batch, zs=None):
     return images.permute(order).reshape(*axes, -1, P * S, P * S)
 
 
-def to_spline(model, z_range=None, *, roisize=None, kernel=None, value=None, components=None, **grid):
-    """Build spline tables for an optical model or per-angle models.
+def to_spline(model, z_range=None, *, roisize=None, kernel=None, integrated=None, components=None, **grid):
+    """Build splines for an optical model or per-angle models.
 
-    kernel='catmull'|'bspline' and value='pixel'|'density' select the
+    kernel='catmull'|'bspline' and integrated=False|True select the
     interpolant. Grid arguments are oversample, dz_um, zpad and xy_limit.
     components='dipole' adds the six dipole responses. Compositions keep
-    their channel geometry and existing spline tables can be resized.
+    their channel geometry and existing splines can be resized.
     """
-    grid.update({k: v for k, v in dict(kernel=kernel, value=value, components=components).items() if v is not None})
+    grid.update({k: v for k, v in dict(kernel=kernel, integrated=integrated, components=components).items() if v is not None})
     if isinstance(model, (list, tuple)) or getattr(type(model), 'to_spline', PSF.to_spline) is PSF.to_spline:
         return _tabulate(model, z_range, roisize=roisize, **grid)
     return model.to_spline(roisize, z_range, **grid)
 
 
 def _has_point_density(model):
-    """True if the model can render the point density (needed for value='density' tables)."""
+    """True if the model can render the point density (needed for integrated splines)."""
     return hasattr(model, '_grid_sampler') or hasattr(model, '_image')
 
 
 @torch.no_grad()
-def _tabulate(model, z_range=None, *, roisize=None, kernel=None, value=None, components=None, oversample=None,
+def _tabulate(model, z_range=None, *, roisize=None, kernel=None, integrated=None, components=None, oversample=None,
               dz_um=None, zpad=None, xy_limit=None, chunk=None, backend='sep', pos_fn=None, kind=None,
               dipole_components=False):
     """Tabulate an optical PSF, or a sequence of PSFs for the pattern angles.
 
-    Pass kernel, value and the grid explicitly for calibration builds.
+    Pass kernel, integrated and the grid explicitly for calibration builds.
     components='dipole' stores six responses per angle or phase/channel.
     chunk counts z planes for single-channel models and positions for 4Pi models.
     """
+    value = None if integrated is None else ('density' if integrated else 'pixel')
     models = list(model) if isinstance(model, (list, tuple)) else [model]
     if not models:
         raise ValueError('provide at least one source model')
@@ -950,14 +956,15 @@ def _tabulate(model, z_range=None, *, roisize=None, kernel=None, value=None, com
         if value is None:
             value = 'density' if default == 'integrated' else 'pixel'
     elif value is None:
-        default_kernel, value, default_sampling = (DEFAULT_SPLINE if _has_point_density(first)
-                                                   else DEFAULT_PIXEL_SPLINE)
+        default_kernel, default_integrated, default_sampling = (DEFAULT_SPLINE if _has_point_density(first)
+                                                                else DEFAULT_PIXEL_SPLINE)
+        value = 'density' if default_integrated else 'pixel'
         kernel = default_kernel if kernel is None else kernel
         if oversample is None:
             oversample = default_sampling
     profile = ('phase_' if phase else '') + value
     if profile not in _GRID_PROFILES:
-        raise ValueError('value must be pixel or density')
+        raise ValueError('integrated must be True or False')
     k, S, dz, pad, xl, batch = _GRID_PROFILES[profile]
     kernel = k if kernel is None else kernel
     S = S if oversample is None else oversample
@@ -972,13 +979,13 @@ def _tabulate(model, z_range=None, *, roisize=None, kernel=None, value=None, com
     if components not in (None, 'dipole', 'phase') or (components == 'phase' and not phase):
         raise ValueError('unknown spline components')
     dipole = dipole_components or components == 'dipole'
-    backend = backend or ('conv' if kernel == 'catmull' and value == 'pixel' else 'sep')   # catmull pixel tables: the old CubicSplinePSF evaluation
+    backend = backend or ('conv' if kernel == 'catmull' and value == 'pixel' else 'sep')   # catmull pixel-value splines: the old CubicSplinePSF evaluation
     grid = SplinePSF(P, zr, S, dz, pad, xl + int(value == 'density'), device=first.dev, pixel_um=first.pixel_um,
-                     kernel=kernel, value=value, backend=backend, dtype=getattr(first, 'dtype', torch.float32))
+                     kernel=kernel, integrated=value == 'density', backend=backend, dtype=getattr(first, 'dtype', torch.float32))
     grid.xmax = min(xl, grid.xmax)
     if phase:
         if len(models) != 1 or pos_fn is not None:
-            raise ValueError('4Pi tables use one optical source with its configured zmode')
+            raise ValueError('4Pi splines use one optical source with its configured zmode')
         from torch_psf.fourpi import FourPiSplinePSF
         big = first._sampling_model(grid.Pl, value == 'density')
         def render(p):
@@ -1005,7 +1012,7 @@ def _tabulate(model, z_range=None, *, roisize=None, kernel=None, value=None, com
     grid.knots = bank.reshape(-1, grid.nz, grid.nv, grid.nu)
     grid.axes = (('angle',) if multi else ()) + (('dipole',) if dipole else ())
     grid.axes = grid.axes or ('component',)
-    grid.table_map = torch.arange(len(grid.knots), device=grid.dev).reshape(bank.shape[:-3] or (1,))
+    grid.spline_index = torch.arange(len(grid.knots), device=grid.dev).reshape(bank.shape[:-3] or (1,))
     if dipole:
         grid.component_weights = (torch.stack(weights) if multi else weights[0]).to(grid.knots)
     return grid

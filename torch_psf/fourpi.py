@@ -1,7 +1,7 @@
-"""Coherent two-objective (4Pi) PSF with C polarization / phase-split interference channels, and its spline table.
+"""Coherent two-objective (4Pi) PSF with C polarization / phase-split interference channels, and its spline.
 
 FourPiPSF: the vectorial model, built on VectorialPSF.pupil_fields() of two arms (top, bottom objective).
-FourPiSplinePSF: its multi-channel spline table, with the global 4Pi phase as an exact analytic dependence.
+FourPiSplinePSF: its multi-channel spline, with the global 4Pi phase as an exact analytic dependence.
 
 Geometry (both arms focused at z = 0):
   top arm    : the VectorialPSF field of a dipole mu at (x, y, z), pupil aberration W_top (top.zcoef).
@@ -517,7 +517,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
 class FourPiSplinePSF(_CoupledChannels):
     """MultiChannelPSF view of one spline bank indexed by phase, channel and optional dipole component."""
     type_name = 'fourpi_spline'
-    dtype = property(lambda self: self.table.dtype)
+    dtype = property(lambda self: self.spline.dtype)
     extra_params = ('phi',)
 
     def __init__(self, roisize, z_range, knots, oversample=4, dz_um=0.01, zpad=3, xy_limit=None, tau=None, device=None,
@@ -537,25 +537,25 @@ class FourPiSplinePSF(_CoupledChannels):
         if self.dipole_components:
             M = torch.eye(3) / 3 if default_dipM is None else torch.as_tensor(default_dipM)
             if M.shape != (3, 3) or K.shape[2] != 6:
-                raise ValueError('expected six dipole tables per channel and a [3,3] default tensor')
+                raise ValueError('expected six dipole splines per channel and a [3,3] default tensor')
             weights = M_to_m6(M.to(device=K.device, dtype=torch.float32))
 
         density = integrated_grid is not None
         g = integrated_grid or {}
-        if 'basis' in g:
-            grid_kernel, grid_value = SplinePSF.grid_interpolant(g)
-            if grid_value != 'density' or kernel not in (None, grid_kernel):
-                raise ValueError('inconsistent basis / value in phase grid')
+        if 'basis' in g or 'kernel' in g:
+            grid_kernel, grid_integrated = SplinePSF.grid_interpolant(g)
+            if not grid_integrated or kernel not in (None, grid_kernel):
+                raise ValueError('inconsistent kernel / integrated in phase grid')
             kernel = grid_kernel
         if K.shape[0] != 3 or K.ndim not in (5, 6):
-            raise ValueError('expected phase tables [3,C,(6),nz,n,n]')
+            raise ValueError('expected phase splines [3,C,(6),nz,n,n]')
         axes = ('phase', 'channel') + (('dipole',) if self.dipole_components else ())
         ids = torch.arange(math.prod(K.shape[:-3])).reshape(K.shape[:-3])
-        self.table = SplinePSF(self.P, self.z_range, self.S, self.hz, self.zpad, xl, device=self.dev,
+        self.spline = SplinePSF(self.P, self.z_range, self.S, self.hz, self.zpad, xl, device=self.dev,
                                knots=K, knot_u0_px=g.get('u0_px'), knot_z0_um=g.get('z0_um'),
                                pixel_um=self.pixel_um if density else None, kernel=kernel or ('bspline' if density else 'catmull'),
-                               value='density' if density else 'pixel', backend=backend or ('sep' if density else 'conv'),
-                               axes=axes, table_map=ids, component_weights=weights)
+                               integrated=density, backend=backend or ('sep' if density else 'conv'),
+                               axes=axes, spline_index=ids, component_weights=weights)
         C = K.shape[1]
         self.tau = (torch.full((C,), 1.0 / C) if tau is None else torch.as_tensor(tau, dtype=torch.float32)).to(self.dev)
         self._init_channels(C, channel_offsets)
@@ -563,11 +563,11 @@ class FourPiSplinePSF(_CoupledChannels):
     # ------------------------------------------------------------------ geometry
     @property
     def n_channels(self):
-        return self.table.table_map.shape[1]
+        return self.spline.spline_index.shape[1]
 
     @property
     def knots(self):
-        return self.table.knots
+        return self.spline.knots
 
     @property
     def z_range(self):
@@ -575,14 +575,14 @@ class FourPiSplinePSF(_CoupledChannels):
 
     @property
     def z_limits(self):
-        return self.table.z_limits
+        return self.spline.z_limits
 
     @property
     def xy_limit(self):
-        return self.table.xmax
+        return self.spline.xmax
 
     def __repr__(self):
-        L = self.table
+        L = self.spline
         return (f'FourPiSplinePSF(roisize={self.P}, channels={self.n_channels}, z_range=({self.zmin}, {self.zmax}), '
                 f'oversample={self.S}, dz_um={self.hz}, zpad={self.zpad}, xy_limit={L.xmax}, knots {(L.nz, L.nv, L.nu)})')
 
@@ -606,22 +606,22 @@ class FourPiSplinePSF(_CoupledChannels):
         return self._render_c(pos[:, None, :].expand(-1, self.n_channels, -1), Phi, grad)
 
     def _phase_components(self, pc, grad, knots, dipM, basis=False):
-        ids = self.table.table_map.transpose(0, 1)
+        ids = self.spline.spline_index.transpose(0, 1)
         if (dipM is not None or basis) and not self.dipole_components:
             raise ValueError('build with components="dipole" (dipole_components=True)')
         p = pc[:, :, None, :]
         if self.dipole_components and dipM is None and not basis:
             # Fixed dipoles in phase files are defined on the coefficients. Rounding
             # these combinations before interpolation also preserves the archive TIFF.
-            bank = self._stored_tables() if knots is None else knots.reshape_as(self._stored_tables())
-            fixed = torch.einsum('d,fcdzyx->fczyx', self.table.component_weights, bank)
-            return self.table.evaluate_tables(p, ids[..., 0] // 6, grad, fixed)
+            bank = self._stored_splines() if knots is None else knots.reshape_as(self._stored_splines())
+            fixed = torch.einsum('d,fcdzyx->fczyx', self.spline.component_weights, bank)
+            return self.spline.evaluate_splines(p, ids[..., 0] // 6, grad, fixed)
         if self.dipole_components:
             p = p.unsqueeze(-2)
-        images = self.table.evaluate_tables(p, ids, grad, knots)
+        images = self.spline.evaluate_splines(p, ids, grad, knots)
         if basis or not self.dipole_components:
             return images
-        w = self.table.component_weights if dipM is None else M_to_m6(torch.as_tensor(dipM).to(self.knots))
+        w = self.spline.component_weights if dipM is None else M_to_m6(torch.as_tensor(dipM).to(self.knots))
         def contract(v):
             return torch.einsum('nd,ncfdij->ncfdij', w.reshape(-1, 6), v).sum(3)
         return tuple(contract(v) for v in images) if grad else contract(images)
@@ -644,7 +644,7 @@ class FourPiSplinePSF(_CoupledChannels):
         basis = self._phase_sum(images, _phase(pc, phi))
         return basis if raw else basis * self.intensity_ratio[None, :, None, None, None]
 
-    def render_tables(self, pos, grad=False, *, phi=None, knots=None, offsets=None, dipM=None, corners=None):
+    def render_splines(self, pos, grad=False, *, phi=None, knots=None, offsets=None, dipM=None, corners=None):
         Phi = _phase(pos, phi)
         if self.mapped:
             return self._ratio(self._render_mapped(pos, Phi[:, None], offsets, corners, grad, dipM, knots=knots))
@@ -665,18 +665,18 @@ class FourPiSplinePSF(_CoupledChannels):
     wrap_extra = FourPiPSF.wrap_extra
 
     def to(self, device=None, dtype=None):
-        self.table.to(device, dtype)
-        self.tau = self.tau.to(device=self.table.dev, dtype=dtype)
-        self.dev = self.table.dev
+        self.spline.to(device, dtype)
+        self.tau = self.tau.to(device=self.spline.dev, dtype=dtype)
+        self.dev = self.spline.dev
         self.channel_offsets = self.channel_offsets.to(device=self.dev, dtype=dtype)
         self.intensity_ratio = self.intensity_ratio.to(device=self.dev, dtype=dtype)
         return self
 
     def resized(self, roisize):
-        """The same table (knots shared) for roisize x roisize patches (a larger ROI reduces xy_limit)."""
+        """The same spline (knots shared) for roisize x roisize patches (a larger ROI reduces xy_limit)."""
         new = copy.copy(self)
         new.roisize = new.P = int(roisize)
-        new.table = self.table.resized(roisize)
+        new.spline = self.spline.resized(roisize)
         return new
 
     def to_spline(self, roisize=None, z_range=None, **grid):
@@ -685,11 +685,11 @@ class FourPiSplinePSF(_CoupledChannels):
         return self if roisize in (None, self.roisize) else self.resized(roisize)
 
     def resampled(self, **grid):
-        """The 4Pi tables on another knot grid or with another kernel (arguments as SplinePSF.resampled): the one
+        """The 4Pi splines on another knot grid or with another kernel (arguments as SplinePSF.resampled): the one
         phase / channel / dipole knot bank is re-tabulated from its own interpolant."""
-        table = self.table.resampled(**grid)
+        table = self.spline.resampled(**grid)
         new = copy.copy(self)
-        new.table = table
+        new.spline = table
         new.roisize = new.P = table.roisize
         new.S, new.hz, new.zpad = table.S, table.hz, table.zpad
         new.zmin, new.zmax = table.z_range
@@ -697,8 +697,8 @@ class FourPiSplinePSF(_CoupledChannels):
 
     # ------------------------------------------------------------------ files
     def format_version(self, source=None):
-        version = self.table.format_version()
-        if self.table.value == 'density':
+        version = self.spline.format_version()
+        if self.spline.integrated:
             version = max(version, (0, 4))
         if source is not None:
             return max(version, source.format_version())
@@ -707,13 +707,13 @@ class FourPiSplinePSF(_CoupledChannels):
             return max(version, FourPiPSF.integration_version(mode))
         return version
 
-    def _stored_tables(self):
-        return self.table._volumes()
+    def _stored_splines(self):
+        return self.spline._volumes()
 
     def _file_dict(self, source=None):
-        L = self.table
+        L = self.spline
         g = dict(L.to_dict(), roisize=self.P, n_channels=self.n_channels, tau=_list(self.tau), xy_limit=L.xmax)
-        if L.type_name == 'spline_table':
+        if L.type_name == 'cubic_spline':
             g['pixel_um'] = self.pixel_um
         if self.default_dipM is not None:
             g['default_dipM'] = self.default_dipM
@@ -724,21 +724,21 @@ class FourPiSplinePSF(_CoupledChannels):
         if st is not None:
             d['fourpi'] = st
         key = 'dipole_knots' if self.dipole_components else 'knots'
-        return d, {key: self._stored_tables().detach().cpu().numpy()}
+        return d, {key: self._stored_splines().detach().cpu().numpy()}
 
     @classmethod
     def _from_file(cls, d, arrays, roisize=None, device=None, **kw):
         g = d['fourpi_spline']
-        kernel, value = SplinePSF.grid_interpolant(g)
+        kernel, integrated = SplinePSF.grid_interpolant(g)
         key = 'dipole_knots' if g.get('dipole_components') else 'knots'
         tables = torch.as_tensor(arrays[key])
         if g.get('dipole_components') and (tables.ndim != 6 or tables.shape[2] != 6):
-            raise ValueError('expected 4Pi dipole tables [3,C,6,nz,n,n]')
+            raise ValueError('expected 4Pi dipole splines [3,C,6,nz,n,n]')
         s = cls(g['roisize'], tuple(g['z_range']), tables, oversample=g['oversample'],
                 dz_um=g['dz_um'], zpad=g['zpad'], xy_limit=g['xy_limit'], tau=g.get('tau'), device=device,
                 pixel_um=g.get('pixel_um'), source_state=d.get('fourpi'), channel_offsets=g.get('channel_offsets'),
-                integrated_grid=g if value == 'density' else None, kernel=kernel,
+                integrated_grid=g if integrated else None, kernel=kernel,
                 default_dipM=g.get('default_dipM'), backend=g.get('backend'))
-        if s.table.nz != g.get('nz', s.table.nz) or s.table.c != g.get('c', s.table.c):
+        if s.spline.nz != g.get('nz', s.spline.nz) or s.spline.c != g.get('c', s.spline.c):
             raise ValueError('4Pi coefficient volumes do not match the stored grid')
         return s if roisize in (None, s.roisize) else s.resized(roisize)

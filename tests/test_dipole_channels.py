@@ -69,12 +69,12 @@ def test_spline_dipoles_and_files(kind, integrated, tmp_path, monkeypatch):
     source = models(kind, 'exact' if integrated else 'midpoint')
     grid = dict(oversample=3, dz_um=.01, xy_limit=.75, dipole_components=True, zpad=3)
     if not integrated:
-        grid.update(kernel='catmull', value='pixel')
+        grid.update(kernel='catmull', integrated=False)
     pos, M = emitters()
     if kind == 'fourpi':
         source.dipM = M[0]
     if kind == 'channels' and integrated:
-        tables = [to_spline(v, v.z_range, kernel='bspline', value='density', **grid) for v in source.models]
+        tables = [to_spline(v, v.z_range, kernel='bspline', integrated=True, **grid) for v in source.models]
         model = ChannelsPSF(tables, source.channel_offsets, source.intensity_ratio)
     else:
         model = source.to_spline(**grid)
@@ -115,7 +115,7 @@ def test_integrated_basis_per_angle(tmp_path):
     pos, M = emitters()
     arms[0].dipM, arms[1].dipM = M
     arms[1].blur = torch.tensor([.2, .1, .02])
-    table = to_spline(arms, arms[0].z_range, kernel='bspline', value='density', oversample=2, dz_um=.02,
+    table = to_spline(arms, arms[0].z_range, kernel='bspline', integrated=True, oversample=2, dz_um=.02,
                                                xy_limit=1, dipole_components=True)
     path = tmp_path / 'angles.zip'
     io.save_zip(path, table, zstack_planes=3)
@@ -125,7 +125,7 @@ def test_integrated_basis_per_angle(tmp_path):
         ref = table.for_angle(angle)
         loaded = PSF.load(path, angle=angle, device='cpu')
         check_image(loaded.render(pos, dipM=M), ref.render(pos, dipM=M))
-        fixed = to_spline(arms[angle], arms[angle].z_range, kernel='bspline', value='density', oversample=2, dz_um=.02,
+        fixed = to_spline(arms[angle], arms[angle].z_range, kernel='bspline', integrated=True, oversample=2, dz_um=.02,
                                                    xy_limit=1)
         defaults.append(fixed.render(pos))
         torch.testing.assert_close(loaded.render(pos), defaults[-1], rtol=0, atol=1e-6 * defaults[-1].max().item())
@@ -187,7 +187,7 @@ def test_fourpi_dipole_rebuild(tmp_path):
 @pytest.mark.parametrize('kind', ['fourpi', 'channels'])
 def test_catmull_pixel_spline_keeps_old_layout(kind, tmp_path, monkeypatch):
     source = models(kind)
-    model = source.to_spline(oversample=2, dz_um=.02, xy_limit=1, kernel='catmull', value='pixel')
+    model = source.to_spline(oversample=2, dz_um=.02, xy_limit=1, kernel='catmull', integrated=False)
     path = tmp_path / 'fixed.zip'
     meta = io.save_zip(path, model if kind == 'fourpi' else model.models, zstack_planes=3)
     assert meta['version'] == '0.2.0'
@@ -212,8 +212,8 @@ def test_component_build_and_default_response(tmp_path, monkeypatch, integrated)
     grid = dict(oversample=2, dz_um=.02, xy_limit=1)
     def build(components):
         if integrated:
-            return to_spline(v, v.z_range, kernel='bspline', value='density', dipole_components=components, **grid)
-        return v.to_spline(dipole_components=components, kernel='catmull', value='pixel', **grid)
+            return to_spline(v, v.z_range, kernel='bspline', integrated=True, dipole_components=components, **grid)
+        return v.to_spline(dipole_components=components, kernel='catmull', integrated=False, **grid)
     reference = build(False).render(pos)
     owner, name = SplinePSF, 'sample'
     original = getattr(owner, name)
@@ -251,7 +251,7 @@ def test_phase_and_integrated_component_dtype():
     phase = torch.tensor([[.31], [.72]], dtype=torch.float64)
     spline = source.to_spline(kind='integrated', oversample=2, dz_um=.02, xy_limit=1, dipole_components=True)
     spline.to('cpu', torch.float64)
-    assert spline.table.knots.dtype == torch.float64 and spline.table.table_map.shape[-1] == 6
+    assert spline.spline.knots.dtype == torch.float64 and spline.spline.spline_index.shape[-1] == 6
     for model in (source, spline):
         pc = model.channel_positions(pos)
         img = model.render_channels(pc, phase, dipM=M)
