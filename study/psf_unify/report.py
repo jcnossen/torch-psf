@@ -304,7 +304,8 @@ def gaussians(pdf, data):
     rows = [[LABEL[n], f"{acc_row(data, n, None)['value']['max']:.2g}", speed_cells(data, n, None, ops=OPS[:2])]
             for n in GAUSS]
     table(f, .14, .1, ['Model', 'Max image error', 'Fwd / grad, 10,000 spots (k/s)'], rows, [.3, .3, .4])
-    para(f, .12, 'The Gaussians have no shape parameters to differentiate, so there is no backward timing.')
+    para(f, .12, 'torch-psf stores the Gaussian shape parameters (σx0, σy0, and γ, d for the astigmatic model) as plain numbers, '
+         'not tensors, so there is no gradient with respect to them yet and no backward timing.')
     finish(pdf, f)
 
 

@@ -303,7 +303,7 @@ def accuracy_run(ref, data, out):
 def timing_grid():
     for name, s in TABLES + OPTICS + GAUSS:
         tunes = (False, True) if name in ('cr_int', 'bs_int', 'cr_pix') else (False,)   # cuDNN: conv splines only
-        ops = OPS if name not in ('astig', 'gauss2d') else OPS[:2]   # the Gaussians have no shape parameters
+        ops = OPS if name not in ('astig', 'gauss2d') else OPS[:2]   # Gaussian shape parameters are plain floats (no gradient)
         for backend, tf32 in variants(name):
             for tune, n, op in itertools.product(tunes, BATCHES, ops):
                 yield dict(name=name, S=s, backend=backend, tf32=tf32, cudnn_benchmark=tune, batch=n, op=op)
