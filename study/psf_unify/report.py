@@ -105,7 +105,7 @@ def decision(data):
 
 
 def summary(pdf, data, acc):
-    f = page(pdf, 'Choosing a default spline definition', 'm1809 in-situ calibration   /   Spectral reference   /   2 knots per pixel')
+    f = page(pdf, 'Choosing a default spline definition', 'm1809 in-situ calibration   /   2 knots per pixel')
     title, why = decision(data)
     heading(f, .795, title)
     para(f, .76, why)
@@ -132,9 +132,9 @@ def summary(pdf, data, acc):
     counted = Counter('idle' if r.get('idle') else 'desktop' for r in data['timing'] if 'spots_s' in r)
     initial = data.get('initial_gpu_observation')
     first = f"Initial GPU utilization was {initial['util_percent']:.0f}%. " if initial else ''
-    para(f, .15, f"{data['gpu']} · PyTorch {data['torch']} · CUDA {data['cuda']}. {first}Of {len(data['timing'])} timing cases, "
+    para(f, .17, f"{data['gpu']} · PyTorch {data['torch']} · CUDA {data['cuda']}. {first}Of {len(data['timing'])} timing cases, "
          f"{counted['idle']} passed the idle screen, {counted['desktop']} ran with background activity, and "
-         f"{len(data['timing']) - sum(counted.values())} have no rate. The timing pages give coverage and reasons.")
+         f"{len(data['timing']) - sum(counted.values())} have no rate. {missing(data)}")
     finish(pdf, f)
 
 
@@ -229,55 +229,41 @@ def speeds(pdf, data, names, title, plot=True):
              width=150)
     else:
         for name in names:
-            r = [selected_timing(data, name, op, s=None) for op in OPS]
+            r = [selected_timing(data, name, op, n=1000, s=None) for op in OPS]
             rows.append([LABEL[name], *[rate(a) for a in r], ' / '.join(f"{a['peak_MiB']:.0f}" if a and 'peak_MiB' in a
                                                                         else '—' for a in r)])
-        table(f, .62, .17, ['10,000 spots', 'Forward (k/s)', 'Grad (k/s)', 'Backward (k/s)', 'Peak MiB, same order'],
+        table(f, .62, .17, ['1,000 spots', 'Forward (k/s)', 'Grad (k/s)', 'Backward (k/s)', 'Peak MiB, same order'],
               rows, [.28, .16, .16, .16, .24])
         para(f, .59, 'Medians over 10 synchronized repeats after 2 warm-ups. Starred rates had background GPU '
-             'activity; a dash is an unavailable timing (out of memory). Peak memory is the '
+             'activity. 1,000 spots per call: derivatives of larger batches exceed the memory cap. Peak memory is the '
              'maximum live PyTorch allocation. Backward includes rendering and differentiating the sum of squared '
              'pixels with respect to each arm’s Zernikes. The native 4Pi gradient includes phase.')
+        para(f, .45, 'Pixel integration of the vectorial model (the same optics, three ways to integrate the light over '
+             'each camera pixel): box averages point samples of the image on a sub-pixel grid (a midpoint rule, '
+             'approximate); spectral integrates exactly by multiplying the band-limited image spectrum by the pixel '
+             'transfer function (needs alias-free sub-pixel sampling, the reference for the spline errors); '
+             'Gauss–Legendre evaluates the image at quadrature nodes inside each pixel and sums them with weights '
+             '(no FFT, no image-plane blur).')
         para(f, .51, '4Pi uses four channels and the symmetric 32-sample pupil arms from the test fixture. The second '
              'm1809 channel has +0.12 µm focus offset and (+0.2, −0.1) px lateral offset.')
     finish(pdf, f)
 
 
-def status(r):
-    if 'spots_s' in r:
-        return 'I' if r.get('idle') else 'D'
-    reason = r.get('unavailable', '')
-    if reason.startswith('Preflight'):
-        return 'B'
-    if 'memory' in reason.lower() or 'allocate' in reason.lower():
-        return 'M'
-    return 'E'
-
-
-def coverage(pdf, data):
-    # Each cell describes all nine batch/operation combinations for a named setting.
-    groups = {}
-    for r in data['timing']:
-        key = (r['name'], r['S'], r['backend'], r['tf32'])
-        groups.setdefault(key, {})[(r['cudnn_benchmark'], r['batch'], r['op'])] = r
-    items = list(groups.items())
-    for start in range(0, len(items), 20):
-        f = page(pdf, 'Timing coverage by configuration', 'Within each three-letter group the order is forward, value + derivatives, backward.')
-        rows = []
-        for (name, s, be, tf), rr in items[start:start+20]:
-            cells = ['   '.join(''.join(status(rr[t, n, op]) for op in OPS) for n in BATCHES) for t in [False, True]]
-            rows.append([LABEL[name], s or '—', be, 'on' if tf else 'off', *cells])
-        table(f, .278, .51, ['Model', 'S', 'Backend', 'TF32', 'Autotune off · 1k / 10k / 100k',
-                              'Autotune on · 1k / 10k / 100k'], rows, [.25, .045, .085, .07, .275, .275], size=8.3)
-        para(f, .247, 'I = idle-screened, D = desktop-active (clean rate unavailable), B = busy ≥40% or missing '
-             'nvidia-smi telemetry, M = memory allocation failed, E = other runtime error (verbatim in JSON). '
-             'Three nvidia-smi samples bracket each model, density and autotune group. Idle requires median utilization '
-             '≤5% and maximum ≤10% at both ends. Display activity can occur between samples.')
-        budgets = data['allocator_budget_MiB']
-        para(f, .122, f"Each batch uses one native render call. Autotune runs in fresh processes with PyTorch allocator "
-             f"budgets of {budgets['False']:,.0f} / {budgets['True']:,.0f} MiB (off / on). The JSON records every "
-             "repeat, quartiles, peak memory, GPU samples and individual failure messages.")
-        finish(pdf, f)
+def missing(data):
+    """One sentence on the timings without a rate (all out of memory under the allocator cap so far)."""
+    rows = [r for r in data['timing'] if 'spots_s' not in r]
+    if not rows:
+        return 'Every case has a rate.'
+    oom = [r for r in rows if 'memory' in r.get('unavailable', '').lower()]
+    cap = data.get('allocator_budget_MiB', {}).get('False')
+    same = {(r['name'], r['S'], r['backend'], r['tf32'], r['batch'], r['op']) for r in oom if r['cudnn_benchmark']} == \
+        {(r['name'], r['S'], r['backend'], r['tf32'], r['batch'], r['op']) for r in oom if not r['cudnn_benchmark']}
+    text = (f"{len(oom)} of these ran out of memory under the {cap / 1024:.0f} GB PyTorch memory cap used on the shared "
+            f"GPU{', identically with and without autotune' if same else ''}: one call renders the whole batch, and "
+            "spline backward at 100,000 spots (3–4 knots/px) and the vectorial models' derivatives above 1,000 spots "
+            "need more.") if cap else f'{len(oom)} of these ran out of GPU memory.'
+    other = len(rows) - len(oom)
+    return text + (f' {other} failed otherwise (see the JSON).' if other else '')
 
 
 def main():
@@ -305,7 +291,6 @@ def main():
             candidate(pdf, data, name)
         speeds(pdf, data, TABLES, 'Spline throughput at two knots per pixel')
         speeds(pdf, data, list(LABEL)[3:], 'Optical model throughput', plot=False)
-        coverage(pdf, data)
 
 
 if __name__ == '__main__':
