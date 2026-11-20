@@ -143,7 +143,7 @@ def model(ref, name, s):
 def variants(name):
     if name in OPTICS:
         return [('native', False)]
-    return ([('sep', False)] if name in ('cr_int', 'bs_int') else []) + [('conv', False), ('conv', True)]
+    return ([('sep', False)] if name in ('cr_int', 'bs_int', 'cr_pix') else []) + [('conv', False), ('conv', True)]
 
 
 def configure(m, backend, tf32, autotune=False):
@@ -267,11 +267,13 @@ def timed_case(m, p, op):
 
 
 def paired_run(ref):
-    # Rotate the four S=2 tables through the same timing window for the decision.
+    # Rotate the three S=2 splines through the same timing window for the decision, all on the sep backend.
     p = positions(10000)
-    names = ['cr_int', 'bs_int', 'cr_pix', 'box_os2']
+    names = ['cr_int', 'bs_int', 'cr_pix']
     configure(ref, 'native', False)
     models = [model(ref, name, 2) for name in names]
+    for m in models:
+        configure(m, 'sep', False)
     attempts = []
     for _ in range(12):
         before = idle_check()

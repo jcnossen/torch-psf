@@ -26,8 +26,7 @@ plt.rcParams.update({'font.family': 'DejaVu Sans', 'font.size': 9, 'text.color':
 
 
 def primary(row):
-    return not row['tf32'] and row['backend'] == ('sep' if row['name'] in TABLES[:2] else
-                                                 'conv' if row['name'] in TABLES else 'native')
+    return not row['tf32'] and row['backend'] == ('sep' if row['name'] in TABLES else 'native')
 
 
 def page(pdf, title, subtitle):
@@ -119,7 +118,7 @@ def summary(pdf, data, acc):
     table(f, .48, .20, ['Spline definition', 'Error / peak · max / median', 'RMS bias x / y / z (nm)', 'Fwd / grad / back (kspots/s)'],
           rows, [.245, .225, .25, .28])
     para(f, .455, 'Bias at 5,000 photons and background 10 photons/pixel. Throughput uses 10,000 spots, '
-         'cuDNN autotune off, TF32 off, the sep backend for the integrated splines and conv for Catmull–Rom. Clean '
+         'cuDNN autotune off, TF32 off, all three on the sep backend. Clean '
          'interleaved measurements take precedence when available. An asterisk marks background GPU activity.')
     para(f, .375, 'GPU backend = how the spline is evaluated on the GPU. sep (separable): gather each spot\'s knots, then '
          'contract z, x and y one axis at a time as batched matrix products (cuBLAS). conv: one grouped 2-D convolution '
@@ -288,7 +287,7 @@ def main():
     parser.add_argument('--output', type=Path, default=OUT/'psf_bench.pdf')
     args = parser.parse_args()
     data = json.loads(args.input.read_text())
-    if len(data.get('accuracy', [])) != 34:
+    if len(data.get('accuracy', [])) != 38:
         raise ValueError('Complete the precision sweep before generating the report')
     if not data.get('timing') or any('spots_s' not in r and 'unavailable' not in r for r in data['timing']):
         raise ValueError('Complete the timing sweep before generating the report')
