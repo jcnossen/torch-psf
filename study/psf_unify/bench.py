@@ -1,5 +1,6 @@
-"""Stage 0 benchmark. From the repository root run python study/psf_unify/bench.py,
-then python study/psf_unify/report.py. --phase timing updates an existing precision run.
+"""Single-PSF benchmark: accuracy and speed of the vectorial model (box / spectral / Gauss-Legendre pixel
+integration), the 2D and astigmatic Gaussians fitted to it, and the spline definitions. From the repository root run
+python study/psf_unify/bench.py, then python study/psf_unify/report.py. --phase timing updates an existing precision run.
 GPU utilization is sampled around each timing group. Desktop-active times are marked separately.
 Use --phase retry for a quiet-window retry of contaminated cases and --phase paired to repeat
 the interleaved S=2 comparison. Both keep the original measurements in the JSON.
@@ -20,8 +21,9 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from torch_psf import ChannelsPSF, FourPiPSF, PSF
+from torch_psf import AstigmaticGaussianPSF, GaussianPSF, PSF
 from torch_psf import fit
+from torch_psf.gaussian import _axis
 from torch_psf.spline import to_spline
 
 OUT = Path(__file__).resolve().parent / 'out'
@@ -30,8 +32,9 @@ P, ZR, DZ, XL = 13, (0., .4), .01, 2.
 N, BG, REPEATS = 3000, 10., 10
 PHOTONS = (1000, 5000, 20000)
 TABLES = [(name, s) for s in (2, 1, 3, 4) for name in ('cr_int', 'bs_int', 'cr_pix')]
-TABLES.insert(3, ('box_os2', 2))
-OPTICS = ['box', 'spectral', 'gauss_legendre', 'fourpi', 'channels']
+OPTICS = [(name, s) for s in (3, 2, 4) for name in ('box', 'spectral', 'gauss_legendre')]   # s = samples / pixel
+GAUSS = [('astig', None), ('gauss2d', None)]
+GAUSS_PARAMS = {}      # fitted Gaussian parameters (accuracy run), passed to the timing workers through the JSON
 BATCHES = (1000, 10000, 100000)
 OPS = ('forward', 'grad', 'backward')
 
@@ -111,8 +114,75 @@ def positions(n):
     return (u * torch.tensor([3.8, 3.8, .4]) + torch.tensor([-1.9, -1.9, 0.])).cuda()
 
 
+class ShiftedAstigmaticGaussianPSF(AstigmaticGaussianPSF):
+    """The astigmatic Gaussian with its z origin at z0_um (the calibration's focus need not sit at z = 0)."""
+    def __init__(self, roisize, sigma_px, gamma_um, d_um, z0_um, z_range, device=None, pixel_um=None):
+        super().__init__(roisize, sigma_px, gamma_um, d_um, z_range, device, pixel_um)
+        self.z0 = float(z0_um)
+
+    def _widths(self, z):
+        return super()._widths(z - self.z0)
+
+
+def _gauss_images(sx, sy):
+    """Pixel-integrated Gaussian images [n, P, P] centred in the ROI, widths sx, sy [n] (px), differentiable."""
+    o = torch.arange(P, device=sx.device, dtype=sx.dtype) - (P - 1) / 2
+    zero = torch.zeros_like(sx)
+    return _axis(o, zero, sy)[0][:, :, None] * _axis(o, zero, sx)[0][:, None, :]
+
+
+def _scaled_misfit(images, target):
+    # best amplitude per plane in closed form: the fit's photon count absorbs it
+    a = (images * target).sum((-2, -1)) / images.square().sum((-2, -1))
+    return (a[:, None, None] * images - target).square().sum()
+
+
+def fit_gaussians(ref):
+    """Least-squares Gaussian calibrations of the reference PSF on a z grid through ZR (emitter at the ROI centre):
+    the astigmatic model (sx0, sy0, gamma, d, z0) and, at the reference's in-focus plane (highest peak), the 2D
+    model (sx, sy)."""
+    z = torch.linspace(ZR[0], ZR[1], 41, device='cuda')
+    with torch.no_grad():
+        target = ref.render(torch.stack((torch.zeros_like(z), torch.zeros_like(z), z), 1)).double()
+    zf = float(z[target.amax((-2, -1)).argmax()])
+    q = torch.tensor([1.3, 1.3, .1, .3, zf], dtype=torch.float64, device='cuda').log1p().requires_grad_()
+    def astig(v):
+        sx0, sy0, gamma, d, z0 = v.expm1()
+        zz = z.double() - z0
+        return _gauss_images(sx0 * torch.sqrt(1 + ((zz - gamma) / d) ** 2), sy0 * torch.sqrt(1 + ((zz + gamma) / d) ** 2))
+    opt = torch.optim.LBFGS([q], max_iter=500, line_search_fn='strong_wolfe')
+    def closure():
+        opt.zero_grad()
+        loss = _scaled_misfit(astig(q), target)
+        loss.backward()
+        return loss
+    opt.step(closure)
+    sx0, sy0, gamma, d, z0 = [float(x) for x in q.detach().expm1()]
+    if gamma < 0:   # the model is symmetric under gamma -> -gamma with sx0 <-> sy0 swapped; keep gamma >= 0
+        sx0, sy0, gamma = sy0, sx0, -gamma
+    k = int(z.sub(zf).abs().argmin())
+    w = torch.tensor([1.3, 1.3], dtype=torch.float64, device='cuda').log().requires_grad_()
+    opt = torch.optim.LBFGS([w], max_iter=200, line_search_fn='strong_wolfe')
+    def closure2():
+        opt.zero_grad()
+        e = w.exp()
+        loss = _scaled_misfit(_gauss_images(e[:1], e[1:]), target[k:k + 1])
+        loss.backward()
+        return loss
+    opt.step(closure2)
+    sx, sy = [float(x) for x in w.detach().exp()]
+    return dict(astig=dict(sigma_px=[sx0, sy0], gamma_um=gamma, d_um=d, z0_um=z0),
+                gauss2d=dict(sigma_px=[sx, sy], z_um=zf))
+
+
 @torch.no_grad()
 def model(ref, name, s):
+    if name == 'astig':
+        g = GAUSS_PARAMS['astig']
+        return ShiftedAstigmaticGaussianPSF(P, tuple(g['sigma_px']), g['gamma_um'], g['d_um'], g['z0_um'], ZR,
+                                            device='cuda', pixel_um=ref.pixel_um)
+    if name == 'gauss2d':
+        return GaussianPSF(P, tuple(GAUSS_PARAMS['gauss2d']['sigma_px']), device='cuda', pixel_um=ref.pixel_um)
     if name in ('bs_int', 'cr_int'):
         # The five-tap integral at S=1 needs another pixel of lateral padding.
         m = to_spline(ref, ZR, roisize=P, oversample=s, dz_um=DZ, value='density', zpad=6, xy_limit=XL + (s == 1),
@@ -120,30 +190,17 @@ def model(ref, name, s):
         assert m.xmax >= XL
         m.xmax = XL
         return m
-    if name in ('cr_pix', 'box_os2'):
-        src = ref if name == 'cr_pix' else ref.resampled(P, oversample=2, pixel_integration='box')
-        return src.to_spline(P, ZR, oversample=s, dz_um=DZ, zpad=3, xy_limit=XL, chunk=2)
-    if name == 'channels':
-        arms = [ref.resized(P), ref.resized(P)]
-        arms[1].focus_um += .12
-        return ChannelsPSF(arms, channel_offsets=[[0., 0.], [.2, -.1]])
-    if name == 'fourpi':
-        # Symmetric arms of tests/test_fourpi.py::model().
-        m = FourPiPSF(P, NA=1.35, n_imm=1.406, pixel_um=.11, wavelength_um=.67, npupil=32,
-                      oversample=2, phi=(.3, 1.9, 3.4, 5.), tau=(.2, .3, .25, .25), a=.9,
-                      gamma=.8, d_bot=(.3, -.2, .02), blur_px2=.12, zernike_indices=tuple(range(5, 16)),
-                      device='cuda', pixel_integration='spectral')
-        gen = torch.Generator().manual_seed(3)
-        for arm in (m.top, m.bot):
-            arm.zcoef.copy_(.04 * (torch.rand(len(m.zidx), generator=gen) - .5))
-        return m
-    return ref.resampled(P, pixel_integration=name)
+    if name == 'cr_pix':
+        # explicit kernel / value: the plain default of to_spline is the integrated B-spline
+        return ref.to_spline(P, ZR, kernel='catmull', value='pixel', oversample=s, dz_um=DZ, zpad=3, xy_limit=XL,
+                             chunk=2)
+    return ref.resampled(P, oversample=s, pixel_integration=name)
 
 
 def variants(name):
-    if name in OPTICS:
+    if name not in ('cr_int', 'bs_int', 'cr_pix'):
         return [('native', False)]
-    return ([('sep', False)] if name in ('cr_int', 'bs_int', 'cr_pix') else []) + [('conv', False), ('conv', True)]
+    return [('sep', False), ('conv', False), ('conv', True)]
 
 
 def configure(m, backend, tf32, autotune=False):
@@ -167,11 +224,13 @@ def renders(m, p, chunk):
 
 
 @torch.no_grad()
-def precision(m, pos, ref, nm):
+def precision(m, pos, ref, nm, fixed=()):
     # Normalise each emitter and each derivative by its own reference absolute peak.
     v = renders(m, pos, 200)
     out = {}
     for key, a, b in zip(('value', 'dx', 'dy', 'dz'), v, ref):
+        if key == 'dz' and 2 in fixed:
+            continue
         e = (a - b).abs().amax((-2, -1)) / b.abs().amax((-2, -1))
         out[key] = dict(max=float(e.max()), median=float(e.median()))
     diff = (v[0] - ref[0]).double()
@@ -185,9 +244,11 @@ def precision(m, pos, ref, nm):
     for photons in PHOTONS:
         # Keep the Poisson objective in double precision to resolve sub-nm changes in expected images.
         start = theta(p, photons).double()
-        start[:, :3] += start.new_tensor([.03, -.03, .008])
-        fitted, _ = fit.lm_poisson(lambda t: fit.model_and_jacobian(m, t), photons * ref[0].double() + BG, start,
-                                   clamp=lambda t: fit.clamp_theta(t, m, z_limits=ZR), iters=25)
+        start[:, :3] += start.new_tensor([.03, -.03, 0. if 2 in fixed else .008])
+        data = photons * ref[0].double() + BG
+        fitted = torch.cat([fit.lm_poisson(lambda t: fit.model_and_jacobian(m, t), d, t0, fixed=fixed,
+                                           clamp=lambda t: fit.clamp_theta(t, m, z_limits=ZR), iters=25)[0]
+                            for d, t0 in zip(data.split(500), start.split(500))])
         delta = (fitted[:, :3] - p) * nm
         out['bias_nm'][str(photons)] = dict(max=delta.abs().amax(0).tolist(),
                                             rms=delta.square().mean(0).sqrt().tolist())
@@ -203,24 +264,47 @@ def accuracy_run(ref, data, out):
     for photons in PHOTONS:
         sd = torch.cat([fit.crlb(ref, theta(q, photons)) for q in p.split(24)])
         data['crlb_nm'][str(photons)] = (sd[:, :3] * nm).median(0).values.tolist()
+    # the reference (spectral pixel integral) against an independent quadrature without FFTs
+    with torch.no_grad():
+        gl = ref.resampled(P, oversample=6, pixel_integration='gauss_legendre')
+        q = p[:300]
+        a, b = renders(gl, q, 24), renders(ref, q, 24)
+    data['reference_check'] = dict(
+        method='gauss_legendre, 6 nodes / pixel', n=len(q),
+        value_max=float(((a[0] - b[0]).abs().amax((-2, -1)) / b[0].abs().amax((-2, -1))).max()))
+    GAUSS_PARAMS.update(fit_gaussians(ref))
+    data['gaussian_fit'] = dict(GAUSS_PARAMS)
+    zf = GAUSS_PARAMS['gauss2d']['z_um']
+    p2 = p.clone()
+    p2[:, 2] = zf
+    r2 = renders(ref, p2, 24)
+    data['crlb_nm_focus'] = {}
+    for photons in PHOTONS:
+        sd = torch.cat([fit.crlb(ref, theta(q, photons)) for q in p2.split(24)])
+        data['crlb_nm_focus'][str(photons)] = (sd[:, :3] * nm).median(0).values.tolist()
     data['accuracy'] = []
-    for name, s in TABLES:
+    for name, s in OPTICS + GAUSS + TABLES:
         configure(ref, 'native', False)
         m = model(ref, name, s)
         assert p[:, :2].abs().max() < m.xy_limit - .05
         for backend, tf32 in variants(name):
             row = dict(name=name, S=s, backend=backend, tf32=tf32)
             configure(m, backend, tf32)
-            row.update(precision(m, p, r, nm))
+            if name == 'gauss2d':
+                row.update(precision(m, p2, r2, nm, fixed=(2,)), z_um=zf)
+            else:
+                row.update(precision(m, p, r, nm))
             data['accuracy'].append(row)
             save(out, data)
             print('precision', name, s, backend, tf32, row['value'], flush=True)
 
 
 def timing_grid():
-    for name, s in TABLES + [(n, None) for n in OPTICS]:
+    for name, s in TABLES + OPTICS + GAUSS:
+        tunes = (False, True) if name in ('cr_int', 'bs_int', 'cr_pix') else (False,)   # cuDNN: conv splines only
+        ops = OPS if name not in ('astig', 'gauss2d') else OPS[:2]   # the Gaussians have no shape parameters
         for backend, tf32 in variants(name):
-            for tune, n, op in itertools.product((False, True), BATCHES, OPS):
+            for tune, n, op in itertools.product(tunes, BATCHES, ops):
                 yield dict(name=name, S=s, backend=backend, tf32=tf32, cudnn_benchmark=tune, batch=n, op=op)
 
 
@@ -231,8 +315,7 @@ def operation(m, p, op):
         if table:
             params = [m.knots.detach().requires_grad_()]
         else:
-            arms = m.models if isinstance(m, ChannelsPSF) else [m.top, m.bot] if isinstance(m, FourPiPSF) else [m]
-            params = [arm.zcoef.requires_grad_() for arm in arms]
+            params = [m.zcoef.requires_grad_()]
 
     def run():
         if op == 'backward':
@@ -389,6 +472,7 @@ def main():
         if (data['sha256'] != hashlib.sha256(args.model.read_bytes()).hexdigest()
                 or data['gpu'] != torch.cuda.get_device_name() or data['torch'] != str(torch.__version__)):
             raise ValueError('Timing requires the same calibration, device and PyTorch build')
+        GAUSS_PARAMS.update(data.get('gaussian_fit', {}))
         ref = PSF.load(args.model, roisize=P, device='cuda').resampled(P, pixel_integration='spectral')
         if args.timing_worker:
             timing_run(ref, data, args.out, args.timing_worker == 'on', retry=args.phase == 'retry')
@@ -423,7 +507,7 @@ def main():
         if any(prev.get(key) != data[key] for key in ('gpu', 'torch', 'cudnn', 'seed', 'N', 'roisize')):
             raise ValueError('Existing results have different hardware, software or sampling settings')
         data.update({k: prev[k] for k in keep if k in prev})
-    expected = sum(len(variants(name)) for name, s in TABLES)
+    expected = sum(len(variants(name)) for name, s in OPTICS + GAUSS + TABLES)
     if args.phase in ('all', 'precision') or len(data.get('accuracy', [])) != expected:
         accuracy_run(ref, data, args.out)
     if args.phase == 'precision':
