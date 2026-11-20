@@ -20,7 +20,7 @@ import time
 import numpy as np
 import torch
 from torch_psf.fit import localize, at_limit
-from torch_psf.spline import emitter_height_pos_fn
+from torch_psf.composition import ZMode
 from torch_psf.estimation.knots import knot_gradient, _adam, _sync, _result
 
 
@@ -101,7 +101,7 @@ def fit_field_knots(spline, rois, xy, vectorial, field, tile=256.0, extent=None,
     spl, d = spline, rois
     dev = spl.dev
     vec = vectorial
-    pos_fn = emitter_height_pos_fn(vec.focus_um) if pos_fn is None else pos_fn
+    pos_fn = ZMode(vec, 'emitter').coordinates if pos_fn is None else pos_fn
     big = vec.resized(spl.Pl)
     fz = field.copy().to(dev)
     xy = torch.as_tensor(xy, dtype=torch.float32, device=dev).reshape(-1, 2)

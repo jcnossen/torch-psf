@@ -93,7 +93,7 @@ def test_translation_mapping_equals_channel_offsets():
     b = pair().set_mappings([None, ChannelMap.translation([0.6, -0.4], norm=NORM)])
     cor = torch.tensor([[[10.0, 20.0], [10.0, 20.0]]]).expand(3, 2, 2)
     with torch.no_grad():
-        for x, y in zip(a.render(POS, grad=True), b.render(POS, grad=True, corners=cor)):
+        for x, y in zip(a.render(POS, grad=True), b.render_geometry(POS, grad=True, corners=cor)):
             assert torch.allclose(x, y, atol=1e-7)
     with pytest.raises(ValueError, match='corners'):
         b.render(POS)
@@ -148,7 +148,7 @@ def test_channel_rois_and_field_channels():
     fp = FieldPSF(v, f)
     mc = ChannelsPSF([v, fp], mappings=[None, mp])
     with torch.no_grad():
-        out = mc.render(POS[:2], corners=cor)
+        out = mc.render_geometry(POS[:2], corners=cor)
         ref = fp.render(mc.mapped_positions(POS[:2], corners=cor)[0][:, 1], xy=cor[:, 1] + 4)
     assert torch.allclose(out[:, 1], ref, atol=1e-7)
 
@@ -179,7 +179,7 @@ def test_psfzip_round_trip_mapped_field_channels(tmp_path):
     assert back.names == ['a', 'b'] and back.field_dependent == [True, True] and back.models[1].base.focus_um == 0.07
     cor = torch.tensor([[[10.0, 12.0], [13.0, 10.0]], [[40.0, 30.0], [44.0, 27.0]]])
     with torch.no_grad():
-        a, b = mc.render(POS[:2], corners=cor), back.render(POS[:2], corners=cor)
+        a, b = mc.render_geometry(POS[:2], corners=cor), back.render_geometry(POS[:2], corners=cor)
     assert torch.allclose(a, b, atol=1e-6)
     old = pz.multichannel()                                   # default: field-constant models, no mappings
     assert not old.mapped and old.field_dependent == [False, False]

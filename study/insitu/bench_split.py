@@ -58,7 +58,7 @@ def bwd_read():                      # forward + backward of the window read onl
 def bwd_total():
     K = spl.knots.clone().requires_grad_(True)
     for a, b in B:
-        (spl.render(P3[a:b], knots=K) * resid[a:b]).sum().backward()
+        (spl.render_tables(P3[a:b], knots=K) * resid[a:b]).sum().backward()
 
 
 res['fwdbwd_convolution'] = best(bwd_conv)

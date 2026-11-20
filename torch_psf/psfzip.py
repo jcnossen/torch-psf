@@ -470,6 +470,9 @@ class PSFZip:
 # ====================================================================================================== rendering
 def _zip_version(meta):
     """Smallest minor version that can interpret every channel and source block."""
+    if any((_field_tiles(meta.get('provenance'), c) or {}).get('blend') == 'bilinear'
+           for c in range(len(meta['channels']))):
+        return ZIP_VERSION_4
     version = ZIP_VERSION
     blocks = [meta.get('source')] + [b for c in meta['channels'] for b in (c, c.get('source'))]
     for b in blocks:
@@ -516,10 +519,7 @@ def render_zstack(psf, planes=25, sample_px=1.0, chunk=64):
         pos = pos0.to(m.dev)
         parts = []
         for p in pos.split(chunk):
-            if m.type_name in COUPLED:
-                r = m.render(p, phi=torch.zeros(len(p), device=m.dev))
-            else:
-                r = m.render(p)
+            r = m.render(p)
             parts.append((r if r.dim() == 4 else r[:, None]).float().cpu())
         outs.append(torch.cat(parts))
     img = torch.cat(outs, 1)                                       # [Z k k, C, P, P]

@@ -207,9 +207,9 @@ def test_vortex_bead_calibration_finds_the_charge():
 
 
 def test_focus_z_wrapper_matches_defocus():
-    from torch_psf.orientation import FocusZ
+    from torch_psf.composition import ZMode
     v = small_model()
-    w = FocusZ(v, height=0.02, z_range=(-0.4, 0.4))
+    w = ZMode(v, height=0.02, z_range=(-0.4, 0.4))
     pos = torch.tensor([[0.1, -0.2, 0.15]])
     M = dipole_M(from_angles(40.0, 20.0)[None], torch.tensor([0.8]))
     a = w(pos, dipM=M)
@@ -255,7 +255,7 @@ def test_dipole_basis_focus_defaults_to_focus_um_in_channels_psf():
     pos = torch.tensor([[0.17, -0.23, 0.01], [-0.32, 0.24, 0.02]])
     M = dipole_M(from_angles(torch.tensor([30.0, 70.0]), torch.tensor([20.0, 200.0])), torch.tensor([0.9, 0.6]))
     with torch.no_grad():
-        assert torch.equal(arms[0].dipole_basis(pos), arms[0].dipole_basis(pos, arms[0].focus_um))
+        assert torch.equal(arms[0].dipole_basis(pos), arms[0].dipole_basis(pos, focus=arms[0].focus_um))
         B = m.dipole_basis(pos)
         ref = m.render(pos, dipM=M)
     comb = torch.einsum('nk,nckuv->ncuv', M_to_m6(M), B)
@@ -263,7 +263,7 @@ def test_dipole_basis_focus_defaults_to_focus_um_in_channels_psf():
 
 
 def test_composed_vortex_reference():
-    """the composed Vortex PSF (plate + Polychromatic + field Zernikes + FocusZ; study/orientation/composed_reference.py)
+    """the composed Vortex PSF (plate + Polychromatic + field Zernikes + ZMode; study/orientation/composed_reference.py)
     reproduces tests/data/orientation_composed_ref.json: images, dipole bases and orientation fits (the reference for
     the psf-unify refactor; image_hash is informative)"""
     import json

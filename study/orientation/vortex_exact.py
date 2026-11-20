@@ -40,7 +40,8 @@ import vortex_real as VR                                                        
 import vortex_baseline as VB                                                          # noqa: E402
 from torch_psf import VectorialPSF                                                     # noqa: E402
 from torch_psf.zernike import zernike                                                  # noqa: E402
-from torch_psf.orientation import FocusZ, fit_orientation, model_and_jacobian, unit    # noqa: E402
+from torch_psf.composition import ZMode  # noqa: E402
+from torch_psf.orientation import fit_orientation, model_and_jacobian, unit  # noqa: E402
 from vecfit.set_parameters_vortex_lambdaDNA import set_parameters_vortex_lambdaDNA    # noqa: E402
 from vecfit.funfit.get_pupil_matrix import pupil_static                               # noqa: E402
 from vecfit.pipeline import nat_predictions                                           # noqa: E402
@@ -70,7 +71,7 @@ class Exact:
         with torch.no_grad():
             v.pupil_phase.copy_(-torch.as_tensor(W, dtype=torch.float32, device=DEV))
         self.v = v
-        self.psf = FocusZ(v, height=0.0, z_range=(-1.1, 1.1))
+        self.psf = ZMode(v, height=0.0, z_range=(-1.1, 1.1))
         # their Zernike maps (nm per nm of coefficient) -> our Noll coefficients (waves), sign flipped
         Zt = st['allzernikes'] * st['normfac'][None, None]                     # [N, N, 12]
         m = v.mask.bool().cpu().numpy()
@@ -258,7 +259,7 @@ def run_pmma(refmed=1.0, zgrid=False, tag=None):
                 b = r['nll'] < best['nll']
                 best['theta'][b] = r['theta'][b]; best['nll'][b] = r['nll'][b]
         ths.append(best['theta'])
-        crs.append(crlb_orientation(E.psf, best['theta'], zcoef_offset=zo[sl_]))
+        crs.append(crlb_orientation(E.psf.with_field_offset(zo[sl_]), best['theta']))
     th = torch.cat(ths)
     cr = {k: torch.cat([c_[k] for c_ in crs]) for k in ('x', 'y', 'z', 'theta', 'phi', 'g')}
     with torch.no_grad():
@@ -303,7 +304,7 @@ def run_pmma(refmed=1.0, zgrid=False, tag=None):
 
 def run_insitu_dna():
     """our own in-situ calibrated model (vortex_real.py plate2: plate centre, Zernikes, apodization; n_med 1.333 for
-    water, FocusZ at the coverslip) on the same lambda-DNA ROIs as their Octave table, our default starts + z grid;
+    water, ZMode at the coverslip) on the same lambda-DNA ROIs as their Octave table, our default starts + z grid;
     compared per spot with their fits and with our exact-model fits (exact_dna_zgrid.npz)"""
     t0 = time.time()
     import csv
@@ -322,7 +323,7 @@ def run_insitu_dna():
                             zgrid=(-0.6, -0.3, 0.0, 0.3, 0.6))
         ths.append(r['theta']); nll.append(r['nll'])
     th = torch.cat(ths)
-    g2, Nf = VB.to_their_g2(psf.psf, th[:, 5:8], th[:, 8])
+    g2, Nf = VB.to_their_g2(psf.base, th[:, 5:8], th[:, 8])
     mu = unit(th[:, 5:8]).cpu().numpy()
     mu_o = mu[:, [1, 0, 2]]                                  # our (column, row, z) -> their (row, column, z)
     a, p = f('azim_rad'), f('pola_rad')

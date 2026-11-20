@@ -114,7 +114,7 @@ resid = torch.randn(N, C.P, C.P, device=C.DEV)
 def back_conv():
     K = spl.knots.clone().requires_grad_(True)
     for s in range(0, N, NB):
-        (spl.render(P3[s:s + NB], knots=K) * resid[s:s + NB]).sum().backward()
+        (spl.render_tables(P3[s:s + NB], knots=K) * resid[s:s + NB]).sum().backward()
     return K.grad
 
 
@@ -165,7 +165,7 @@ o, rs = P3[:NB], resid[:NB]
 
 
 def g_conv():
-    K = spl.knots.clone().requires_grad_(True); (spl.render(o, knots=K) * rs).sum().backward()
+    K = spl.knots.clone().requires_grad_(True); (spl.render_tables(o, knots=K) * rs).sum().backward()
 
 
 def g_coef():

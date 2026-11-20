@@ -42,11 +42,11 @@ def test_exact_vectorial_agree():
     vec = _vec()
     pos = torch.tensor([[0.1, -0.3, 0.05], [0.45, 0.2, 0.2]])
     with torch.no_grad():
-        a = vec.resized(vec.roisize, oversample=3, pixel_integration='spectral').render(pos)
-        b = vec.resized(vec.roisize, oversample=6, pixel_integration='gauss_legendre').render(pos)
+        a = vec.resampled(vec.roisize, oversample=3, pixel_integration='spectral').render(pos)
+        b = vec.resampled(vec.roisize, oversample=6, pixel_integration='gauss_legendre').render(pos)
         pk = a.max()
         assert float((a - b).abs().max() / pk) < 2e-6
-        e = [float((vec.resized(vec.roisize, oversample=s, pixel_integration='box').render(pos) - a).abs().max() / pk) for s in (2, 4)]
+        e = [float((vec.resampled(vec.roisize, oversample=s, pixel_integration='box').render(pos) - a).abs().max() / pk) for s in (2, 4)]
         assert 3.0 < e[0] / e[1] < 5.0                      # second order
 
 
@@ -54,32 +54,32 @@ def test_exact_vectorial_blur():
     vec = _vec(blur=torch.tensor([0.4, 0.2, -0.2]))
     pos = torch.tensor([[0.1, -0.3, 0.05]])
     with torch.no_grad():
-        a = vec.resized(vec.roisize, oversample=2, pixel_integration='spectral').render(pos)
-        b = vec.resized(vec.roisize, oversample=4, pixel_integration='spectral').render(pos)
-        c = vec.resized(vec.roisize, oversample=8, pixel_integration='box').render(pos)    # midpoint rule, error ~ 1 / 64 of s = 1
+        a = vec.resampled(vec.roisize, oversample=2, pixel_integration='spectral').render(pos)
+        b = vec.resampled(vec.roisize, oversample=4, pixel_integration='spectral').render(pos)
+        c = vec.resampled(vec.roisize, oversample=8, pixel_integration='box').render(pos)    # midpoint rule, error ~ 1 / 64 of s = 1
     assert float((a - b).abs().max() / b.max()) < 2e-5
     assert float((c - b).abs().max() / b.max()) < 2e-3
     with pytest.raises(ValueError):
-        vec.resized(vec.roisize, oversample=3, pixel_integration='gauss_legendre').render(pos)
+        vec.resampled(vec.roisize, oversample=3, pixel_integration='gauss_legendre').render(pos)
 
 
 @torch.no_grad()
 def test_point_density_at_pixel_centres():
     vec = _vec()
     pos = torch.tensor([[.13, -.2, .05], [-.2, .3, .11]])
-    point = vec.resized(9, pixel_integration='point', oversample=4).render(pos)
+    point = vec.resampled(9, pixel_integration='point', oversample=4).render(pos)
     # At oversample 1 the unblurred midpoint rule evaluates the optical field directly at each centre.
-    centres = vec.resized(9, oversample=1).render(pos)
+    centres = vec.resampled(9, oversample=1).render(pos)
     torch.testing.assert_close(point, centres, rtol=0, atol=2e-6 * centres.max().item())
 
 
 @pytest.mark.parametrize('mode', ['box', 'spectral', 'point'])
 def test_per_emitter_blur_of_dipole_basis(mode):
-    vec = _vec().resized(9, pixel_integration=mode)
+    vec = _vec().resampled(9, pixel_integration=mode)
     pos = torch.tensor([[.13, -.2, .05], [-.2, .3, .11]])
     blur = torch.tensor([[.1, .13, -.02], [.21, .08, .03]], requires_grad=True)
-    basis = vec.dipole_basis(pos, blur=blur)
-    separate = torch.cat([vec.dipole_basis(p[None], blur=cov) for p, cov in zip(pos, blur)])
+    basis = vec._basis_image(pos, blur=blur)
+    separate = torch.cat([vec._basis_image(p[None], blur=cov) for p, cov in zip(pos, blur)])
     torch.testing.assert_close(basis, separate, atol=2e-7, rtol=1e-6)
     gradient, = torch.autograd.grad(basis[..., 4, 5].sum(), blur)
     assert torch.isfinite(gradient).all() and (gradient.abs().sum(1) > 0).all()
@@ -87,7 +87,7 @@ def test_per_emitter_blur_of_dipole_basis(mode):
 
 def test_point_batched_blur_round_trip(tmp_path):
     from torch_psf import PSF
-    vec = _vec().resized(9, pixel_integration='point')
+    vec = _vec().resampled(9, pixel_integration='point')
     vec.blur = torch.tensor([[.1, .13, -.02], [.21, .08, .03]])
     vec.dipM = torch.diag_embed(torch.tensor([[.2, .5, .3], [.4, .4, .2]]))
     pos = torch.tensor([[.13, -.2, .05], [-.2, .3, .11]])
@@ -159,7 +159,7 @@ def test_derivatives_and_backends(integrate):
         assert float((x - y).abs().max() / y.abs().max()) < 1e-5
     # linear in the knots: autograd gradient
     K = spl.knots.clone().requires_grad_(True)
-    (spl.render(pos, knots=K) ** 2).sum().backward()
+    (spl.render_tables(pos, knots=K) ** 2).sum().backward()
     assert K.grad is not None and float(K.grad.abs().sum()) > 0
 
 
@@ -169,7 +169,7 @@ def test_vectorial_integrated_spline_accuracy():
     torch.backends.cudnn.allow_tf32 = False
     vec = _vec(DEV, R=11)
     spl = to_spline(vec, (0.0, 0.3), roisize=11, oversample=3, dz_um=0.01, kernel='bspline', value='density')
-    ref = vec.resized(vec.roisize, oversample=3, pixel_integration='spectral')
+    ref = vec.resampled(vec.roisize, oversample=3, pixel_integration='spectral')
     pos = torch.rand(100, 3, device=DEV) * torch.tensor([1.0, 1.0, 0.3], device=DEV) - torch.tensor([0.5, 0.5, 0], device=DEV)
     with torch.no_grad():
         a, b = spl.render(pos), ref.render(pos)
@@ -184,31 +184,31 @@ def test_vectorial_pixel_integration_modes(blur):
     vec = _vec(blur=None if blur is None else torch.tensor(blur))
     pos = torch.tensor([[0.1, -0.3, 0.05], [0.45, 0.2, 0.2]])
     with torch.no_grad():
-        ref = vec.resized(vec.roisize, oversample=4, pixel_integration='spectral').render(pos)
+        ref = vec.resampled(vec.roisize, oversample=4, pixel_integration='spectral').render(pos)
         pk = ref.max()
-        ex = vec.resized(vec.roisize, pixel_integration='spectral')
+        ex = vec.resampled(vec.roisize, pixel_integration='spectral')
         assert ex.pixel_integration == 'spectral' and vec.pixel_integration == 'box'
         a = ex.render(pos)
         assert float((a - ref).abs().max() / pk) < 1e-5
         box = vec.render(pos)
         assert 3e-3 < float((box - ref).abs().max() / pk) < 3e-2         # the midpoint error at oversample 2
         if blur is None:
-            g = vec.resized(vec.roisize, oversample=3, pixel_integration='gauss_legendre').render(pos)
+            g = vec.resampled(vec.roisize, oversample=3, pixel_integration='gauss_legendre').render(pos)
             assert float((g - ref).abs().max() / pk) < 1e-5
         else:
             with pytest.raises(ValueError):
-                vec.resized(vec.roisize, oversample=3, pixel_integration='gauss_legendre').render(pos)
+                vec.resampled(vec.roisize, oversample=3, pixel_integration='gauss_legendre').render(pos)
     with pytest.raises(ValueError):
-        vec.resized(vec.roisize, pixel_integration='trapezoid')
+        vec.resampled(vec.roisize, pixel_integration='trapezoid')
     with pytest.raises(ValueError):
-        vec.resized(vec.roisize, oversample=1, pixel_integration='spectral')
+        vec.resampled(vec.roisize, oversample=1, pixel_integration='spectral')
 
 
 def test_vectorial_pixel_integration_grad_and_file(tmp_path):
     """the exact mode is differentiable (Zernike autograd, position jvp vs finite differences) and survives
     resized / save / PSF.load / to_spline"""
     from torch_psf import PSF
-    vec = _vec().resized(9, pixel_integration='spectral')
+    vec = _vec().resampled(9, pixel_integration='spectral')
     pos = torch.tensor([[0.1, -0.3, 0.05], [0.45, 0.2, 0.2]])
     val, dx, dy, dz = vec.render(pos, grad=True)
     e = 1e-3
@@ -237,7 +237,7 @@ def test_vectorial_pixel_integration_grad_and_file(tmp_path):
 def _exact_tracks(R=11, B=80, T=6, photons=4000.0, seed=4):
     from torch_psf.spots import Tracks
     vec = VectorialPSF(R, npupil=32, oversample=2, device=DEV, wavelength_um=0.7).set_zernike({6: 0.04, 11: 0.02})
-    ex = vec.resized(R, pixel_integration='spectral')
+    ex = vec.resampled(R, pixel_integration='spectral')
     g = torch.Generator(device=DEV).manual_seed(seed)
     xy = torch.rand(B, 2, generator=g, device=DEV) - 0.5
     z = 0.02 + 0.12 * torch.rand(B, generator=g, device=DEV)
@@ -307,7 +307,7 @@ def test_pixel_integration_refuses_unknown(tmp_path):
         v.pixel_integration = 'simpson'
     assert v.pixel_integration == 'box'
     with pytest.raises(ValueError, match='pixel_integration'):
-        v.resized(9, pixel_integration='simpson')
+        v.resampled(9, pixel_integration='simpson')
     # files: absent = 'box', a known value is read, an unknown one is refused
     d = v.save(tmp_path / 'v.json')
     assert 'pixel_integration' not in d and PSF.load(tmp_path / 'v.json', device='cpu').pixel_integration == 'box'
@@ -344,7 +344,7 @@ def test_spectral_refuses_aliasing_oversample():
     with pytest.raises(ValueError, match='alias'):
         VectorialPSF(9, oversample=2, pixel_integration='spectral', **kw)
     with pytest.raises(ValueError, match='alias'):
-        VectorialPSF(9, oversample=4, **kw).resized(9, pixel_integration='spectral')
+        VectorialPSF(9, oversample=4, **kw).resampled(9, pixel_integration='spectral')
     v = VectorialPSF(9, oversample=4, **kw)
     with pytest.raises(ValueError, match='alias'):
         v.pixel_integration = 'spectral'

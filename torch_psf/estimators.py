@@ -21,7 +21,8 @@ from torch_psf.camera import Camera
 from torch_psf.fit import poisson_nll
 from torch_psf.psf import PSF
 from torch_psf.vectorial import VectorialPSF
-from torch_psf.spline import SplinePSF, stage_scan_pos_fn
+from torch_psf.spline import SplinePSF
+from torch_psf.composition import ZMode
 from torch_psf.gaussian import AstigmaticGaussianPSF
 from torch_psf.movie import open_movie
 from torch_psf.spots import extract_spots
@@ -211,8 +212,8 @@ class ZStackEstimator(Estimator):
         """knots fitted to the bead stacks (z = -focus), starting from and regularised towards the vectorial fit"""
         zlo, zhi = float(-focus.max()), float(-focus.min())
         dz = self.spline_dz_um or max(abs(float(focus[1] - focus[0])), 0.02)
-        spl = vec.to_spline(self.roisize, (zlo + dz, zhi - dz), oversample=self.oversample, dz_um=dz, zpad=2,
-                            xy_limit=self.xy_limit, pos_fn=stage_scan_pos_fn(0.0, 1.0))
+        spl = ZMode(vec, focus=0.).to_spline(self.roisize, (zlo + dz, zhi - dz), oversample=self.oversample, dz_um=dz, zpad=2,
+                            xy_limit=self.xy_limit)
         K0 = spl.knots[0].clone()
         keep = sid != self.holdout if self.holdout is not None else torch.ones_like(sid, dtype=torch.bool)
         z_nom = -focus
@@ -411,7 +412,7 @@ class DenseBeadEstimator(Estimator):
             fz, fkw = field_from_spec(self.field, psf.zidx, fxy[btr])
             it_f = int(self.field.get('iters', self.iters)) if isinstance(self.field, dict) else self.iters
             rf = fit_dense_beads(data, focus, r['psf'], iters=it_f, fit=fit + ('field',), train=r['train'],
-                                 warmup=self.warmup, reject=None, field=fz, field_xy=fxy,
+                                 warmup=self.warmup, reject=None, field=fz, xy=fxy,
                                  exclude=r['report'].get('rejected_clusters') or None,
                                  log=self._log('dense_beads field'), stop=self.stop, **self.fit_kw)
             fpsf = FieldPSF(rf['psf'].resized(P), rf['field'])
@@ -804,7 +805,7 @@ class PhaseDiversityEstimator(Estimator):
             it_f = int(self.field.get('iters', self.iters)) if isinstance(self.field, dict) else self.iters
             fk = dict(self.fit_kw)
             rf = fit_phase_diversity(pt.subset(itr), focus, psf, fit=self.fit + ('field',), method='poisson',
-                                     ls_iters=0, iters=it_f, warmup=self.field_warmup, field=fz, field_xy=cen[itr],
+                                     ls_iters=0, iters=it_f, warmup=self.field_warmup, field=fz, xy=cen[itr],
                                      log=self._log('phase_diversity field'), stop=self.stop, **fk)
             fpsf = FieldPSF(rf['psf'], rf['field'])
             fpsf.base.focus_um = 0.0
@@ -815,7 +816,7 @@ class PhaseDiversityEstimator(Estimator):
             better = True
             if len(iho):
                 rhf = fit_phase_diversity(pt.subset(iho), focus, fpsf, fit=(), method='poisson', ls_iters=0,
-                                          iters=max(self.iters // 2, 1), field_xy=cen[iho], **fk)
+                                          iters=max(self.iters // 2, 1), xy=cen[iho], **fk)
                 self.report['field'].update(heldout_deviance_per_px=rhf['report']['deviance_per_px'],
                                             heldout_nll_per_px=rhf['report']['nll_per_px'])
                 better = rhf['report']['nll_per_px'] < self.report['heldout_nll_per_px']

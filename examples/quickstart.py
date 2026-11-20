@@ -62,7 +62,7 @@ t = time.time()
 K = spl.knots.clone().requires_grad_(True)
 for s in range(0, N, 4000):
     sl = slice(s, s + 4000)
-    m = th[sl, 3, None, None] * spl.render(th[sl, :3], knots=K) + th[sl, 4, None, None]
+    m = th[sl, 3, None, None] * spl.render_tables(th[sl, :3], knots=K) + th[sl, 4, None, None]
     poisson_nll(patches[sl], m).sum().backward()
 g_knots = spl.vjp_vectorial(vec, pos_fn, K.grad)['zcoef']
 if dev == 'cuda':
@@ -75,7 +75,7 @@ small = VectorialPSF(spl.roisize, pixel_um=0.108, NA=1.49, n_imm=1.518, n_med=1.
 with torch.no_grad():
     small.zcoef.copy_(vec.zcoef)
 K2 = spl.knots.clone().requires_grad_(True)
-m = th[:n, 3, None, None] * spl.render(th[:n, :3], knots=K2) + th[:n, 4, None, None]
+m = th[:n, 3, None, None] * spl.render_tables(th[:n, :3], knots=K2) + th[:n, 4, None, None]
 poisson_nll(patches[:n], m).sum().backward()
 g_spline = spl.vjp_vectorial(vec, pos_fn, K2.grad)['zcoef']
 m = small(th[:n, :3], torch.full((n,), focus, device=dev), intensity=th[:n, 3], bg=th[:n, 4])

@@ -36,12 +36,13 @@ them).
 The tiled spline form (TiledSplinePSF): the field box split into tiles of `tile` px; per tile a SplinePSF built
 from the Zernikes at the tile centre (lazily, on first use); a spot uses the tile that holds its field position.
 """
+import copy
 import math
 import numpy as np
 import torch
 from torch_psf.psf import PSF, render_with_grad
 from torch_psf.dataset import Dataset
-from torch_psf.spline import spline_kind
+from torch_psf.spline import IndexedSplines, spline_kind
 
 
 def feature_powers(order):
@@ -127,7 +128,7 @@ class FieldZernikes(torch.nn.Module):
     # ------------------------------------------------------------------ evaluation
     def uv(self, xy):
         """normalised (clipped) coordinates [N, 2] of positions xy [N, 2] px"""
-        xy = torch.as_tensor(xy, dtype=torch.float32, device=self.device).reshape(-1, 2)
+        xy = torch.as_tensor(xy, dtype=self.coef.dtype, device=self.device).reshape(-1, 2)
         cx, cy, sx, sy = self.norm
         uv = torch.stack([(xy[:, 0] - cx) / sx, (xy[:, 1] - cy) / sy], 1)
         return uv.clamp(-1.0, 1.0) if self.clamp else uv
@@ -215,9 +216,11 @@ class FieldZernikes(torch.nn.Module):
 
 
 # ====================================================================================================== models
-class _Bound(PSF):
+class Bound(PSF):
     """A field-dependent model with fixed per-emitter field positions xy [N, 2]: render(pos [N, 3]) of exactly
     those N emitters (used by FieldPSF.fit / TiledSplinePSF; localize must not split the batch)."""
+
+    dtype = property(lambda self: self.parent.dtype)
 
     def __init__(self, parent, xy):
         self.parent, self.xy = parent, xy
@@ -235,10 +238,22 @@ class _Bound(PSF):
     def xy_limit(self):
         return self.parent.xy_limit
 
-    def render(self, pos, grad=False):
+    def _render(self, pos, grad=False, **options):
         if len(pos) != len(self.xy):
             raise ValueError(f'bound field model: {len(pos)} emitters for {len(self.xy)} field positions')
-        return self.parent.render(pos, grad=grad, xy=self.xy)
+        return self.parent.render(pos, grad=grad, xy=self.xy, **options)
+
+    def _dipole_basis(self, pos, grad=False, **options):
+        return self.parent.dipole_basis(pos, grad, xy=self.xy, **options)
+
+    def resized(self, roisize):
+        return Bound(self.parent.resized(roisize), self.xy)
+
+    def to(self, device=None, dtype=None):
+        self.parent.to(device=device, dtype=dtype)
+        self.dev = self.parent.dev
+        self.xy = self.xy.to(device=self.dev, dtype=dtype)
+        return self
 
 
 def _field_positions(rois, corners, xy, dev):
@@ -294,10 +309,37 @@ class FieldPSF(PSF):
     its centre (corners + (P - 1) / 2) or at xy; to_tiled(tile, ...): the tiled spline form; field_block(): the
     psf.zip field block (io.save_zip writes it; PSF.load returns a FieldPSF for a vectorial channel with it)."""
 
+    uses_field_xy = True
+    dtype = property(lambda self: self.base.dtype)
+
+    def bind(self, xy):
+        """a PSF that renders exactly len(xy) emitters at the field positions xy [N, 2]"""
+        return Bound(self, torch.as_tensor(xy, dtype=self.dtype, device=self.dev).reshape(-1, 2))
+
+    def fit(self, rois, camera=None, theta0=None, corners=None, frames=None, var=None, iters=30, zstarts=5,
+            batch=1500, pixel_um=None, xy=None):
+        """PSF.fit with each ROI at its own field position (xy [N, 2], default the ROI centres corners + (P - 1) / 2;
+        corners also come with Spots). Returns a Dataset in the input order."""
+        from torch_psf.spots import Spots
+        if not isinstance(rois, Spots):
+            rois = torch.as_tensor(rois, dtype=torch.float32, device=self.dev)
+        r = rois.rois if isinstance(rois, Spots) else rois
+        cor = rois.corner if (isinstance(rois, Spots) and corners is None) else corners
+        fxy = _field_positions(r, cor, xy, self.dev)
+        N = len(r)
+        groups = [(s, np.arange(s, min(s + batch, N))) for s in range(0, N, batch)]
+        kw = dict(camera=camera, iters=iters, zstarts=zstarts, batch=batch, pixel_um=pixel_um or self.pixel_um)
+        ds = _fit_groups(lambda g, idx: self.bind(fxy[torch.as_tensor(idx, device=fxy.device)]), groups, rois, corners,
+                         frames, var, theta0, kw)
+        if ds is None:
+            return PSF.fit(self, torch.zeros(0, self.roisize, self.roisize, device=self.dev), pixel_um=pixel_um)
+        ds.meta['method'] = f'torch_psf {type(self).__name__}.fit'
+        return ds
+
     def __init__(self, base, field):
-        if not hasattr(base, 'zidx'):
+        if not hasattr(base, 'with_field_offset') or not hasattr(base, 'zcoef'):
             raise TypeError(f'FieldPSF needs a VectorialPSF, not {type(base).__name__}')
-        self.base, self.field = base, field.to(base.dev)
+        self.base, self.field = base, field.to(device=base.dev, dtype=base.zcoef.dtype)
         self.field.offsets(torch.zeros(1, 2), base.zidx)          # checks that the modes are in the model
         self.roisize, self.pixel_um = base.roisize, base.pixel_um
         self.provenance = getattr(base, 'provenance', None)
@@ -323,6 +365,15 @@ class FieldPSF(PSF):
         return f'FieldPSF({self.base!r}, {self.field!r})'
 
     # ------------------------------------------------------------------ evaluation
+    zidx = property(lambda self: self.base.zidx)
+    zcoef = property(lambda self: self.base.zcoef)
+    dipM = property(lambda self: self.base.dipM)
+    dipw = property(lambda self: self.base.dipw)
+    pixel_integration = property(lambda self: self.base.pixel_integration)
+
+    def _grid_sampler(self, grid, pos_fn, params, focus, blur, dipM):
+        return grid._sampler(self.base, pos_fn, params, focus, blur, dipM)
+
     def offsets(self, xy):
         return self.field.offsets(xy, self.base.zidx)
 
@@ -339,37 +390,26 @@ class FieldPSF(PSF):
         m.provenance = self.provenance
         return m
 
-    def render(self, pos, grad=False, xy=None, focus=None, dipM=None):
-        """pos [N, 3] (x, y px from the ROI centre, z um) -> [N, P, P] at the base focus (or `focus`); xy [N, 2]:
-        field positions (None = the reference point). grad: also d/dx, d/dy, d/dz (forward-mode AD)."""
-        f = self.base.focus_um if focus is None else focus
-        off = None if xy is None else self.offsets(xy)
-        fn = lambda p: self.base(p, f, zcoef_offset=off, dipM=dipM)
-        return render_with_grad(fn, pos, grad)
+    def _at_positions(self, xy):
+        return self.base if xy is None else self.base.with_field_offset(self.offsets(xy))
 
-    def bind(self, xy):
-        """a PSF that renders exactly len(xy) emitters at the field positions xy [N, 2]"""
-        return _Bound(self, torch.as_tensor(xy, dtype=torch.float32, device=self.dev).reshape(-1, 2))
+    def _render(self, pos, grad=False, xy=None, **options):
+        return self._at_positions(xy).render(pos, grad, **options)
 
-    def fit(self, rois, camera=None, theta0=None, corners=None, frames=None, var=None, iters=30, zstarts=5,
-            batch=1500, pixel_um=None, xy=None):
-        """PSF.fit with each ROI at its own field position (xy [N, 2], default the ROI centres corners + (P - 1) / 2;
-        corners also come with Spots). Returns a Dataset in the input order."""
-        from torch_psf.spots import Spots
-        if not isinstance(rois, Spots):
-            rois = torch.as_tensor(rois, dtype=torch.float32, device=self.dev)
-        r = rois.rois if isinstance(rois, Spots) else rois
-        cor = rois.corner if (isinstance(rois, Spots) and corners is None) else corners
-        fxy = _field_positions(r, cor, xy, self.dev)
-        N = len(r)
-        groups = [(s, np.arange(s, min(s + batch, N))) for s in range(0, N, batch)]
-        kw = dict(camera=camera, iters=iters, zstarts=zstarts, batch=batch, pixel_um=pixel_um or self.pixel_um)
-        ds = _fit_groups(lambda g, idx: self.bind(fxy[torch.as_tensor(idx, device=fxy.device)]), groups, rois, corners,
-                         frames, var, theta0, kw)
-        if ds is None:
-            return PSF.fit(self.base, torch.zeros(0, self.roisize, self.roisize, device=self.dev), pixel_um=pixel_um)
-        ds.meta['method'] = 'torch_psf FieldPSF.fit'
-        return ds
+    def _dipole_basis(self, pos, grad=False, xy=None, **options):
+        return self._at_positions(xy).dipole_basis(pos, grad, **options)
+
+    def basis(self, pos, grad=False, *, xy=None, **options):
+        return self._at_positions(xy).basis(pos, grad, **options)
+
+    def weights(self, pos, *, xy=None, **options):
+        return self._at_positions(xy).weights(pos, **options)
+
+    def at_wavelength(self, wavelength):
+        # Per-wavelength evaluation shares the field polynomial, including its gradient.
+        view = copy.copy(self)
+        view.base = self.base.at_wavelength(wavelength)
+        return view
 
     # ------------------------------------------------------------------ copies, conversion
     def resized(self, roisize):
@@ -377,15 +417,15 @@ class FieldPSF(PSF):
         p.spline_grid, p.provenance = self.spline_grid, self.provenance
         return p
 
-    def to(self, device):
-        self.base.to(device)
-        self.field.to(device)
+    def to(self, device=None, dtype=None):
+        self.base.to(device=device, dtype=dtype)
+        self.field.to(device=device, dtype=dtype)
         return self
 
-    def to_spline(self, *a, **kw):
+    def to_spline(self, roisize=None, z_range=None, **grid):
         """the SplinePSF of the model at the reference point (VectorialPSF.to_spline); to_tiled for the field
         dependence"""
-        return self.base.to_spline(*a, **kw)
+        return self.base.to_spline(roisize, z_range, **grid)
 
     def to_tiled(self, tile=128, extent=None, roisize=None, z_range=None, lazy=True, **grid):
         """TiledSplinePSF: tiles of `tile` px over extent (x0, y0, x1, y1) px (default the field box
@@ -405,17 +445,24 @@ class FieldPSF(PSF):
         return self.base, None
 
 
-class TiledSplinePSF(PSF):
+class TiledSplinePSF(FieldPSF):
     """The tiled spline form of a FieldPSF: the extent (x0, y0, x1, y1) px split into tiles of `tile` px, per tile a
     SplinePSF (roisize, z_range, grid: oversample, dz_um, zpad, xy_limit) of the vectorial model at the tile
-    centre, built on first use (lazy) or at once. A spot uses the tile that holds its field position (positions
-    outside the extent use the nearest tile).
+    centre, built on first use (lazy) or at once. The default is nearest. Bilinear interpolation uses
+    the four surrounding tile centres and clamps outside their range.
 
     render(pos, grad=False, xy=None) (xy None: the reference-point spline), tile_index(xy), spline(t), fit(rois,
-    corners=..., xy=None): every ROI fitted with its tile's spline (input order kept)."""
+    corners=..., xy=None): the field coordinates stay fixed as the fitter varies the emitter position."""
 
-    def __init__(self, field_psf, tile=128, extent=None, roisize=None, z_range=None, lazy=True, kind=None, **grid):
+    def __init__(self, field_psf, tile=128, extent=None, roisize=None, z_range=None, lazy=True, kind=None,
+                 blend='nearest', **grid):
+        if blend not in ('nearest', 'bilinear'):
+            raise ValueError("blend must be 'nearest' or 'bilinear'")
+        self.blend = blend
+        self.indexed = None
         self.source = field_psf
+        self.base, self.field = field_psf.base, field_psf.field
+        self.spline_grid = field_psf.spline_grid
         self.kind = spline_kind(kind, field_psf.base.pixel_integration)
         f = field_psf.field
         if extent is None:
@@ -424,6 +471,8 @@ class TiledSplinePSF(PSF):
         self.extent = tuple(float(v) for v in extent)
         self.tile = float(tile)
         x0, y0, x1, y1 = self.extent
+        if not self.tile > 0 or not (x0 < x1 and y0 < y1):
+            raise ValueError('expected positive tile size and an increasing field extent')
         self.nx = max(1, int(math.ceil((x1 - x0) / self.tile - 1e-9)))
         self.ny = max(1, int(math.ceil((y1 - y0) / self.tile - 1e-9)))
         self.roisize = int(roisize or field_psf.roisize)
@@ -440,6 +489,8 @@ class TiledSplinePSF(PSF):
     @property
     def dev(self):
         return self.source.dev
+
+    dtype = property(lambda self: self.reference_spline().dtype)
 
     @property
     def n_tiles(self):
@@ -470,6 +521,16 @@ class TiledSplinePSF(PSF):
             self._splines[t] = self._build(self.source.at(c[0], c[1]))
         return self._splines[t]
 
+    def at(self, x, y):
+        """A spline on the same grid for one fixed camera position."""
+        ids, w = self.tile_weights([[x, y]])
+        models = [self.spline(t) for t in ids[0].tolist()]
+        if len(models) == 1:
+            return models[0]
+        table = copy.copy(models[0])
+        table.knots = sum(weight * model.knots for weight, model in zip(w[0], models))
+        return table
+
     def reference_spline(self):
         """the spline of the model at the reference point (the channel model written to psf.zip)"""
         if self._ref is None:
@@ -492,63 +553,79 @@ class TiledSplinePSF(PSF):
         return (f'TiledSplinePSF({self.nx} x {self.ny} tiles of {self.tile:g} px over {self.extent}, roisize '
                 f'{self.roisize}, {len(self._splines)} built)')
 
-    def render(self, pos, grad=False, xy=None, dipM=None):
-        if xy is None:
-            return self.reference_spline().render(pos, grad, dipM=dipM)
-        ti = self.tile_index(xy).to(pos.device)
-        if dipM is not None:
-            dipM = torch.as_tensor(dipM, device=pos.device)
-        res = None
-        for t in torch.unique(ti).tolist():
-            m = ti == t
-            tensor = dipM[m] if dipM is not None and dipM.ndim == 3 else dipM
-            r = self.spline(t).render(pos[m], grad, dipM=tensor)
-            r = r if grad else (r,)
-            if res is None:
-                res = [torch.zeros((len(pos),) + v.shape[1:], device=v.device, dtype=v.dtype) for v in r]
-            for a, v in zip(res, r):
-                a[m] = v
-        if res is None:
-            return self.reference_spline().render(pos, grad, dipM=dipM)
-        return tuple(res) if grad else res[0]
+    def tile_weights(self, xy):
+        """Tile indices and weights [N,1 or 4]. Field coordinates stay fixed during fitting."""
+        xy = torch.as_tensor(xy, device=self.dev).reshape(-1, 2)
+        if not xy.is_floating_point():
+            xy = xy.float()
+        if self.blend == 'nearest':
+            ids = self.tile_index(xy)[:, None]
+            return ids, torch.ones_like(ids, dtype=torch.float32)
+        x, y = ((xy - xy.new_tensor(self.extent[:2])) / self.tile - .5).unbind(1)
+        x, y = x.clamp(0, self.nx - 1), y.clamp(0, self.ny - 1)
+        i, j = x.floor().long(), y.floor().long()
+        u, v = x - i, y - j
+        ii, jj = (i + 1).clamp_max(self.nx - 1), (j + 1).clamp_max(self.ny - 1)
+        ids = torch.stack((j*self.nx+i, j*self.nx+ii, jj*self.nx+i, jj*self.nx+ii), 1)
+        weights = torch.stack(((1-u)*(1-v), u*(1-v), (1-u)*v, u*v), 1)
+        return ids, weights
 
-    def bind(self, xy):
-        return _Bound(self, torch.as_tensor(xy, dtype=torch.float32, device=self.dev).reshape(-1, 2))
+    def _tiles(self, pos, grad, xy, dipM=None, angle=None, basis=False, separate=False):
+        if xy is None or not len(pos):
+            m = self.reference_spline()
+            return (m.dipole_basis(pos, grad, angle=angle) if basis else
+                    m.render(pos, grad, dipM=dipM, angle=angle))
+        ids, weights = self.tile_weights(xy)
+        if len(ids) != len(pos):
+            raise ValueError('expected one field position per emitter')
+        for t in ids.unique().tolist():
+            self.spline(t)
+        if self.indexed is None or len(self._splines) != len(self.indexed.members):
+            self.indexed = IndexedSplines(list(self._splines.values()), 'tile')
+            self._splines = dict(zip(self._splines, self.indexed.members))
+            self._tile_rows = ids.new_full((self.n_tiles,), -1)
+            self._tile_rows[list(self._splines)] = torch.arange(len(self._splines), device=self.dev)
+        images = self.indexed.evaluate(pos[:, None], self._tile_rows[ids], grad, dipM=dipM, angle=angle, basis=basis)
+        def blend(v):
+            if separate:
+                return v[:, None]
+            if weights.shape[1] == 1:
+                return v[:, 0]
+            return (v * weights.to(v).reshape(*weights.shape, *([1] * (v.ndim-2)))).sum(1)
+        return tuple(blend(v) for v in images) if grad else blend(images)
 
-    def fit(self, rois, camera=None, theta0=None, corners=None, frames=None, var=None, iters=30, zstarts=5,
-            batch=4000, pixel_um=None, xy=None):
-        """PSF.fit of every ROI with the spline of its tile (field position xy, default the ROI centre
-        corners + (P - 1) / 2). Returns a Dataset in the input order."""
-        from torch_psf.spots import Spots
-        if not isinstance(rois, Spots):
-            rois = torch.as_tensor(rois, dtype=torch.float32, device=self.dev)
-        r = rois.rois if isinstance(rois, Spots) else rois
-        cor = rois.corner if (isinstance(rois, Spots) and corners is None) else corners
-        ti = self.tile_index(_field_positions(r, cor, xy, self.dev)).cpu().numpy()
-        groups = [(int(t), np.flatnonzero(ti == t)) for t in np.unique(ti)]
-        kw = dict(camera=camera, iters=iters, zstarts=zstarts, batch=batch, pixel_um=pixel_um or self.pixel_um)
-        ds = _fit_groups(lambda g, idx: self.spline(g), groups, rois, corners, frames, var, theta0, kw)
-        if ds is None:
-            return PSF.fit(self.reference_spline(), torch.zeros(0, self.roisize, self.roisize, device=self.dev),
-                           pixel_um=pixel_um or self.pixel_um)
-        ds.meta['method'] = 'torch_psf TiledSplinePSF.fit'
-        return ds
+    def basis(self, pos, grad=False, *, xy=None, dipM=None, angle=None):
+        if xy is None or not len(pos):
+            return self.reference_spline().basis(pos, grad, dipM=dipM, angle=angle)
+        return self._tiles(pos, grad, xy, dipM, angle, separate=True)
+
+    def weights(self, pos, *, xy=None, dipM=None, angle=None):
+        if xy is None or not len(pos):
+            return self.reference_spline().weights(pos, dipM=dipM)
+        return self.tile_weights(xy)[1][:, None]
+
+    def _render(self, pos, grad=False, *, xy=None, dipM=None, angle=None):
+        return self._tiles(pos, grad, xy, dipM, angle)
+
+    def _dipole_basis(self, pos, grad=False, *, xy=None, angle=None):
+        return self._tiles(pos, grad, xy, angle=angle, basis=True)
 
     def resized(self, roisize):
-        t = TiledSplinePSF(self.source, self.tile, self.extent, roisize, self._zr, True, kind=self.kind, **self.grid)
+        t = TiledSplinePSF(self.source, self.tile, self.extent, roisize, self._zr, True, kind=self.kind, blend=self.blend, **self.grid)
         t._splines = {k: s.resized(roisize) for k, s in self._splines.items()}
         return t
 
-    def to(self, device):
-        self.source.to(device)
+    def to(self, device=None, dtype=None):
+        self.indexed = None
+        self.source.to(device=device, dtype=dtype)
         for s in self._splines.values():
-            s.to(device)
+            s.to(device=device, dtype=dtype)
         if self._ref is not None:
-            self._ref.to(device)
+            self._ref.to(device=device, dtype=dtype)
         return self
 
-    def to_spline(self, roisize=None, z_range=None, **kw):
-        return self.reference_spline().to_spline(roisize, z_range, **kw)
+    def to_spline(self, roisize=None, z_range=None, **grid):
+        return self.reference_spline().to_spline(roisize, z_range, **grid)
 
     def field_block(self):
         return self.source.field_block()
@@ -556,8 +633,18 @@ class TiledSplinePSF(PSF):
     def file_model(self):
         return self.reference_spline(), self.source.base
 
+    def to_tiled(self, tile=128, extent=None, roisize=None, z_range=None, lazy=True, **grid):
+        return self.source.to_tiled(tile, extent, roisize, z_range, lazy, **grid)
+
+    def at_wavelength(self, wavelength):
+        return self.source.at_wavelength(wavelength).to_tiled(
+            self.tile, self.extent, self.roisize, self.z_range, kind=self.kind, blend=self.blend, **self.grid)
+
     def tiles_info(self):
-        return dict(tile_px=self.tile, extent=list(self.extent), roisize=self.roisize)
+        info = dict(tile_px=self.tile, extent=list(self.extent), roisize=self.roisize)
+        if self.blend != 'nearest':
+            info['blend'] = self.blend
+        return info
 
 
 FIELD_SPEC = dict(modes=None, order=1, prior_sd=0.05, margin=0.0, tile=256.0, score_tile=None, iters=60, lr=2e-3,
@@ -609,7 +696,7 @@ def field_psf_from_file(model, source, block, arrays=None, crop=None, tiles=None
         fp.spline_grid['backend'] = g['backend']
     if g.get('dipole_components'):
         fp.spline_grid['dipole_components'] = True
-    tp = fp.to_tiled(tile=t.get('tile_px', 128), extent=t.get('extent'))
+    tp = fp.to_tiled(tile=t.get('tile_px', 128), extent=t.get('extent'), blend=t.get('blend', 'nearest'))
     tp._ref = model
     return tp
 

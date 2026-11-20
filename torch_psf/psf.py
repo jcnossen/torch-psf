@@ -50,6 +50,10 @@ def render_with_grad(fn, pos, grad=False, **extra):
     return (value, *derivatives)
 
 
+def render_options(dipM, phi, xy, focus, angle):
+    return {k: v for k, v in dict(dipM=dipM, phi=phi, xy=xy, focus=focus, angle=angle).items() if v is not None}
+
+
 class PSF:
     """Abstract PSF model. Subclasses set self.roisize (odd, px), self.z_range ((lo, hi) um, or None for 2D),
     self.dev (torch.device) and implement render(pos, grad=False); they may override xy_limit, z_limits, resized and
@@ -69,7 +73,37 @@ class PSF:
             PSF._registry[name] = cls
 
     # ------------------------------------------------------------------ the model
-    def render(self, pos, grad=False):
+    def render(self, pos, grad=False, *, dipM=None, phi=None, xy=None, focus=None, angle=None):
+        """Normalized images and optional position derivatives. xy is fixed during a fit."""
+        return self._render(pos, grad, **render_options(dipM, phi, xy, focus, angle))
+
+    def dipole_basis(self, pos, grad=False, *, dipM=None, phi=None, xy=None, focus=None, angle=None):
+        """Six response images in xx, yy, zz, xy, xz, yz order."""
+        return self._dipole_basis(pos, grad, **render_options(dipM, phi, xy, focus, angle))
+
+    def _dipole_basis(self, pos, grad):
+        raise ValueError(f'{type(self).__name__} has no dipole response')
+
+    def basis(self, pos, grad=False, **options):
+        """Linear response images [N,C,K,P,P]."""
+        if options.pop('dipM', None) is not None:
+            images = self.dipole_basis(pos, grad, **options)
+            def channel(v):
+                return v[:, None] if v.ndim == 4 else v
+            return tuple(channel(v) for v in images) if grad else channel(images)
+        images = self.render(pos, grad, **options)
+        def axes(v):
+            return v[:, None, None] if v.ndim == 3 else v[:, :, None]
+        return tuple(axes(v) for v in images) if grad else axes(images)
+
+    def weights(self, pos, *, dipM=None, **options):
+        channels = getattr(self, 'n_channels', 1)
+        if dipM is not None:
+            from torch_psf._dipole import M_to_m6
+            return M_to_m6(torch.as_tensor(dipM).to(pos)).reshape(-1, 1, 6).expand(len(pos), channels, 6)
+        return pos.new_ones(len(pos), channels, 1)
+
+    def _render(self, pos, grad=False):
         """pos [N, 3] = (x px, y px, z um) relative to the ROI centre -> normalized PSF [N, P, P] (sums to ~1 over the
         image plane for an in-focus emitter); grad=True: (psf, d/dx per px, d/dy per px, d/dz per um)."""
         raise NotImplementedError
@@ -93,9 +127,13 @@ class PSF:
     def device(self):
         return self.dev
 
-    def to(self, device):
+    def to(self, device=None, dtype=None):
         """Move the model to another device in place and return self (torch.nn.Module semantics; a copy of another
         ROI size is resized())."""
+        if isinstance(self, torch.nn.Module):
+            if dtype is None:
+                return torch.nn.Module.to(self, device)
+            return torch.nn.Module.to(self, device, dtype)
         raise NotImplementedError
 
     def resized(self, roisize):

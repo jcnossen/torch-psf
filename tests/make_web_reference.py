@@ -253,14 +253,15 @@ def make_sim(name):
 
 # ---------------------------------------------------------------- spline knots
 def make_knots():
-    from torch_psf.spline import SplinePSF, emitter_height_pos_fn
+    from torch_psf.spline import SplinePSF
+    from torch_psf.composition import ZMode
     o = dict(roisize=13, pixel_um=0.1, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68, npupil=64, oversample=3)
     zc = np.array([ASTIG_Z.get(j, 0.0) for j in ZIDX], np.float32)
     sp = SplinePSF(o['roisize'], (0.0, 0.4), oversample=2, dz_um=0.04, zpad=3, xy_limit=3.0, device=dev)
     m = vec(dict(o, roisize=sp.Pl))
     with torch.no_grad():
         m.zcoef.copy_(torch.tensor(zc, device=dev))
-    knots = sp.sample(m, emitter_height_pos_fn(0.1))
+    knots = sp.sample(m, ZMode(m, 'emitter', focus=.1).coordinates)
     np.savez(os.path.join(a.out, 'knots.npz'), knots=knots.cpu().numpy().astype(np.float32), zcoef=zc)
     json.dump(dict(optics=o, focus_um=0.1, zmax=0.4, S=2, hz=0.04, zpad=3, xmax=3.0, z0=sp.z0, u0=sp.u0,
                    shape=list(knots.shape)), open(os.path.join(a.out, 'knots.json'), 'w'), indent=1)

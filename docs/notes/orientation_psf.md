@@ -357,12 +357,12 @@ in ~2 min.
   * `OrientationEstimator`: spot detection → `fit_orientation` → a `Dataset` with these columns:
     `theta_deg`, `phi_deg`, `g`, `mu`, `crlb_theta_deg`, `crlb_phi_deg`, `crlb_inplane_deg`, `crlb_g`, `photons`
     (in the ROI), `intensity`, `bg`, `chi2`, `loglik`.
-  * `FocusZ`: the model with z = the emitter's position relative to the focal plane, at a fixed emitter height. This
+  * `ZMode`: the model with z = the emitter's position relative to the focal plane, at a fixed emitter height. This
     is needed whenever the emitters sit at an interface with n_med < NA: moving a supercritical emitter below the
     interface is unphysical.
   * `fit_orientation(zgrid=...)`: extra starts on a z grid, because for the Vortex PSF the isotropic fit is a poor
     guide to z.
-* Tests: the estimator on a small movie, the charge choice of the bead calibration, and `FocusZ`.
+* Tests: the estimator on a small movie, the charge choice of the bead calibration, and `ZMode`.
 
 **Simulations** (`study/orientation/vortex_pipeline_sim.py`; their λ-DNA optics: NA 1.47, 597.5 nm, 65 nm pixels,
 camera offset 106 ADU and 0.33 e/ADU):
@@ -409,7 +409,7 @@ run with `python -I`):
     (0.75–0.84 instead of 0.1–0.76). With n_med, the emitter height, the Zernikes and the centre all fitted:
     n_med = 0.955, height 0, centre (−0.026, 0.013) pupil radii, χ² 2.06, g 0.85–0.94.
     (Their simulations and λ-DNA settings use 1.333; their PMMA settings are not in the released code.)
-* **PMMA through-focus validation.** 34 molecules; every plane fitted independently with `FocusZ`, z = defocus:
+* **PMMA through-focus validation.** 34 molecules; every plane fitted independently with `ZMode`, z = defocus:
 
   | quantity | ours | paper |
   |---|---|---|
@@ -428,7 +428,7 @@ run with `python -I`):
     the joint χ² is 2. Candidates are the field dependence of the aberrations (constant here) and the emission
     spectrum (one wavelength).
 * **Re-orientation movie** (ATTO 565 on glass in air, 900 ms frames, TIRF, central 1024 × 1024 field, bright spots
-  only (threshold 20): 4935 spots, 225 molecules tracked over ≥ 10 of the 23 frames). `FocusZ` model with n_med 1.0,
+  only (threshold 20): 4935 spots, 225 molecules tracked over ≥ 10 of the 23 frames). `ZMode` model with n_med 1.0,
   emitter at the glass and the in-situ plate:
   * χ² median 1.14: the model fits well.
   * g median 0.88 (paper's three molecules 0.75–0.85).
@@ -437,7 +437,7 @@ run with `python -I`):
   * On the stationary stretches the frame-to-frame axis change is median 2.3°, rms 5.2°. Two independent estimates
     with the CRLB would give rms √2 × 2.7° = 3.8°, so the single-frame axis precision is ~1.4 × the CRLB, close to the
     paper's "within 30 % of the CRLB".
-* **λ-DNA** (`stk_0001`, frames 0–600, the 256 × 256 px crop densest in their localisations, water n 1.333, `FocusZ`
+* **λ-DNA** (`stk_0001`, frames 0–600, the 256 × 256 px crop densest in their localisations, water n 1.333, `ZMode`
   with the emitter at the coverslip, the in-situ plate): 17 763 spots fitted, 15 899 kept by their χ² filter
   (0.75–3); χ² median 1.55. Δφ is measured to the local DNA axis, taken from the PCA of the localisations within
   3 px, on the 6370 spots where it is defined. Against their localisations (4TU hdf5, same crop, frames 0–600;
@@ -486,7 +486,7 @@ run with `python -I`):
   * Joint-fit χ² falls from 1.72 to 1.64. The fitted field variation is 30–58 mλ over the field.
   * Held-out per-plane σθ falls from 2.08° to 1.66° and σφ from 2.26° to 1.89°, against a CRLB of 1.06° / 1.12°:
     the ratio to the CRLB goes from 1.9–2.0 to 1.6–1.7. The z slope moves from −0.913 to −0.924.
-  * Polychromatic emission: implemented (`orientation.Polychromatic`) but not run, per the change of priority.
+  * Polychromatic emission: implemented (`Polychromatic`) but not run, per the change of priority.
 * **g at the bound.** The Dataset now has `g` from a fit whose bounds (`g_limits`) can be widened, e.g. (−0.5, 1.5), and
   `g_display`, clamped to [0, 1].
   * Simulation (Vortex PSF, 4000 photons, bg 10, true g = 1): clamped fit bias −0.018 and sd 0.028 against a CRLB of
@@ -676,7 +676,7 @@ results/acceptance.json. Last run (commit after 82d06ef): all 13 values PASS, in
 
 **Composed reference for the refactor.** `study/orientation/composed_reference.py` and
 `tests/data/orientation_composed_ref.json` hold a small deterministic reference of the whole composition in the current
-API: VectorialPSF + plate → Polychromatic → field Zernikes → FocusZ, with per-emitter dipM. It covers images, dipole
+API: VectorialPSF + plate → Polychromatic → field Zernikes → ZMode, with per-emitter dipM. It covers images, dipole
 bases and fits, and is checked by `tests/test_orientation.py::test_composed_vortex_reference` (CPU, ~20 s).
 
 **Frozen.** The Vortex work stops here until the PSF refactor. The spectral, polychromatic and other model

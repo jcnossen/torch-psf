@@ -30,7 +30,7 @@ Readers must not depend on the member order; the Python writer puts `psf.json` f
   a newer minor version. For example, a 0.3 reader would silently render a spectral 4Pi source with box sampling.
 - Writers choose the highest requirement across every channel, channel source and top-level source.
   Use **0.4.0** for a non-box 4Pi source, a phase spline with an integrated grid, dipole component tables on
-  any spline grid, or integrated field tiles. Use **0.3.0** for other non-box vectorial models or independent
+  any spline grid, or integrated or bilinearly blended field tiles. Use **0.3.0** for other non-box vectorial models or independent
   integrated splines. All remaining files use **0.2.0**.
 - Python reads 0.2.x, 0.3.x and 0.4.x. The web reader accepts 0.2.x and 0.3.x and refuses 0.4.x at the version check.
 - The 0.1.0 files (one JSON with `type` at the top level plus a sidecar `.npz` named by `arrays`) are still written by
@@ -200,7 +200,10 @@ combining them with the phase formula above. The grid selects the component repr
 A tiled field spline stores the reference-point model as a channel, its vectorial source, and the
 `zernike_poly` field block. For an integrated tile grid the channel type is `integrated_spline` (version 0.4.0).
 Each tile uses the stored reference grid and basis with the Zernikes evaluated at its centre. Tile size and extent
-use the existing `provenance.field_tiles` metadata.
+use the existing `provenance.field_tiles` metadata. A missing `blend` means `nearest`.
+For `blend: "bilinear"` the writer selects 0.4.0 even for scalar pixel-value tiles. Interpolate between
+four tile centres in channel camera pixels. Clamp each coordinate to the outer centres at the edges.
+During a fit the field position is the fixed ROI centre (or the supplied per-emitter xy).
 
 ### Spline dipole components (0.4.0)
 

@@ -42,7 +42,7 @@ def fit_tracks(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600, warmu
     dev = tracks.rois.device
     B, T, R = tracks.rois.shape[0], tracks.rois.shape[1], tracks.rois.shape[-1]
     c = (R - 1) / 2
-    model = vectorial.resized(R, pixel_integration=pixel_integration)
+    model = vectorial.resampled(R, pixel_integration=pixel_integration)
     model.zcoef.requires_grad_(True)
     focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
     rn2, pix = readnoise_variance(readnoise_e, B, R, dev)

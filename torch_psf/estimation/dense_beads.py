@@ -313,7 +313,7 @@ def _chunks(data, active, max_renders):
 def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',), emitter_z_um=0.0, train=None,
                     drift=True, drift_order=3, focus_offset='tilt', bg='linear', intensity='free',
                     fit_dz_scale=False, warmup=50, heldout_iters=200, max_renders=3000, reject=None, reject_at=None,
-                    lr_focus=1e-2, lr_drift=1e-2, lr_apod=1e-2, field=None, field_xy=None, lr_field=None, exclude=None,
+                    lr_focus=1e-2, lr_drift=1e-2, lr_apod=1e-2, field=None, xy=None, lr_field=None, exclude=None,
                     log=None, stop=None):
     """Joint fit of a shared VectorialPSF (copied, roisize = data.R) to the bead clusters `data` (BeadClusters),
     imaged at the focus positions focus_um [nk] (um, focal plane relative to the coverslip, see stage_focus). Poisson
@@ -333,7 +333,7 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     lr_drift (px): Adam steps of the focus offsets and drift coefficients (Adam moves a parameter by at most about lr
     per iteration: beads 0.4 um off the stack centre need lr_focus x iters well above that).
     field: a torch_psf.field.FieldZernikes (copied): every bead gets the Zernikes zcoef + field(x, y) at its field
-    position field_xy [B, 2] (camera px; default data.xy_image, the positions in the stacks); with 'field' in fit the
+    position xy [B, 2] (camera px; default data.xy_image, the positions in the stacks); with 'field' in fit the
     polynomial coefficients are fitted too (Adam step lr_field, default lr; its ridge prior added to the loss), else
     held fixed (scoring). `vectorial` may also be a torch_psf.field.FieldPSF (its base and field are used).
     exclude: cluster indices that are neither fitted nor scored as held-out (e.g. the clusters rejected by an earlier
@@ -357,7 +357,7 @@ def fit_dense_beads(data, focus_um, vectorial, iters=300, lr=3e-3, fit=('zcoef',
     if field is not None:
         fz = field.copy().to(dev)
         fz.coef.requires_grad_('field' in fit)
-        fxy = (data.xy_image if field_xy is None else torch.as_tensor(field_xy, dtype=torch.float32, device=dev))
+        fxy = (data.xy_image if xy is None else torch.as_tensor(xy, dtype=torch.float32, device=dev))
         fxy = fxy.reshape(-1, 2).to(dev)
     train = np.ones(C, bool) if train is None else np.asarray(train, bool).copy()
     d = data.d

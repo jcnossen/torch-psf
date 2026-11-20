@@ -37,7 +37,8 @@ from torch_psf.camera import Camera                                             
 from torch_psf.psf import PSF                                                          # noqa: E402
 from torch_psf.estimators import ZStackEstimator, find_beads                           # noqa: E402
 from torch_psf.vortex import vortex_psf                                                # noqa: E402
-from torch_psf.orientation import OrientationEstimator, fit_orientation, FocusZ, Polychromatic  # noqa: E402
+from torch_psf.composition import ZMode, Polychromatic  # noqa: E402
+from torch_psf.orientation import OrientationEstimator, fit_orientation  # noqa: E402
 
 DATA = os.path.expanduser('~/data/vortex_hulleman2021')
 OUT = os.path.join(HERE, 'results')
@@ -133,7 +134,7 @@ def plate(plate_file='real_plate.json'):
 
 
 def sm_focusz(n_med=None, vortex=True, z_range=(-0.9, 0.9), height=None, plate_file=None):
-    """The calibrated single-molecule model with z = position relative to the focal plane (FocusZ): plate charge /
+    """The calibrated single-molecule model with z = position relative to the focal plane (ZMode): plate charge /
     centre / Zernikes from the plate file (PLATE_FILE by default); n_med and the emitter height from it unless given."""
     pf = plate_file or PLATE_FILE
     pl = plate(pf)
@@ -142,7 +143,7 @@ def sm_focusz(n_med=None, vortex=True, z_range=(-0.9, 0.9), height=None, plate_f
     v = sm_model(n, charge=pl['charge'], center=pl['center'], z_range=z_range, vortex=vortex, plate_file=pf)
     if pl.get('spectrum'):
         v = Polychromatic(v, *pl['spectrum'])
-    return FocusZ(v, height=h, z_range=z_range)
+    return ZMode(v, height=h, z_range=z_range)
 
 
 PLATE_FILE = os.environ.get('VORTEX_PLATE', 'real_plate.json')
@@ -305,7 +306,7 @@ def run_field(planes=range(4, 21), kc=12, iters=600, prior_sd=0.05):
     d = rois[train][:, list(planes)].contiguous()
     f = pl['stage_sign'] * 0.1 * (torch.tensor(list(planes), dtype=torch.float32) - kc)
     base = sm_model(pl['n_med'], charge=pl['charge'], center=pl['center'], z_range=(-0.9, 0.9))
-    r0 = fit_orientation(FocusZ(base, height=pl['height_um'], z_range=(-0.3, 0.3)), rois[train][:, kc], iters=40,
+    r0 = fit_orientation(ZMode(base, height=pl['height_um'], z_range=(-0.3, 0.3)), rois[train][:, kc], iters=40,
                          z_limits=(-0.3, 0.3))
     out = {}
     for name in ('const', 'field'):
@@ -314,7 +315,7 @@ def run_field(planes=range(4, 21), kc=12, iters=600, prior_sd=0.05):
         r = fit_dipole_stacks(base, d, f, pl['charge'], center=pl['center'], depth=DEPTH, mu0=r0['theta'][:, 5:8],
                               xy0=r0['theta'][:, :2], iters=iters, fit_center=True, fit_zernike=True,
                               height=pl['height_um'], fit_height=True, fit_nmed=True, field=fz,
-                              field_xy=centers[train] if fz is not None else None)
+                              xy=centers[train] if fz is not None else None)
         chi2 = ((d - r['model']) ** 2 / r['model'].clamp_min(1e-6)).flatten(2).mean(2)
         P = dict(pl)
         P.update(center=r['center'], zernike_waves=r['psf'].zcoef.tolist(), n_med=r['n_med'], height_um=r['height'],
@@ -337,7 +338,7 @@ SPECTRUM = ([0.5725, 0.5975, 0.6225], [1.0, 2.0, 1.0])     # ~ATTO 565 emission 
 
 
 def run_spectrum(planes=range(4, 21), kc=12, iters=600):
-    """Polychromatic emission (orientation.Polychromatic, SPECTRUM) on top of the field-dependent model: the joint
+    """Polychromatic emission (Polychromatic, SPECTRUM) on top of the field-dependent model: the joint
     PMMA stack fit on the same training molecules, starting from real_plate_field.json.
     -> results/real_plate_spectrum.json"""
     from torch_psf.vortex import fit_dipole_stacks
@@ -354,12 +355,12 @@ def run_spectrum(planes=range(4, 21), kc=12, iters=600):
     fz = field_model(pl)
     with torch.no_grad():
         zo = fz.offsets(torch.as_tensor(centers[train], device=DEV), base.zidx)
-    r0 = fit_orientation(FocusZ(Polychromatic(base, *SPECTRUM), height=pl['height_um'], z_range=(-0.3, 0.3)),
+    r0 = fit_orientation(ZMode(Polychromatic(base, *SPECTRUM), height=pl['height_um'], z_range=(-0.3, 0.3)),
                          rois[train][:, kc], iters=40, z_limits=(-0.3, 0.3), zcoef_offset=zo)
     r = fit_dipole_stacks(base, d, f, pl['charge'], center=pl['center'], depth=DEPTH, mu0=r0['theta'][:, 5:8],
                           xy0=r0['theta'][:, :2], iters=iters, fit_center=True, fit_zernike=True,
                           height=pl['height_um'], fit_height=True, fit_nmed=True, field=fz,
-                          field_xy=centers[train], spectrum=SPECTRUM)
+                          xy=centers[train], spectrum=SPECTRUM)
     chi2 = ((d - r['model']) ** 2 / r['model'].clamp_min(1e-6)).flatten(2).mean(2)
     P = dict(pl)
     P.update(center=r['center'], zernike_waves=r['psf'].zcoef.tolist(), n_med=r['n_med'], height_um=r['height'],
@@ -477,7 +478,7 @@ def run_pmma():
     zo = None
     if fz is not None:
         with torch.no_grad():
-            zo = fz.offsets(torch.tensor([m[0] for m in mols], dtype=torch.float32, device=DEV), pv.psf.zidx)
+            zo = fz.offsets(torch.tensor([m[0] for m in mols], dtype=torch.float32, device=DEV), pv.zidx)
     fv = fit_stack(pv, rv, zcoef_offset=zo)
     fs = fit_stack(ps, rs)
     log(f'pmma: fitted {rv.shape[0]} molecules x {rv.shape[1]} planes, both stacks ({time.time() - t0:.0f} s)')

@@ -14,7 +14,7 @@ Geometry (both arms focused at z = 0):
                gamma (global, <= 1), Gaussian image blur (isotropic, blur_px2 px^2):
                  I_c = 2 tau_c [ |E_t|^2 + a^2 |E_b|^2 + 2 a gamma Re(E_t . conj(E_b) e^{i (phi_c + Phi)}) ]_pol_c / (1 + a^2)
                summed over the dipole components with the emission-dipole tensor M (isotropic = I / 3); Phi = the
-               global 4Pi phase of the emitter (forward(..., phi_extra=Phi), render(..., phi=Phi)).
+               global 4Pi phase of the emitter (forward(..., phi=Phi), render(..., phi=Phi)).
   The lateral position difference of the arms (d_bot) makes the interference pattern, and with it the centroid of
   each channel, depend on Phi.
   channel_offsets [C, 2] (px; MultiChannelPSF, default zeros): a fixed image offset per channel (channels imaged on
@@ -46,11 +46,12 @@ Units: px for lateral positions, um for z and lengths, radians for phases.
 import copy
 import math
 import torch
+from torch_psf.composition import _AxialCoordinate
 from torch_psf.optics import resolve_device, Optics
 from torch_psf.psf import PSF, render_with_grad
 from torch_psf.multichannel import MultiChannelPSF
 from torch_psf._dipole import M_to_m6, contract_fields
-from torch_psf.integrate import PixelIntegrator, pixel_integration_mode, spectral_cutoff
+from torch_psf.integrate import PixelIntegrator, pixel_integration_mode, spectral_cutoff, spectral_min_oversample
 from torch_psf.vectorial import VectorialPSF, dipole_tensor, _list
 from torch_psf.spline import SplinePSF
 
@@ -94,32 +95,49 @@ def _arm_load(v, d):
     v.diat = None if d.get('diattenuation') is None else float(d['diattenuation'])
 
 
-class FourPiPSF(torch.nn.Module, MultiChannelPSF):
+class _CoupledChannels(MultiChannelPSF):
+    """Channel models with a common emitter phase and independent per-channel backgrounds."""
+    extra_params = ('phi',)
+
+    def weights(self, pos, *, phi=None, **options):
+        phase = _phase(pos, phi)
+        return torch.stack((torch.ones_like(phase), phase.cos(), -phase.sin()), -1)[:, None].expand(-1, self.n_channels, -1)
+
+    def basis(self, pos, grad=False, *, dipM=None, xy=None, phi=None):
+        """Incoherent, real and imaginary interference images for each channel."""
+        def sample(p):
+            a, b, c = (self.render(p, dipM=dipM, xy=xy, phi=phase) for phase in (0., math.pi, math.pi/2))
+            inc = (a + b) * .5
+            return torch.stack((inc, (a-b)*.5, inc-c), 2)
+        return render_with_grad(sample, pos, grad)
+
+
+class FourPiPSF(torch.nn.Module, _CoupledChannels):
     """Coherent 4Pi PSF on a roisize x roisize patch with C channels -> images [N, C, P, P] (module docstring).
 
     Constructor: roisize (px), pixel_um, wavelength_um, NA, n_imm (a number, or (top, bottom) per arm), n_med (sample
     medium; default n_imm of the top arm), zernike_indices (Noll, both arms), npupil, oversample, mirror ('y' | 'x'),
     pol (polarization per channel, 0 = E_x, 1 = E_y; its length is the channel count C), depth_um (None or
-    (top, bottom) um: asymmetric-arm geometry), zmode ('emitter' | 'stage'), z_range (um; default range of to_spline),
+    (top, bottom) um: asymmetric-arm geometry), z_range (um; default range of to_spline),
     device, pixel_integration ('box' by default, or 'spectral' / 'point'). Initial values: phi [C] (default
     -2 pi c / C mod 2 pi), tau [C] (default 1 / C), a (1), gamma
     (sigmoid(2)), d_bot (0, 0, 0), blur_px2 (0.1), channel_offsets [C, 2] px (zeros).
-    Optional plain attribute dipM: emission-dipole tensor (3 x 3 or [N, 3, 3]) used when forward gets M=None.
+    Optional plain attribute dipM: emission-dipole tensor (3 x 3 or [N, 3, 3]) used when forward gets dipM=None.
     A MultiChannelPSF with extra_params ('phi',); tau plays the role of the channel intensity ratio (intensity_ratio
     stays ones and is not stored)."""
     type_name = 'fourpi'
+    dtype = property(lambda self: self.phi.dtype)
     extra_params = ('phi',)
 
     def __init__(self, roisize, pixel_um=0.10833, wavelength_um=0.68, NA=1.35, n_imm=1.406, n_med=None,
                  zernike_indices=DEFAULT_ZIDX, npupil=48, oversample=2, mirror='y', pol=(0, 1, 0, 1), depth_um=None,
-                 zmode='emitter', z_range=(-0.6, 0.6), device=None, phi=None, tau=None, a=1.0, gamma=None,
+                 z_range=(-0.6, 0.6), device=None, phi=None, tau=None, a=1.0, gamma=None,
                  d_bot=(0.0, 0.0, 0.0), blur_px2=0.1, channel_offsets=None, pixel_integration='box'):
         super().__init__()
         if mirror not in ('x', 'y'):
             raise ValueError("mirror must be 'x' or 'y'")
-        if zmode not in ('emitter', 'stage'):
-            raise ValueError("zmode must be 'emitter' or 'stage'")
-        self.roisize, self.pixel_um, self.os, self.mirror, self.zmode = int(roisize), float(pixel_um), int(oversample), mirror, zmode
+        self.roisize, self.pixel_um, self.os, self.mirror = int(roisize), float(pixel_um), int(oversample), mirror
+        self.axial = _AxialCoordinate('emitter')
         self.dev = resolve_device(device)
         self.z_range = None if z_range is None else (float(z_range[0]), float(z_range[1]))
         NA_t, NA_b = _pair(NA)
@@ -194,18 +212,43 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
     def band_limit(self):
         return max(self.top.band_limit(), self.bot.band_limit())
 
+    def _sampling_model(self, size, density):
+        if self.roisize == size and not density:
+            return self
+        model = self.resized(size)
+        if density:
+            model.os = max(model.os, spectral_min_oversample(model.band_limit()))
+            model.pixel_integration = 'point'
+        return model
+
     def _integrator(self):
         bv = self.blur_px2
         return PixelIntegrator(self, torch.stack([bv, bv, torch.zeros_like(bv)]), coherent=True)
+
+    def _with_zmode(self, mode, height, scale, focus, z_range):
+        if height != 0 or scale != 1 or focus is not None:
+            raise ValueError('4Pi stage scans use signed arm displacement and calibrated depth_um')
+        view = copy.copy(self)
+        view.axial = _AxialCoordinate(mode)
+        if z_range is not None:
+            view.z_range = tuple(z_range)
+        return view
+
+    def at_wavelength(self, wavelength):
+        view = copy.copy(self)
+        view._modules = self._modules.copy()
+        view.top, view.bot = self.top.at_wavelength(wavelength), self.bot.at_wavelength(wavelength)
+        return view
 
     def _pupil_at_depth(self, arm, pos, pixels):
         height, stage = None, None
         if self.depth is not None:
             depth = self.depth[0] if arm is self.top else self.depth[1]
-            if self.zmode == 'stage':
-                height, stage = depth.clamp(min=0), pos[:, 2]
+            # The bead-stage coordinate of a coherent arm has the opposite sign to emitter defocus.
+            if self.axial.mode == 'stage':
+                height, stage = self.axial.map(-pos[:, 2], 0., depth)
             else:
-                height = (depth + pos[:, 2]).clamp(min=0)
+                height, _ = self.axial.map(pos[:, 2], 0., depth)
         return arm._pupil(pos, 0., pixels.u, height=height, stage_um=stage)
 
     def arm_fields(self, arm, pos, sgn_mu, pixels=None):
@@ -233,76 +276,73 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
             Eb = torch.stack([-Eb[:, :, 0], Eb[:, :, 1]], 2)
         return Et, Eb, energy
 
-    def forward(self, pos, M=None, phi_extra=None, intensity=None, bg=None, offsets=None, *, dipM=None):
-        """pos [B, 3] (x, y px relative to the ROI centre, z um), dipM (also M): emission-dipole tensor [3, 3] or
-        [B, 3, 3] (default self.dipM, else isotropic), phi_extra: global 4Pi phase Phi [B] (or a number), intensity [B], bg [B] or [B, C],
+    def forward(self, pos, dipM=None, phi=None, intensity=None, bg=None, offsets=None):
+        """pos [B, 3] (x, y px relative to the ROI centre, z um), dipM: emission-dipole tensor [3, 3] or
+        [B, 3, 3] (default self.dipM, else isotropic), phi: global 4Pi phase Phi [B] (or a number), intensity [B], bg [B] or [B, C],
         offsets [B, C, 2]: per-spot channel offsets (px; added to channel_offsets)
         -> [B, C, P, P] expected photons per emitted photon (times intensity, plus bg, when given). Channel c is
         rendered at (x, y) + channel_offsets[c] (+ offsets[:, c]); without offsets all channels share one evaluation."""
-        I = self._channel_images(pos, self._input_dipole(M, dipM), phi_extra, offsets)
+        I = self._channel_images(pos, dipM, phi, offsets)
         if intensity is not None:
             I = I * intensity[:, None, None, None]
         if bg is not None:
             I = I + (bg[:, :, None, None] if bg.dim() == 2 else bg[:, None, None, None])
         return I
 
-    @staticmethod
-    def _input_dipole(M, dipM):
-        if M is not None and dipM is not None:
-            raise ValueError('specify only one of M and dipM')
-        return M if dipM is None else dipM
+    def _dipole_basis(self, pos, grad=False, *, phi=None, xy=None):
+        if xy is not None and not self.mapped:
+            raise ValueError('xy requires channel mappings')
+        corners = None if xy is None else xy - (self.roisize - 1) / 2
+        if grad:
+            return render_with_grad(lambda p, phi: self._dipole_basis(p, phi=phi, xy=xy), pos, True, phi=_phase(pos, phi))
 
-    def dipole_basis(self, pos, phi=None, offsets=None, corners=None):
-        """[B,C,6,R,R] in xx, yy, zz, xy, xz, yz order, including coherent interference at phi.
-        Off-diagonal images include both symmetric entries. The mean of the three diagonal images gives isotropic
-        emission. Explicit channel positions [B,C,3] give raw channel images as in render_channels."""
         phi = _phase(pos, phi)
         if pos.ndim == 3:
-            return self._forward_channels(pos, phi_extra=phi, basis=True)
+            return self._forward_channels(pos, phi=phi, basis=True)
         if self.mapped:
-            pc = self.channel_positions(pos, offsets, corners)
-            images = self._forward_channels(pc, phi_extra=phi, basis=True)
+            pc = self.channel_positions(pos, corners=corners)
+            images = self._forward_channels(pc, phi=phi, basis=True)
         else:
-            images = self._channel_images(pos, phi_extra=phi, offsets=offsets, basis=True)
+            images = self._channel_images(pos, phi=phi, basis=True)
         return images * self.intensity_ratio[None, :, None, None, None]
 
-    def _channel_images(self, pos, M=None, phi_extra=None, offsets=None, basis=False):
+    def _channel_images(self, pos, dipM=None, phi=None, offsets=None, basis=False):
         if self._shared_position(offsets):
-            return self._forward_ref(pos, M, phi_extra, basis)
-        return self._forward_channels(self.channel_positions(pos, offsets), M, phi_extra, basis)
+            return self._forward_ref(pos, dipM, phi, basis)
+        return self._forward_channels(self.channel_positions(pos, offsets), dipM, phi, basis)
 
-    def _dipole(self, M, B, dev, dtype):
-        Mt = dipole_tensor(M if M is not None else self.dipM, None, dev)
+    def _dipole(self, dipM, B, dev, dtype):
+        Mt = dipole_tensor(dipM if dipM is not None else self.dipM, None, dev)
         if Mt is None:
             Mt = torch.eye(3, device=dev) / 3
         if Mt.dim() == 2:
             Mt = Mt[None].expand(B, 3, 3)
         return ((Mt + Mt.transpose(-1, -2)) * .5).to(dtype)
 
-    def _channel_pixels(self, pairs, pixels, energy, M, phi_extra, basis):
+    def _channel_pixels(self, pairs, pixels, energy, dipM, phi, basis):
         """Coherently combine each channel's polarized arm fields, then integrate its intensity."""
         a, g = self.a, self.gamma
         out = []
         for c, (et, eb) in enumerate(pairs):
-            ph = self.phi[c] + (phi_extra if phi_extra is not None else 0.)
+            ph = self.phi[c] + (phi if phi is not None else 0.)
             phase = torch.exp(1j * ph.to(torch.float32)).reshape(-1, 1, 1, 1)
-            top = contract_fields(et, M, basis=basis)
-            bottom = contract_fields(eb, M, basis=basis)
-            cross = contract_fields(et, M, y=eb * phase, basis=basis)
+            top = contract_fields(et, dipM, basis=basis)
+            bottom = contract_fields(eb, dipM, basis=basis)
+            cross = contract_fields(et, dipM, y=eb * phase, basis=basis)
             out.append(top + a * a * bottom + 2 * a * g * cross)
         intensity = torch.stack(out, 1) / (1 + a * a)
         image = pixels(intensity) * self.pixel_um ** 2 / energy
         return image * self.tau.reshape(1, -1, *([1] * (image.ndim - 2))) * 2
 
-    def _forward_ref(self, pos, M=None, phi_extra=None, basis=False):
+    def _forward_ref(self, pos, dipM=None, phi=None, basis=False):
         """All channels at one position per emitter."""
         pixels = self._integrator()
         Et, Eb, energy = self.fields(pos, pixels)
-        Mc = None if basis else self._dipole(M, len(pos), pos.device, Et.real.dtype)
+        Mc = None if basis else self._dipole(dipM, len(pos), pos.device, Et.real.dtype)
         pairs = ((Et[:, :, int(p)], Eb[:, :, int(p)]) for p in self.pol)
-        return self._channel_pixels(pairs, pixels, energy, Mc, phi_extra, basis)
+        return self._channel_pixels(pairs, pixels, energy, Mc, phi, basis)
 
-    def _forward_channels(self, pos_c, M=None, phi_extra=None, basis=False):
+    def _forward_channels(self, pos_c, dipM=None, phi=None, basis=False):
         """Reuse each pupil across channels. Apply the channel shift and select its
         polarization before transforming the fields into the image plane."""
         B, C, dev = pos_c.shape[0], pos_c.shape[1], pos_c.device
@@ -319,7 +359,7 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
             sgn_b, sb, flip_dim, neg_pol = torch.tensor([-1.0, 1.0, -1.0], device=dev), (-1.0, 1.0), -1, 0
         bot = self._pupil_at_depth(self.bot, pb, pixels)
         Pt, Pb = (arm.fields.unflatten(1, (3, 2)) for arm in (top, bot))
-        Mc = None if basis else self._dipole(M, B, dev, Pt.real.dtype)
+        Mc = None if basis else self._dipole(dipM, B, dev, Pt.real.dtype)
 
         def channel_fields():
             for c in range(C):
@@ -332,36 +372,26 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
                 eb = eb * sgn_b.to(eb.real.dtype)[None, :, None, None]
                 yield et, torch.flip(eb, dims=[flip_dim]) * (-1.0 if p == neg_pol else 1.0)
 
-        return self._channel_pixels(channel_fields(), pixels, top.energy, Mc, phi_extra, basis)
+        return self._channel_pixels(channel_fields(), pixels, top.energy, Mc, phi, basis)
 
     # ------------------------------------------------------------------ PSF interface (multi-channel)
     @property
     def xy_limit(self):
         return self.roisize / 2 - 1.0
 
-    def render(self, pos, grad=False, phi=None, M=None, offsets=None, *, dipM=None, corners=None):
-        """Normalized channel images [N, C, P, P] at pos [N, 3] (x, y px, z um) and 4Pi phase phi [N] (default 0), with
-        the channel offsets (+ per-spot offsets [N, C, 2]). grad=True: (value, d/dx, d/dy (per px), d/dz (per um),
-        d/dphi (per rad)), by forward-mode autodiff."""
-        Phi = _phase(pos, phi)
-        tensor = self._input_dipole(M, dipM)
-        if self.mapped:
-            return self._ratio(self._render_mapped(pos, Phi[:, None], offsets, corners, grad, tensor))
-        return self._ratio(self._render_c(self.channel_positions(pos, offsets), Phi, grad, tensor))
-
-    def render_channels(self, pos_c, extra=None, grad=False, M=None, *, dipM=None):
+    def render_channels(self, pos_c, extra=None, grad=False, dipM=None):
         """MultiChannelPSF.render_channels: extra [N, 1] = the 4Pi phase."""
         Phi = _phase(pos_c, None if extra is None else extra[:, 0])
-        return self._render_c(pos_c, Phi, grad, self._input_dipole(M, dipM))
+        return self._render_c(pos_c, Phi, grad, dipM)
 
-    def _render_c(self, pos_c, Phi, grad, M):
+    def _render_c(self, pos_c, Phi, grad, dipM):
         if not self.channel_offsets.requires_grad and bool((pos_c[:, 1:] == pos_c[:, :1]).all()):
             # one position for all channels: one evaluation
             pos = pos_c[:, 0]
-            fn = lambda p, phi: self._forward_ref(p, M=M, phi_extra=phi)
+            fn = lambda p, phi: self._forward_ref(p, dipM=dipM, phi=phi)
         else:
             pos = pos_c
-            fn = lambda p, phi: self._forward_channels(p, M=M, phi_extra=phi)
+            fn = lambda p, phi: self._forward_channels(p, dipM=dipM, phi=phi)
         return render_with_grad(fn, pos, grad, phi=Phi)
 
     def default_extra_starts(self):
@@ -373,6 +403,8 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
         i = 4 + self.n_channels
         theta[:, i] = math.pi - torch.remainder(math.pi - theta[:, i], 2 * math.pi)
         return theta
+
+    to = PSF.to
 
     def _apply(self, fn, *args, **kwargs):
         super()._apply(fn, *args, **kwargs)
@@ -391,7 +423,7 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
     def __repr__(self):
         return (f'FourPiPSF(roisize={self.roisize}, pixel_um={self.pixel_um}, NA=({float(self.top.NA):.3f}, '
                 f'{float(self.bot.NA):.3f}), n_imm=({self.top.n_imm}, {self.bot.n_imm}), n_med={self.n_med:.3f}, '
-                f'channels={self.n_channels}, mirror={self.mirror!r}, asym={self.asym}, zmode={self.zmode!r})')
+                f'channels={self.n_channels}, mirror={self.mirror!r}, asym={self.asym}, zmode={self.axial.mode!r})')
 
     # ------------------------------------------------------------------ parameter dict
     def state(self):
@@ -403,7 +435,7 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
         meta = dict(R=self.roisize, px=self.pixel_um, NA=float(t.NA), n=t.n_imm, lam=t.wavelength_um, npupil=t.npupil,
                     os=self.os, mirror=self.mirror, zidx=list(self.zidx), pol=[int(v) for v in self.pol],
                     NA_t=float(t.NA), n_imm_t=t.n_imm, NA_b=float(b.NA), n_imm_b=b.n_imm, n_med=self.n_med,
-                    zmode=self.zmode)
+                    zmode=self.axial.mode)
         if self.pixel_integration != 'box':
             meta['pixel_integration'] = self.pixel_integration
         if self.asym:
@@ -423,7 +455,7 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
         return s
 
     @classmethod
-    def from_state(cls, s, device=None, roisize=None, zmode=None, z_range=(-0.6, 0.6)):
+    def from_state(cls, s, device=None, roisize=None, z_range=(-0.6, 0.6)):
         """FourPiPSF from a parameter dict (state()). Symmetric states (no meta.asym) have one NA and index n for both
         arms and the medium (unless NA_t / n_imm_t / NA_b / n_imm_b / n_med are given); asymmetric states
         (meta.asym) per-arm NA_t, n_imm_t, NA_b, n_imm_b, the medium n_med and depth. roisize / zmode override the
@@ -435,8 +467,10 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
         p = cls(m['R'] if roisize is None else roisize, pixel_um=m['px'], wavelength_um=m['lam'], NA=NA, n_imm=ni,
                 n_med=m.get('n_med', m['n']), zernike_indices=tuple(m['zidx']), npupil=m['npupil'], oversample=m['os'],
                 mirror=m['mirror'], pol=tuple(m['pol']), depth_um=tuple(s['depth']) if asym else None,
-                zmode=zmode or m.get('zmode', 'emitter'), z_range=z_range, device=device,
+                z_range=z_range, device=device,
                 pixel_integration=pixel_integration_mode(m.get('pixel_integration'), from_file=True))
+        from torch_psf.composition import ZMode
+        p = ZMode(p, m.get('zmode', 'emitter'))
         t = lambda v: torch.tensor(v, device=p.dev)
         if s.get('psf_dipole_M') is not None:
             p.dipM = t(s['psf_dipole_M'])
@@ -474,9 +508,10 @@ class FourPiPSF(torch.nn.Module, MultiChannelPSF):
         return p
 
 
-class FourPiSplinePSF(MultiChannelPSF):
+class FourPiSplinePSF(_CoupledChannels):
     """MultiChannelPSF view of one spline bank indexed by phase, channel and optional dipole component."""
     type_name = 'fourpi_spline'
+    dtype = property(lambda self: self.table.dtype)
     extra_params = ('phi',)
 
     def __init__(self, roisize, z_range, knots, oversample=4, dz_um=0.01, zpad=3, xy_limit=None, tau=None, device=None,
@@ -543,6 +578,15 @@ class FourPiSplinePSF(MultiChannelPSF):
                 f'oversample={self.S}, dz_um={self.hz}, zpad={self.zpad}, xy_limit={L.xmax}, knots {(L.nz, L.nv, L.nu)})')
 
     # ------------------------------------------------------------------ evaluation
+    def basis(self, pos, grad=False, *, dipM=None, xy=None, phi=None):
+        if self.mapped and grad:
+            return render_with_grad(lambda p: self.basis(p, dipM=dipM, xy=xy), pos, True)
+        corners = None if xy is None else xy - (self.roisize - 1) / 2
+        pc = self.channel_positions(pos, corners=corners)
+        images = self._phase_components(pc, grad, None, dipM)
+        ratio = self.intensity_ratio[None, :, None, None, None]
+        return tuple(v * ratio for v in images) if grad else images * ratio
+
     def components(self, pos, grad=False):
         """[3 (inc, cr, ci), N, C, P, P]; grad: [value, d/dx, d/dy, d/dz], each of that shape."""
         pc = pos[:, None, :].expand(-1, self.n_channels, -1)
@@ -579,14 +623,19 @@ class FourPiSplinePSF(MultiChannelPSF):
         w = torch.stack((torch.ones_like(phi), phi.cos(), -phi.sin()), -1)
         return torch.einsum('nf,ncf...->ncf...', w.to(images), images).sum(2)
 
-    def dipole_basis(self, pos, phi=None, offsets=None, corners=None):
+    def _dipole_basis(self, pos, grad=False, *, phi=None, xy=None):
+        if xy is not None and not self.mapped:
+            raise ValueError('xy requires channel mappings')
+        corners = None if xy is None else xy - (self.roisize - 1) / 2
+        if grad:
+            return render_with_grad(lambda p, phi: self._dipole_basis(p, phi=phi, xy=xy), pos, True, phi=_phase(pos, phi))
         raw = pos.ndim == 3
-        pc = pos if raw else self.channel_positions(pos, offsets, corners)
+        pc = pos if raw else self.channel_positions(pos, corners=corners)
         images = self._phase_components(pc, False, None, None, basis=True)
         basis = self._phase_sum(images, _phase(pc, phi))
         return basis if raw else basis * self.intensity_ratio[None, :, None, None, None]
 
-    def render(self, pos, grad=False, phi=None, knots=None, offsets=None, dipM=None, corners=None):
+    def render_tables(self, pos, grad=False, *, phi=None, knots=None, offsets=None, dipM=None, corners=None):
         Phi = _phase(pos, phi)
         if self.mapped:
             return self._ratio(self._render_mapped(pos, Phi[:, None], offsets, corners, grad, dipM, knots=knots))
@@ -608,10 +657,10 @@ class FourPiSplinePSF(MultiChannelPSF):
 
     def to(self, device=None, dtype=None):
         self.table.to(device, dtype)
-        self.tau = self.tau.to(self.table.dev)
+        self.tau = self.tau.to(device=self.table.dev, dtype=dtype)
         self.dev = self.table.dev
-        self.channel_offsets = self.channel_offsets.to(self.dev)
-        self.intensity_ratio = self.intensity_ratio.to(self.dev)
+        self.channel_offsets = self.channel_offsets.to(device=self.dev, dtype=dtype)
+        self.intensity_ratio = self.intensity_ratio.to(device=self.dev, dtype=dtype)
         return self
 
     def resized(self, roisize):
@@ -621,8 +670,8 @@ class FourPiSplinePSF(MultiChannelPSF):
         new.table = self.table.resized(roisize)
         return new
 
-    def to_spline(self, roisize=None, z_range=None, **kw):
-        if (z_range is not None and tuple(z_range) != self.z_range) or kw:
+    def to_spline(self, roisize=None, z_range=None, **grid):
+        if (z_range is not None and tuple(z_range) != self.z_range) or grid:
             raise ValueError('re-tabulating a spline on another grid is not supported; build it from the source model')
         return self if roisize in (None, self.roisize) else self.resized(roisize)
 

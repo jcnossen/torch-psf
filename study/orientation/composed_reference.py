@@ -3,27 +3,23 @@ the new API's composition VectorialPSF + plate phase -> Polychromatic -> Field -
 dipole_basis, must reproduce tests/data/orientation_composed_ref.json (written by this script; checked by
 tests/test_orientation.py::test_composed_vortex_reference).
 
-The composition in the current API (what each component means):
+The composition uses the following optical parameters:
   base     VectorialPSF(roisize 15, pixel 0.065 um, NA 1.47, n_imm 1.518, n_med 1.0, wavelength 0.5975 um, npupil 32,
            oversample 1, pixel_integration "box" (point samples at the pixel centres), Zernikes Noll 5..21, focus_um 0,
            z_range (-0.6, 0.6)), on the CPU
   plate    orientation.vortex_phase(base, charge=+1, center=(-0.026, 0.013), levels=0, depth=593 / 597.5): the spiral
            phase (waves) written into base.pupil_phase (fixed; centre in pupil radii, x = column, y = row)
   constant Zernikes  base.set_zernike({5: 0.013, 6: -0.013, 11: 0.057})  (waves rms, Noll; at the field reference)
-  spectrum orientation.Polychromatic(base, [0.5725, 0.5975, 0.6225], [1, 2, 1]): the weighted sum over wavelengths,
+  spectrum Polychromatic(base, [0.5725, 0.5975, 0.6225], [1, 2, 1]): the weighted sum over wavelengths,
            pupil phase (Zernikes + pupil_phase) scaled by lambda_0 / lambda_i, each wavelength normalised as
            VectorialPSF, weights normalised to sum 1
-  field    torch_psf.field.FieldZernikes(noll [5, 6, 8, 11], order {5: 2, 6: 2, 8: 1, 11: 1}, norm (512, 512, 512,
-           512) px) with fixed coefficients COEF; emitter m at field position FIELD_XY[m] (camera px) gets
-           zcoef_offset = field.offsets(FIELD_XY[m], base.zidx) (waves), passed per emitter to dipole_basis / render
-           (and scaled by lambda_0 / lambda_i inside Polychromatic like the base Zernikes)
-  z mode   orientation.FocusZ(poly, height=0.0): z = the emitter's position relative to the focal plane, the emitter
-           at the coverslip; the model is poly(pos (x, y, 0), focus = focus_um - z)
+  field    FieldPSF(poly, field) with FieldZernikes at camera positions FIELD_XY, per emitter.
+  z mode   ZMode(field_model, 'stage', height=0.0): the emitter is at the coverslip and focus = focus_um - z.
   dipoles  M = (1 - g) I / 3 + g mu mu^T (orientation.dipole_M), mu from (theta, phi) (orientation.from_angles,
            theta from the optical axis, phi from +x = column towards +y = row); 4 dipoles and one isotropic emitter
            (g = 0, i.e. M = I / 3); image = I * sum_k m_k basis_k + bg, basis = dipole_basis (xx, yy, zz, xy, xz, yz;
            off-diagonal images with the factor 2), m = M_to_m6(M)
-  fits     orientation.fit_orientation(model, rois, iters 20, z_limits (-0.5, 0.5), zstarts 1, iso_iters 15, zcoef_offset per ROI)
+  fits     orientation.fit_orientation(model, rois, iters 20, z_limits (-0.5, 0.5), zstarts 1, iso_iters 15, xy per ROI)
            on the noise-free image and on one Poisson draw (torch.Generator seed 1234) of each emitter
 
 usage: python -I study/orientation/composed_reference.py   (writes tests/data/orientation_composed_ref.json)
@@ -39,8 +35,9 @@ sys.path.insert(0, ROOT)
 import numpy as np                                                                     # noqa: E402
 import torch                                                                           # noqa: E402
 from torch_psf import VectorialPSF                                                     # noqa: E402
-from torch_psf.field import FieldZernikes                                              # noqa: E402
-from torch_psf.orientation import (vortex_phase, Polychromatic, FocusZ, dipole_M, from_angles, M_to_m6,
+from torch_psf.field import FieldPSF, FieldZernikes                                              # noqa: E402
+from torch_psf.composition import Polychromatic, ZMode  # noqa: E402
+from torch_psf.orientation import (vortex_phase, dipole_M, from_angles, M_to_m6,
                                    basis_images, model_and_jacobian, fit_orientation, angles)  # noqa: E402
 
 REF_PATH = os.path.join(ROOT, 'tests', 'data', 'orientation_composed_ref.json')
@@ -65,7 +62,7 @@ PIXELS = [(7, 7), (5, 9), (10, 4), (3, 3), (11, 12)]
 
 
 def build():
-    """the composed model, the field, per-emitter theta [5, 9] and zcoef_offset [5, nz]"""
+    """the composed model, the field, per-emitter theta [5, 9] and field xy [5, 2]"""
     torch.manual_seed(0)
     v = VectorialPSF(15, pixel_um=0.065, NA=1.47, n_imm=1.518, n_med=1.0, wavelength_um=0.5975, npupil=32,
                      oversample=1, zernike_indices=tuple(range(5, 22)), device="cpu", focus_um=0.0, z_range=(-0.6, 0.6))
@@ -74,18 +71,16 @@ def build():
     vortex_phase(v, charge=1, center=CENTER, levels=0, depth=593.0 / 597.5)
     v.set_zernike({5: 0.013, 6: -0.013, 11: 0.057})
     poly = Polychromatic(v, WAVELENGTHS, WEIGHTS)
-    model = FocusZ(poly, height=0.0, z_range=(-0.6, 0.6))
     field = FieldZernikes(FIELD_NOLL, FIELD_ORDER, norm=FIELD_NORM, coef=COEF, device='cpu')
-    with torch.no_grad():
-        zo_field = field.offsets(torch.tensor(FIELD_XY), v.zidx)
+    model = ZMode(FieldPSF(poly, field), height=0., z_range=(-0.6, 0.6))
     th = torch.zeros(len(EMITTERS), 9)
-    zo = torch.zeros(len(EMITTERS), len(v.zidx))
+    xy = torch.empty(len(EMITTERS), 2)
     for i, (x, y, z, t, ph, g, fi) in enumerate(EMITTERS):
         th[i, :5] = torch.tensor([x, y, z, INTENSITY, BG])
         th[i, 5:8] = from_angles(t, ph)
         th[i, 8] = g
-        zo[i] = zo_field[fi]
-    return model, field, th, zo
+        xy[i] = torch.tensor(FIELD_XY[fi])
+    return model, field, th, xy
 
 
 def image_hash(img):
@@ -95,19 +90,19 @@ def image_hash(img):
 
 
 def compute():
-    model, field, th, zo = build()
+    model, field, th, xy = build()
     with torch.no_grad():
-        mu, _ = model_and_jacobian(model, th, zcoef_offset=zo)
+        mu, _ = model_and_jacobian(model, th, xy=xy)
         mu = mu[:, 0]
-        B = basis_images(model, th[:, :3], zcoef_offset=zo)
+        B = basis_images(model, th[:, :3], xy=xy)
         # the same images through the model's own render path (dipM per emitter) as a cross-check
         M = dipole_M(th[:, 5:8], th[:, 8])
-        direct = INTENSITY * model(th[:, :3], dipM=M, zcoef_offset=zo) + BG
+        direct = INTENSITY * model.render(th[:, :3], dipM=M, xy=xy) + BG
     out = dict(description=__doc__.split('\n\n')[0], emitters=[])
     noisy = torch.poisson(mu, generator=torch.Generator().manual_seed(1234))
     fits = {}
     for name, d in (('noise_free', mu), ('noisy_seed1234', noisy)):
-        r = fit_orientation(model, d, iters=20, z_limits=(-0.5, 0.5), zstarts=1, iso_iters=15, zcoef_offset=zo, batch=8)
+        r = fit_orientation(model, d, iters=20, z_limits=(-0.5, 0.5), zstarts=1, iso_iters=15, xy=xy, batch=8)
         fits[name] = r
     for i in range(len(EMITTERS)):
         img = mu[i].numpy()

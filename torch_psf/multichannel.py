@@ -42,10 +42,10 @@ Units as in PSF: px laterally, um in z, photons.
 """
 import math
 import torch
+from torch_psf.spline import IndexedSplines, SplinePSF
 from torch_psf.psf import PSF
 from torch_psf.fit import lm_poisson, poisson_nll
 from torch_psf.dataset import Dataset
-from torch_psf._dipole import unit_tensors
 from torch_psf.vectorial import VectorialPSF
 
 
@@ -58,7 +58,7 @@ class MultiChannelPSF(PSF):
     intensity_ratio) in their constructor, set extra_params, and implement render_channels; they inherit render,
     expected, mu_and_jacobian, fisher, crlb, fit_theta and fit."""
     extra_params = ()            # names of the extra emitter parameters (theta columns after the backgrounds)
-    accepts_field_xy = False     # render_channels takes field_xy [N, C, 2] (field-dependent channel models)
+    accepts_xy = False     # render_channels takes xy [N, C, 2] (field-dependent channel models)
 
     # ------------------------------------------------------------------ channel geometry
     def _init_channels(self, C, channel_offsets=None, intensity_ratio=None):
@@ -98,10 +98,13 @@ class MultiChannelPSF(PSF):
         if corners is None:
             raise ValueError(f'{type(self).__name__} with channel mappings needs corners [N, C, 2] (the ROI corner of '
                              f'every channel, channel crop px; torch_psf.mapping.channel_rois)')
-        return _as_t(corners, self.dev).reshape(N, self.n_channels, 2)
+        cor = _as_t(corners, self.dev)
+        if not self.mapped and cor.shape == (N, 2):
+            return cor[:, None].expand(N, self.n_channels, 2)
+        return cor.reshape(N, self.n_channels, 2)
 
     def mapped_positions(self, pos, offsets=None, corners=None):
-        """(pos_c [N, C, 3], J [N, C, 2, 2] = d (x_c, y_c) / d (x, y), field_xy [N, C, 2] = the ROI centres in channel
+        """(pos_c [N, C, 3], J [N, C, 2, 2] = d (x_c, y_c) / d (x, y), xy [N, C, 2] = the ROI centres in channel
         coordinates) of reference positions pos [N, 3] (relative to the reference ROI centre) with the mappings"""
         N, C = pos.shape[0], self.n_channels
         cor = self._corners(N, corners)
@@ -182,10 +185,6 @@ class MultiChannelPSF(PSF):
         return torch.cat([pos[:, None, :2] + d, pos[:, None, 2:3].expand(N, C, 1)], 2)
 
     # ------------------------------------------------------------------ the model
-    def dipole_basis(self, pos, **kwargs):
-        """[N,C,6,P,P] in xx, yy, zz, xy, xz, yz order. Off-diagonal basis images include the factor two."""
-        raise NotImplementedError
-
     def render_channels(self, pos_c, extra=None, grad=False, dipM=None):
         """pos_c [N, C, 3] (per-channel x, y px, z um), extra [N, k] or None -> [N, C, P, P]; grad=True: (value,
         d/dx, d/dy, d/dz, d/d extra...) each [N, C, P, P] (channel c with respect to its own position). Without the
@@ -211,30 +210,47 @@ class MultiChannelPSF(PSF):
         r = self.intensity_ratio[None, :, None, None]
         return out * r if torch.is_tensor(out) else tuple(o * r for o in out)
 
-    def render(self, pos, grad=False, offsets=None, corners=None, dipM=None, **extra):
+    def _render(self, pos, grad=False, *, dipM=None, xy=None, phi=None, focus=None, angle=None):
+        kw = {k: v for k, v in dict(focus=focus, angle=angle).items() if v is not None}
+        if self.mapped:
+            corners = None if xy is None else torch.as_tensor(xy, device=self.dev) - (self.roisize - 1) / 2
+        else:
+            corners = None
+            if xy is not None:
+                kw['xy'] = xy
+        return self.render_geometry(pos, grad, corners=corners, dipM=dipM, phi=phi, **kw)
+
+    def render_geometry(self, pos, grad=False, *, offsets=None, corners=None, dipM=None, phi=None, **kw):
         """Normalized channel images [N, C, P, P] at the reference position pos [N, 3] (x, y px, z um), per-spot
         offsets [N, C, 2] (px) or None, and the extra parameters by name (e.g. phi=[N]; default 0), intensity ratio
         included. grad=True: (value, d/dx, d/dy, d/dz, d/d extra...). corners [N, C, 2]: per-channel ROI corners
         (needed with mappings)."""
-        pos = _as_t(pos, self.dev)
-        ex = self._extra(len(pos), None, pos.device, **extra)
+        if phi is not None and 'phi' not in self.extra_params:
+            raise ValueError(f'{type(self).__name__} does not support phi')
+        pos = torch.as_tensor(pos, device=self.dev)
+        ex = self._extra(len(pos), None, pos.device, phi=phi)
         if self.mapped:
-            return self._ratio(self._render_mapped(pos, ex, offsets, corners, grad, dipM))
-        kw = {} if dipM is None else dict(dipM=dipM)
+            return self._ratio(self._render_mapped(pos, ex, offsets, corners, grad, dipM, **kw))
+        if self.accepts_xy and corners is not None and any(self.field_dependent):
+            kw.setdefault('xy', self._corners(len(pos), corners) + (self.roisize - 1) / 2)
+        if dipM is not None:
+            kw['dipM'] = dipM
         return self._ratio(self.render_channels(self.channel_positions(pos, offsets), ex, grad, **kw))
 
     def _render_mapped(self, pos, ex, offsets, corners, grad, dipM=None, **kw):
         """render_channels at the mapped positions; x / y derivatives chained through the mapping Jacobians"""
         pos_c, J, fxy = self.mapped_positions(pos, offsets, corners)
-        if self.accepts_field_xy:
-            kw['field_xy'] = fxy
+        if self.accepts_xy:
+            kw['xy'] = fxy
         if dipM is not None:
             kw['dipM'] = dipM
         out = self.render_channels(pos_c, ex, grad, **kw)
-        if not grad:
-            return out
+        return self._map_derivatives(out, J) if grad else out
+
+    @staticmethod
+    def _map_derivatives(out, J):
         g, gx, gy, gz, *ge = out
-        J = J[..., None, None]                                                    # [N, C, 2, 2, 1, 1]
+        J = J.reshape(*J.shape, *([1] * (gx.ndim - 2)))
         dx = gx * J[:, :, 0, 0] + gy * J[:, :, 1, 0]
         dy = gx * J[:, :, 0, 1] + gy * J[:, :, 1, 1]
         return (g, dx, dy, gz, *ge)
@@ -244,7 +260,10 @@ class MultiChannelPSF(PSF):
         ex = theta[:, 4 + C:] if self.extra_params else None
         if self.mapped:
             return self._ratio(self._render_mapped(theta[:, :3], ex, offsets, corners, grad))
-        return self._ratio(self.render_channels(self.channel_positions(theta[:, :3], offsets), ex, grad))
+        kw = {}
+        if self.accepts_xy and corners is not None and any(self.field_dependent):
+            kw['xy'] = self._corners(len(theta), corners) + (self.roisize - 1) / 2
+        return self._ratio(self.render_channels(self.channel_positions(theta[:, :3], offsets), ex, grad, **kw))
 
     def __call__(self, pos, intensity=None, bg=None, offsets=None, corners=None, **extra):
         return self.forward(pos, intensity, bg, offsets, corners, **extra)
@@ -253,7 +272,7 @@ class MultiChannelPSF(PSF):
         """intensity [N] * render(pos) + bg ([N] or [N, C])."""
         if dipM is not None:
             extra['dipM'] = dipM
-        out = self.render(pos, offsets=offsets, corners=corners, **extra)
+        out = self.render_geometry(pos, offsets=offsets, corners=corners, **extra)
         if intensity is not None:
             out = out * intensity[:, None, None, None]
         if bg is not None:
@@ -488,7 +507,7 @@ class MultiChannelPSF(PSF):
         if torch.is_tensor(var) and var.dim() == 0:
             var = None if float(var) == 0 else var
         mc = None
-        if self.mapped:
+        if self.mapped or (corners is not None and self.accepts_xy and any(self.field_dependent)):
             mc = self._corners(N, corners)
         th, nll = self.fit_theta(rois, theta0, var, offsets, fixed, None, iters, zstarts, extra_starts, batch, mc)
         if N:
@@ -514,7 +533,7 @@ class MultiChannelPSF(PSF):
             pos.append(th[:, 2:3].double() / px)
             crp.append(sd[:, 2:3] / px)
         xm = self.xy_limit - 0.06
-        if N and mc is not None:
+        if N and self.mapped:
             lim = self.mapped_positions(th[:, :3], offsets, mc)[0][..., :2].abs().amax((1, 2)) > xm
         else:
             d = self._offsets(N, offsets).expand(N, C, 2) if N else torch.zeros(0, C, 2, device=self.dev)
@@ -553,7 +572,7 @@ class ChannelsPSF(MultiChannelPSF):
     (torch_psf.field.FieldPSF / TiledSplinePSF): it is evaluated at its ROI centre in channel coordinates (needs the
     corners; without them, at its reference point)."""
     type_name = None             # not a psf.json type (independent channels are a psf.zip: torch_psf.psfzip)
-    accepts_field_xy = True
+    accepts_xy = True
 
     def __init__(self, models, channel_offsets=None, intensity_ratio=None, names=None, mappings=None):
         self.models = list(models)
@@ -569,6 +588,14 @@ class ChannelsPSF(MultiChannelPSF):
         self.dev = self.models[0].dev
         self.pixel_um = getattr(self.models[0], 'pixel_um', None)
         self.names = [f'ch{c}' for c in range(len(self.models))] if names is None else list(names)
+        from torch_psf.field import TiledSplinePSF
+        self._tiled_channels = (any(isinstance(m, TiledSplinePSF) for m in self.models) and
+                                all(isinstance(m, (SplinePSF, TiledSplinePSF)) for m in self.models))
+        self._tile_models = {}
+        self._tile_bank = None
+        self.indexed = IndexedSplines(self.models, 'channel') if IndexedSplines.compatible(self.models) else None
+        if self.indexed is not None:
+            self.models = self.indexed.members
         self._init_channels(len(self.models), channel_offsets, intensity_ratio)
         if mappings is not None:
             self.set_mappings(mappings)
@@ -598,61 +625,194 @@ class ChannelsPSF(MultiChannelPSF):
     @property
     def field_dependent(self):
         """per channel: True for a field-dependent model (FieldPSF / TiledSplinePSF)"""
-        return [hasattr(m, 'field_block') for m in self.models]
+        return [getattr(m, 'uses_field_xy', False) for m in self.models]
 
-    def dipole_basis(self, pos, offsets=None, corners=None):
-        """[N,C,6,P,P] for xx, yy, zz, xy, xz, yz, with both symmetric terms in each off-diagonal image.
-        Reference positions include intensity ratios as in render. Per-channel positions give the raw render_channels basis."""
-        pos = _as_t(pos, self.dev)
+    def _dipole_basis(self, pos, grad=False, *, xy=None, focus=None, angle=None):
         raw = pos.ndim == 3
-        pc = pos if raw else self.channel_positions(pos, offsets, corners)
-        field_xy = None
-        if corners is not None and (raw or self.mapped):
-            field_xy = _as_t(corners, self.dev) + (self.roisize - 1) / 2
-        images = []
-        for c, model in enumerate(self.models):
-            p = pc[:, c]
-            kw = dict(xy=field_xy[:, c]) if field_xy is not None and self.field_dependent[c] else {}
-            if hasattr(model, 'dipole_basis'):
-                if isinstance(model, VectorialPSF):
-                    kw['focus'] = model.focus_um
-                images.append(model.dipole_basis(p, **kw))
+        corners = xy - (self.roisize - 1) / 2 if self.mapped and xy is not None else None
+        jacobian = None
+        if self.mapped and not raw:
+            pc, jacobian, xy = self.mapped_positions(pos, corners=corners)
+        else:
+            pc = pos if raw else self.channel_positions(pos)
+        images = self.render_channels(pc, grad=grad, xy=xy, focus=focus, angle=angle, basis=True)
+        if grad and jacobian is not None:
+            images = self._map_derivatives(images, jacobian)
+        if raw:
+            return images
+        ratio = self.intensity_ratio[None, :, None, None, None]
+        return tuple(v * ratio for v in images) if grad else images * ratio
+
+    def _render_tile_channels(self, pos_c, xy, grad, dipM, angle, basis):
+        """Gather all channel, tile and response indices on a common grid in one evaluation."""
+        n, c = pos_c.shape[:2]
+        ids, weights = [], []
+        for k, model in enumerate(self.models):
+            if xy is not None and hasattr(model, 'tile_weights'):
+                indices, w = model.tile_weights(xy[:, k] if xy.ndim == 3 else xy)
             else:
-                images.append(torch.stack([model.render(p, dipM=M, **kw) for M in unit_tensors(self.dev)], 1))
-        basis = torch.stack(images, 1)
-        return basis if raw else basis * self.intensity_ratio[None, :, None, None, None]
+                indices = torch.full((n, 1), -1, device=self.dev, dtype=torch.long)
+                w = pos_c.new_ones(n, 1)
+            # Include the reference table for an empty batch so output shape and dtype are preserved.
+            rows = torch.empty_like(indices)
+            for tile in indices.unique().tolist() or [-1]:
+                key = (k, tile)
+                if key not in self._tile_models:
+                    if isinstance(model, SplinePSF):
+                        table = model
+                    else:
+                        table = model.reference_spline() if tile == -1 else model.spline(tile)
+                    self._tile_models[key] = (len(self._tile_models), table)
+                rows[indices == tile] = self._tile_models[key][0]
+            ids.append(rows)
+            weights.append(w)
+        if self._tile_bank is None or len(self._tile_bank.members) != len(self._tile_models):
+            models = [m for _, m in self._tile_models.values()]
+            if not IndexedSplines.compatible(models):
+                self._tiled_channels = False
+                self._tile_models.clear()
+                self._tile_bank = None
+                return None
+            self._tile_bank = IndexedSplines(models, 'tile')
+        # Channels may mix nearest and bilinear. Pad with valid zero-weight entries.
+        width = max(w.shape[1] for w in weights)
+        member = torch.stack([torch.cat((r, r[:, :1].expand(-1, width-r.shape[1])), 1) for r in ids], 1)
+        weight = torch.stack([torch.nn.functional.pad(w, (0, width-w.shape[1])) for w in weights], 1)
+        pos = pos_c[:, :, None].expand(-1, -1, width, -1).reshape(n, c*width, 3)
+        images = self._tile_bank.evaluate(pos, member.reshape(n, c*width), grad, dipM=dipM, angle=angle, basis=basis)
+        def blend(v):
+            v = v.unflatten(1, (c, width))
+            return (v * weight.reshape(*weight.shape, *([1] * (v.ndim-3)))).sum(2)
+        return tuple(blend(v) for v in images) if grad else blend(images)
 
-    def render_channels(self, pos_c, extra=None, grad=False, field_xy=None, dipM=None):
+    def _shared_optical(self, pos_c, grad, kwargs, method, focus, xy):
+        """Resolve stage/field coordinates before batching channels backed by the same optics."""
+        from torch_psf.composition import ZMode
+        from torch_psf.field import FieldPSF, TiledSplinePSF
+        from torch_psf.psf import render_with_grad
+
+        stages = []
+        for model in self.models:
+            axial = model if isinstance(model, ZMode) else None
+            model = axial.base if axial is not None else model
+            field = model if isinstance(model, FieldPSF) and not isinstance(model, TiledSplinePSF) else None
+            base = field.base if field is not None else model
+            if not isinstance(base, VectorialPSF) or (stages and base is not stages[0][0]):
+                return None
+            stages.append((base, axial, field))
+
+        n, c = pos_c.shape[:2]
+        base = stages[0][0]
+        # A stored per-emitter response already has an N-sized batch axis. Its native
+        # renderer handles that axis independently in each channel.
+        if any(value is not None and torch.as_tensor(value).ndim == dim for value, dim in
+               ((base.blur, 2), (base.dipM, 3), (base.dipw, 2))):
+            return None
+        if 'angle' in kwargs and torch.as_tensor(kwargs['angle']).ndim:
+            kwargs = dict(kwargs, angle=torch.as_tensor(kwargs['angle']).repeat_interleave(c))
+        if 'dipM' in kwargs and torch.as_tensor(kwargs['dipM']).ndim == 3:
+            kwargs = dict(kwargs, dipM=torch.as_tensor(kwargs['dipM']).repeat_interleave(c, 0))
+        if xy is not None and any(field is not None for _, _, field in stages):
+            offsets = [field.offsets(xy[:, k] if xy.ndim == 3 else xy) if field is not None
+                       else base.zcoef.new_zeros(n, len(base.zidx)) for k, (_, _, field) in enumerate(stages)]
+            base = base.with_field_offset(torch.stack(offsets, 1).flatten(0, 1))
+        render = getattr(base, method)
+        if not any(axial is not None for _, axial, _ in stages):
+            f = None if focus is None else focus.reshape(-1)
+            out = render(pos_c.reshape(-1, 3), grad, focus=f, **kwargs)
+            return tuple(v.unflatten(0, (n, c)) for v in out) if grad else out.unflatten(0, (n, c))
+
+        def sample(p):
+            heights, foci = [], []
+            for k, (_, axial, _) in enumerate(stages):
+                z = p[:, k, 2]
+                f = None if focus is None else focus[:, k]
+                if axial is not None:
+                    z, f = axial.coordinates(z, f)
+                elif f is None:
+                    f = torch.full_like(z, base.focus_um)
+                heights.append(z)
+                foci.append(f)
+            pc = torch.cat((p[..., :2], torch.stack(heights, 1)[..., None]), -1)
+            return render(pc.reshape(-1, 3), focus=torch.stack(foci, 1).reshape(-1), **kwargs).unflatten(0, (n, c))
+        return render_with_grad(sample, pos_c, grad)
+
+    def render_channels(self, pos_c, extra=None, grad=False, xy=None, dipM=None, focus=None, angle=None, basis=False):
+        n, c = pos_c.shape[:2]
+        if xy is not None:
+            xy = torch.as_tensor(xy, device=pos_c.device)
+        if self.indexed is not None:
+            if focus is not None or xy is not None and not self.mapped:
+                raise ValueError('spline channels accept neither focus nor field xy')
+            ids = torch.arange(c, device=pos_c.device)
+            return self.indexed.evaluate(pos_c, ids, grad, dipM=dipM, angle=angle, basis=basis)
+        if self._tiled_channels:
+            if focus is not None:
+                raise ValueError('focus cannot change after tabulation')
+            images = self._render_tile_channels(pos_c, xy, grad, dipM, angle, basis)
+            if images is not None:
+                return images
         fd = self.field_dependent
-        kwargs = {} if dipM is None else dict(dipM=dipM)
-        outs = [m.render(pos_c[:, c], grad, xy=field_xy[:, c], **kwargs) if (fd[c] and field_xy is not None)
-                else m.render(pos_c[:, c], grad, **kwargs) for c, m in enumerate(self.models)]
-        if not grad:
-            return torch.stack(outs, 1)
-        return tuple(torch.stack([o[k] for o in outs], 1) for k in range(4))
+        if xy is not None and not any(fd) and not self.mapped:
+            raise ValueError('xy requires field-dependent channels or channel mappings')
+        kwargs = {k: v for k, v in dict(dipM=dipM, angle=angle).items() if v is not None}
+        if focus is not None:
+            f = torch.as_tensor(focus, device=pos_c.device)
+            focus = f[:, None] if f.ndim == 1 else f
+            focus = focus.expand(n, c)
+        method = 'dipole_basis' if basis else 'render'
+        out = self._shared_optical(pos_c, grad, kwargs, method, focus, xy)
+        if out is not None:
+            return out
+        outs = []
+        for k, m in enumerate(self.models):
+            kw = dict(kwargs)
+            if focus is not None:
+                kw['focus'] = focus[:, k]
+            if xy is not None and fd[k]:
+                kw['xy'] = xy[:, k] if xy.ndim == 3 else xy
+            outs.append(getattr(m, method)(pos_c[:, k], grad, **kw))
+        return tuple(torch.stack(v, 1) for v in zip(*outs)) if grad else torch.stack(outs, 1)
 
-    def to(self, device):
+    def to(self, device=None, dtype=None):
+        self._tile_models.clear()
+        self._tile_bank = None
         for m in self.models:
-            m.to(device)
+            m.to(device=device, dtype=dtype)
+        if self.indexed is not None:
+            self.indexed = IndexedSplines(self.models, 'channel')
+            self.models = self.indexed.members
         self.dev = self.models[0].dev
-        self.channel_offsets = self.channel_offsets.to(self.dev)
-        self.intensity_ratio = self.intensity_ratio.to(self.dev)
+        self.channel_offsets = self.channel_offsets.to(device=self.dev, dtype=dtype)
+        self.intensity_ratio = self.intensity_ratio.to(device=self.dev, dtype=dtype)
         if self.mapped:
             self.set_mappings(self.mappings)
         return self
+
+    def map_models(self, fn):
+        """Apply an optical composition once per shared model, preserving acquisition geometry."""
+        mapped = {}
+        for m in self.models:
+            if id(m) not in mapped:
+                mapped[id(m)] = fn(m)
+        view = ChannelsPSF([mapped[id(m)] for m in self.models], names=self.names, mappings=self.mappings)
+        view.channel_offsets, view.intensity_ratio = self.channel_offsets, self.intensity_ratio
+        return view
+
+    def at_wavelength(self, wavelength):
+        return self.map_models(lambda m: m.at_wavelength(wavelength))
 
     def _maps_copy(self):
         return None if not self.mapped else [m.copy() for m in self.mappings]
 
     def resized(self, roisize):
-        return ChannelsPSF([m.resized(roisize) for m in self.models], self.channel_offsets, self.intensity_ratio,
-                           self.names, self._maps_copy())
+        return self.map_models(lambda m: m.resized(roisize))
 
-    def to_spline(self, roisize=None, z_range=None, **kw):
+    def to_spline(self, roisize=None, z_range=None, **grid):
         """ChannelsPSF of the channel models' to_spline (the same offsets, ratios and mappings; the offsets stay a
         channel property, they are not baked into the tables). A FieldPSF channel becomes the spline of its reference
         point (use to_tiled per channel for the field dependence)."""
-        return ChannelsPSF([m.to_spline(roisize, z_range, **kw) for m in self.models], self.channel_offsets,
+        return ChannelsPSF([m.to_spline(roisize, z_range, **grid) for m in self.models], self.channel_offsets,
                            self.intensity_ratio, self.names, self._maps_copy())
 
     def to_tiled(self, tile=128, roisize=None, z_range=None, **grid):

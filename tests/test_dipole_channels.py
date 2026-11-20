@@ -47,10 +47,11 @@ def test_full_dipoles(kind, mode):
     pc = model.channel_positions(pos)
     ex = phase[:, None] if kind == 'fourpi' else None
     check_image(combine(model.dipole_basis(pc, **kw), M), model.render_channels(pc, ex, dipM=M))
-    forward_kw = dict(phi_extra=phase) if kind == 'fourpi' else {}
+    forward_kw = dict(phi=phase) if kind == 'fourpi' else {}
     check_image(model.forward(pos, dipM=M, **forward_kw), actual)
     if kind == 'fourpi':
-        check_image(model(pos, M=M, **forward_kw), actual)
+        with pytest.raises(TypeError, match="M"):
+            model(pos, M=M, **forward_kw)
     M.requires_grad_()
     probe = torch.randn_like(actual)
     loss = lambda m: (probe * model.render(pos, dipM=m, **kw)).sum()
@@ -161,12 +162,12 @@ def test_channels_use_native_basis_when_available(monkeypatch):
     expected = model.dipole_basis(pos)
     calls = []
     for c, channel in enumerate(model.models):
-        def native(p, focus, c=c):
+        def native(p, grad=False, *, focus=None, c=c):
             calls.append((c, focus))
             return expected[:, c] / model.intensity_ratio[c]
         monkeypatch.setattr(channel, 'dipole_basis', native, raising=False)
     check_image(model.dipole_basis(pos).flatten(1, 2), expected.flatten(1, 2))
-    assert calls == [(c, v.focus_um) for c, v in enumerate(model.models)]
+    assert calls == [(0, None), (1, None)]
 
 
 def test_fourpi_dipole_rebuild(tmp_path):

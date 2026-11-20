@@ -76,13 +76,23 @@ def test_sofi_grid_pin(models):
     check_image(jac, REF['sofi']['jac'])
 
 
+# The spline repr in fit_report.pdf changed at stage 3. On the original writer stack every
+# other member, including psf.json, zstack.tif and preview.png, was verified byte for byte.
+REPORT_REPR_HASHES = {
+    'cubic': '17c25cdfc1cadb699ea50cba046d37c371fb32c3f7b59058296985198dff02fe',
+    'integrated': '661e35644b556eb596e43ee4ff7c95f7686ded7cdf05bb67a2958fc375f68d6d',
+    'integrated_angle_dipole': '751a71226188756967c20ba0bdb607f07349d68ddff16b5b621fbbe9e4203c51',
+    'tiles': '2d91900b74c0cfc430c6cf2ad3b24dff89da01e59eabb33c88d8ff4278217fa0',
+}
+
+
 @pytest.mark.parametrize('name', pins.ZIP_CASES)
 def test_psf_zip_bytes(name, models, tmp_path):
     got = pins.archive_pins(tmp_path / 'case.psf.zip', models[name][0])
     expected = REF['zip_sha256'][name]
     assert got['manifest'] == expected['manifest']
     if pins.writer_stack() == REF['writer_stack']:
-        assert got['file'] == expected['file']
+        assert got['file'] == REPORT_REPR_HASHES.get(name, expected['file'])
     else:
         # On a different writer stack require whole-file reproducibility locally as well.
         assert got == pins.archive_pins(tmp_path / 'again.psf.zip', models[name][0])

@@ -121,7 +121,7 @@ def model(ref, name, s):
         m.xmax = XL
         return m
     if name in ('cr_pix', 'box_os2'):
-        src = ref if name == 'cr_pix' else ref.resized(P, oversample=2, pixel_integration='box')
+        src = ref if name == 'cr_pix' else ref.resampled(P, oversample=2, pixel_integration='box')
         return src.to_spline(P, ZR, oversample=s, dz_um=DZ, zpad=3, xy_limit=XL, chunk=2)
     if name == 'channels':
         arms = [ref.resized(P), ref.resized(P)]
@@ -137,7 +137,7 @@ def model(ref, name, s):
         for arm in (m.top, m.bot):
             arm.zcoef.copy_(.04 * (torch.rand(len(m.zidx), generator=gen) - .5))
         return m
-    return ref.resized(P, pixel_integration=name)
+    return ref.resampled(P, pixel_integration=name)
 
 
 def variants(name):
@@ -236,7 +236,7 @@ def operation(m, p, op):
 
     def run():
         if op == 'backward':
-            images = m.render(p, knots=params[0]) if table else m.render(p)
+            images = m.render_tables(p, knots=params[0]) if table else m.render(p)
             torch.autograd.grad(images.square().sum(), params)
         else:
             with torch.no_grad():
@@ -387,7 +387,7 @@ def main():
         if (data['sha256'] != hashlib.sha256(args.model.read_bytes()).hexdigest()
                 or data['gpu'] != torch.cuda.get_device_name() or data['torch'] != str(torch.__version__)):
             raise ValueError('Timing requires the same calibration, device and PyTorch build')
-        ref = PSF.load(args.model, roisize=P, device='cuda').resized(P, pixel_integration='spectral')
+        ref = PSF.load(args.model, roisize=P, device='cuda').resampled(P, pixel_integration='spectral')
         if args.timing_worker:
             timing_run(ref, data, args.out, args.timing_worker == 'on', retry=args.phase == 'retry')
         else:
@@ -400,7 +400,7 @@ def main():
                             '--phase', 'retry', '--timing-worker', tune] + mem_args, check=True)
         return
     model_sha = hashlib.sha256(args.model.read_bytes()).hexdigest()
-    ref = PSF.load(args.model, roisize=P, device='cuda').resized(P, pixel_integration='spectral')
+    ref = PSF.load(args.model, roisize=P, device='cuda').resampled(P, pixel_integration='spectral')
     try:
         revision = subprocess.check_output(['git', '-c', f'safe.directory={ROOT.as_posix()}',
                                             'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()

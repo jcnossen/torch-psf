@@ -263,7 +263,7 @@ if A.method == 'e':
             tot = 0.0
             for s_ in range(0, len(dtr), 20000):
                 t = th[s_:s_ + 20000]
-                mu = (t[:, 3, None, None] * spl.render(t[:, :3], knots=Kp) + t[:, 4, None, None]).clamp_min(1e-4)
+                mu = (t[:, 3, None, None] * spl.render_tables(t[:, :3], knots=Kp) + t[:, 4, None, None]).clamp_min(1e-4)
                 l = (mu - dtr[s_:s_ + 20000] * torch.log(mu)).double().sum()
                 l.backward()
                 tot += float(l)

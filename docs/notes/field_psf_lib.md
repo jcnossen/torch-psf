@@ -84,12 +84,12 @@ io.save_zip('psf.zip', psf); PSF.load('psf.zip')                  # FieldPSF aga
   rejection) and adds the field model (as a tiled spline, `score_tile` px) to the held-out candidates; it returns the
   FieldPSF when it wins. The stage-1 recommendations are in the library: `MatchedFilterDetector` (detection for
   engineered PSFs; `detector=`) and `zstarts=` (used by every multi-start localization of the estimator).
-- **Dense beads** (`fit_dense_beads(fit=(..., 'field'), field=, field_xy=)`, `DenseBeadEstimator(field=)`): every bead
+- **Dense beads** (`fit_dense_beads(fit=(..., 'field'), field=, xy=)`, `DenseBeadEstimator(field=)`): every bead
   is rendered with the Zernikes of its position (all its planes), the polynomial coefficients are an Adam group of the
   PSF (held during warmup), the prior is added to the loss. The estimator runs the global fit (NA / apod as
   configured) first and then the field fit from it (base, polynomial and NA / apod jointly), excluding the clusters
   the global fit rejected; both are scored on the held-out clusters by the same refit.
-- **Phase diversity** (`fit_phase_diversity(field=, field_xy=)`, `PhaseDiversityEstimator(field=)`): every patch gets
+- **Phase diversity** (`fit_phase_diversity(field=, xy=)`, `PhaseDiversityEstimator(field=)`): every patch gets
   the Zernikes at its centre (`VectorialStack(zcoef_offset)`), fitted jointly over all patches (Poisson stage from the
   global pupil, the PSF held for `field_warmup` iterations); held-out patches scored with both.
 - **Held-out comparison**: built into each estimator (`report['heldout']` / `report['field']`, `report['chosen']`),

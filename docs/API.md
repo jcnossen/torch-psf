@@ -41,8 +41,8 @@ PSF (abstract; torch_psf.psf)                 render(pos, grad=False)           
 ├── AstigmaticGaussianPSF(roisize, sigma_px, gamma_um, d_um, z_range)  3D
 ├── VectorialPSF(roisize, pixel_um, NA, n_imm, n_med, wavelength_um, zernike_indices, npupil, oversample,
 │                focus_um, z_range, pixel_integration='box' | 'spectral' | 'gauss_legendre' | 'point')  (also a torch.nn.Module: forward(pos, focus, ...), set_zernike, resized,
-│                from_optics, optics, to_spline(..., pos_fn))
-├── SplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [T, nz, nv, nu]; render(..., knots=);
+│                from_optics, optics, to_spline(...))
+├── SplinePSF(roisize, z_range, oversample, dz_um, zpad, xy_limit)  knots [T, nz, nv, nu]; render_tables(..., knots=);
 │                to_spline, sample, vjp_vectorial, from_zstack
 ├── FieldPSF(base, field), TiledSplinePSF(field_psf, tile, ...)   field-dependent (see Field-dependent PSFs)
 └── MultiChannelPSF: ChannelsPSF, FourPiPSF, FourPiSplinePSF   images [N, C, P, P] (see Multi-channel PSFs)
@@ -56,6 +56,40 @@ Estimator (torch_psf.estimators)             report (dict), history (list), data
                     detector=None, zstarts=5, field=None, ...)
       .estimate(movie, frames=None) -> VectorialPSF (or the refined SplinePSF if it wins on held-out spots)
 ```
+
+### Rendering and optical compositions
+
+All models use `render(pos, grad=False, *, dipM=None, phi=None, xy=None, focus=None, angle=None)`.
+Positions are `[N,3]` in lateral pixels and axial micrometres. The result is `[N,P,P]` for one channel
+and `[N,C,P,P]` for a multichannel model. With `grad=True`, the tuple contains the image followed by
+its x, y and z derivatives. Coupled phase models also return the phase derivative. Pass only options
+supported by the model. `dipole_basis` accepts the same keyword interface and returns the six tensor
+responses before contraction. `basis(pos, **options)` and `weights(pos, **options)` expose compatible
+`[N,C,K,P,P]` and `[N,C,K]` arrays. Sum their products over K. Dipole off-diagonal images include the
+factor of two.
+
+```python
+from torch_psf import FieldPSF, Polychromatic, ZMode
+
+spectrum = Polychromatic(optics, wavelengths_um=[.64, .72], weights=[.3, .7])
+field_model = FieldPSF(spectrum, field_zernikes)
+scan = ZMode(field_model, 'stage', height=.02, scale=.9)
+images = scan.render(pos, xy=field_positions, dipM=tensors)
+table = scan.to_spline(z_range=(-.3, .3), components='dipole')  # at the field reference
+tiled = field_model.to_tiled(tile=128, blend='bilinear', components='dipole')
+```
+
+`ZMode(model, 'emitter', focus=f)` varies height at fixed focus. In stage mode the emitter stays at
+`height` and the optical focus is `f - pos[:,2] / scale`. A coherent stage scan uses the signed
+displacement of each arm and its calibrated `depth_um`. Each wavelength in `Polychromatic` uses
+the wavelength-dependent wavevectors, pupil phase in waves scaled by the reference wavelength divided by the sampled wavelength, and its own intensity
+normalization. A spline of this model contains the spectrum average. Its table count is independent
+of the number of wavelengths.
+
+Independent spline channels on a shared grid use a channel index into one coefficient bank.
+A shared optical model can take `focus` per emitter or per emitter and channel. For mapped channels
+pass the ROI **centres** as `xy[N,C,2]` to render, or use `render_geometry(..., corners=..., offsets=...)`
+for explicit acquisition geometry. Fitting continues to accept ROI corners.
 
 VectorialPSF forms the emitter pupil, transforms its six fields onto the image grid, and contracts the
 dipole tensor or returns its six basis images. FourPiPSF uses the same arm transforms and combines their
@@ -78,7 +112,7 @@ comparison (`compare_heldout` of start / vectorial / refined), `z_scale` of the 
 PSF
 └── MultiChannelPSF (abstract)               render_channels(pos_c [N, C, 3], extra [N, k] | None, grad=False)
       n_channels, extra_params, n_params,          -> [N, C, P, P]   [the only abstract method]
-      param_names, channel_offsets [C, 2],   render(pos, grad=False, offsets=None, **extra), expected(theta, offsets)
+      param_names, channel_offsets [C, 2],   render_geometry(pos, grad=False, offsets=None, **extra), expected(theta, offsets)
       intensity_ratio [C],                   mu_and_jacobian(theta, offsets) -> (mu, J [N, 4 + C + k, C, P, P])
       set_channel_offsets(v, trainable),     fisher / covariance / crlb(theta, var, offsets, fixed)
       channel_positions(pos, offsets)        fit_theta(rois [N, C, P, P], theta0, var, offsets, fixed, ...) -> (theta, nll)
@@ -88,7 +122,7 @@ PSF
     ├── ChannelsPSF(models, channel_offsets=None, intensity_ratio=None, names=None, mappings=None)   independent
     │       channels (models may be FieldPSF / TiledSplinePSF); to_tiled(tile, ...)
     ├── FourPiPSF (also a torch.nn.Module)                   extra_params ('phi',)
-    └── FourPiSplinePSF                                      extra_params ('phi',); render(..., knots=)
+    └── FourPiSplinePSF                                      extra_params ('phi',); render_tables(..., knots=)
 ```
 
 - **theta** = `[x, y, z, I, bg_0 .. bg_{C-1}, *extra]` (4 + C + k columns): x, y (px) of the emitter relative to the
@@ -114,8 +148,7 @@ PSF
   each arm's frame), computed with one pupil evaluation per spot and one image transform per channel; with all
   offsets zero all channels share one evaluation. `to_spline` bakes the offsets into the tables (the spline's own
   offsets are zero); `FourPiSplinePSF.channel_offsets` shift each channel's table evaluation instead (stored in its
-  torch-psf json, not in psf.zip, which refuses them). Besides the multi-channel interface: `render(pos, grad, phi,
-  M)`, `forward(pos, M, phi_extra, intensity, bg)`; `expected(theta)` takes the multi-channel theta
+  torch-psf json, not in psf.zip, which refuses them). The render and forward calls accept `phi=phase, dipM=tensor`; `expected(theta)` takes the multi-channel theta
   [N, 4 + C + 1].
 - **psf.zip**: `PSFZip.read(path).multichannel()` = the coupled model, or a `ChannelsPSF` of the channel models with
   their `intensity_ratio` (offsets zero; the channel `mapping` gives per-spot offsets); `multichannel(field=True,
@@ -251,8 +284,8 @@ image, dx, dy, dz = spline.for_angle(1).render(pos, grad=True)
   builds default to `sep`. Historical pixel-sample builds and files retain convolution for numerical compatibility.
 - A `FourPiSplinePSF` is a multichannel view over `.table`, a single spline with phase and channel axes
   and an optional dipole axis. The phase weights are `(1, cos(phi), -sin(phi))`.
-- `SplinePSF.from_zstack(...)` wraps measured planes. For optical stacks, `pos_fn(z)` supplies emitter height
-  and focus for each plane. `sample(resized_optics, pos_fn, differentiable=True)` retains the optical graph.
+- `SplinePSF.from_zstack(...)` wraps measured planes. For optical stacks, `ZMode(resized_optics, 'stage', height=h, scale=s)` supplies the
+  emitter height and focus for each plane. `sample(model, differentiable=True)` retains the optical graph.
   `vjp_vectorial(...)` pulls a coefficient gradient through the prefilter and the optical sampler in z chunks.
 
 ## PSF estimation (`torch_psf.estimation`; used by `ZStackEstimator`, `InSituEstimator`)
@@ -298,7 +331,7 @@ FieldZernikes(noll, order=1, norm=(cx, cy, sx, sy), ref=None, prior_sd=0.05, cla
     penalty(), to_block(waves_at_ref), from_block(d) -> (field, const)
 FieldPSF(base: VectorialPSF, field)                   PSF; render(pos, grad=False, xy=None), at(x, y),
     zernikes_at(xy), fit(rois, corners=, xy=), bind(xy), to_tiled(tile, extent, roisize, z_range, **grid)
-TiledSplinePSF(field_psf, tile, extent, roisize, z_range, lazy=True, **grid)   one SplinePSF per tile
+TiledSplinePSF(field_psf, tile, extent, roisize, z_range, lazy=True, blend="nearest", **grid)
     render(pos, grad, xy), tile_index(xy), spline(t), fit(rois, corners=, xy=)
 ```
 - W_j(x, y) = W_j(ref) + sum_{1 <= i + k <= o_j} c_{j,ik} (u^i v^k - u_ref^i v_ref^k), u = clip((x - cx) / sx, -1, 1),
@@ -313,14 +346,14 @@ TiledSplinePSF(field_psf, tile, extent, roisize, z_range, lazy=True, **grid)   o
   `PSF.load` / `io.load(path, channel=)` / `PSFZip.read(path).psf` (single channel) / `Channel.psf` return
   FieldPSF (vectorial channel) or TiledSplinePSF (spline channel with a vectorial source).
 - Localization: `FieldPSF.fit` evaluates each ROI at its own position (corners + (P - 1) / 2, or `xy`);
-  `TiledSplinePSF.fit` uses the spline of the tile that holds the ROI centre (input order kept). `PSF.localize` of
+  `TiledSplinePSF.fit` samples the table at the fixed field coordinates of each ROI. `PSF.localize` of
   either works through `fit`.
 - Estimation: `estimation.fit_field_knots(spline, rois, xy, vectorial, field, tile=256, extent=None, iters=60,
   lr=2e-3, lr_field=None, zstarts=5, var=None, fit_base=True, min_spots=30)`: per tile (tiles with fewer than
   min_spots spots merged into the nearest one) a knot build at base + field(c_t), c_t = the tile's mean spot
   position, localization, knot gradient and VJP g_t; d/d base = sum g_t, d/d coef = sum g_t d field(c_t) / d coef
-  + the prior; Adam. `fit_dense_beads(..., fit=(..., 'field'), field=, field_xy=)`, `fit_phase_diversity(...,
-  field=, field_xy=)`: every bead / patch at its own polynomial Zernikes. Estimators: `field=` (dict: modes, order,
+  + the prior; Adam. `fit_dense_beads(..., fit=(..., 'field'), field=, xy=)`, `fit_phase_diversity(...,
+  field=, xy=)`: every bead / patch at its own polynomial Zernikes. Estimators: `field=` (dict: modes, order,
   prior_sd, margin, iters, lr, tile, score_tile; `field.field_from_spec`) in InSituEstimator, DenseBeadEstimator,
   PhaseDiversityEstimator: a field fit started from the global fit, scored on the held-out data against it
   (`report['field']`), returned when it wins.

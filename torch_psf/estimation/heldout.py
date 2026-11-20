@@ -119,7 +119,7 @@ def heldout_tracks(tracks, psfs, readnoise_e=1.0, zmax_um=0.2, groups=None, ngro
     as_list = lambda p: list(p) if isinstance(p, (list, tuple)) else [p]
     psfs = as_list(psfs)
     if pixel_integration is not None:
-        psfs = [p.resized(p.roisize, pixel_integration=pixel_integration) if hasattr(p, 'pixel_integration') else p
+        psfs = [p.resampled(p.roisize, pixel_integration=pixel_integration) if hasattr(p, 'resampled') else p
                 for p in psfs]
     refit = psfs if refit_psfs is None else as_list(refit_psfs)
     assert len(refit) == len(psfs)

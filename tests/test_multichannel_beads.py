@@ -130,4 +130,4 @@ def test_estimator_two_channels_zip(tmp_path):
     cor = torch.tensor([[[30.0, 40.0], [33.0, 38.0]]], device=dev)
     pos = torch.tensor([[0.3, -0.2, 0.0]], device=dev)
     with torch.no_grad():
-        assert torch.allclose(psf.render(pos, corners=cor), back.render(pos, corners=cor), atol=1e-6)
+        assert torch.allclose(psf.render_geometry(pos, corners=cor), back.render_geometry(pos, corners=cor), atol=1e-6)

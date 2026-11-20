@@ -104,7 +104,7 @@ def initial_theta(d, z=0.0, bg_quantile=0.2, min_photons=50.0):
 
 
 @torch.no_grad()
-def localize(psf, rois, theta0=None, var=None, iters=30, zstarts=5, batch=3000, fixed=(), weight=None):
+def localize(psf, rois, theta0=None, var=None, iters=30, zstarts=5, batch=3000, fixed=(), weight=None, z_limits=None):
     """Maximum-likelihood theta = (x px, y px, z um, photons, bg photons / px) per ROI with Levenberg-Marquardt.
 
     psf: any PSF model (render(pos, grad=True), xy_limit, z_range). rois [N, P, P]: photons (e-), P = psf.roisize;
@@ -118,10 +118,11 @@ def localize(psf, rois, theta0=None, var=None, iters=30, zstarts=5, batch=3000, 
     if is2d:
         fixed = tuple(sorted(set(fixed) | {2}))
     if th0 is None:
-        zl = [0.0] if is2d else [float(z) for z in torch.linspace(psf.z_range[0], psf.z_range[1], zstarts + 2)[1:-1]]
+        zr = psf.z_range if z_limits is None else z_limits
+        zl = [0.0] if is2d else torch.linspace(*zr, zstarts + 2)[1:-1].tolist()
         best, bnll = None, None
         for z in zl:
-            th, nll = localize(psf, d, initial_theta(d, z), var, iters, batch=nb, fixed=fixed, weight=weight)
+            th, nll = localize(psf, d, initial_theta(d, z), var, iters, batch=nb, fixed=fixed, weight=weight, z_limits=z_limits)
             if best is None:
                 best, bnll = th, nll
             else:
@@ -133,7 +134,7 @@ def localize(psf, rois, theta0=None, var=None, iters=30, zstarts=5, batch=3000, 
     sl = lambda a, s: a if (a is None or not torch.is_tensor(a) or a.dim() == 0 or len(a) != len(d)) else a[s:s + nb]
     for s in range(0, len(d), nb):
         th, nll = lm_poisson(lambda t: model_and_jacobian(psf, t), d[s:s + nb], th0[s:s + nb].to(dtype),
-                             var=sl(var, s), weight=sl(weight, s), clamp=lambda t: clamp_theta(t, psf),
+                             var=sl(var, s), weight=sl(weight, s), clamp=lambda t: clamp_theta(t, psf, z_limits=z_limits),
                              fixed=fixed, iters=iters)
         out.append(th); onll.append(nll)
     return torch.cat(out), torch.cat(onll)

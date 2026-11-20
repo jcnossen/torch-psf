@@ -93,7 +93,7 @@ print('localized', n, 'median |x - truth| etc. not checked here')
 from torch_psf.simulate import simulate_reference_movie
 from torch_psf.estimators import InSituEstimator
 from torch_psf.estimation import knot_gradient, split_checkerboard, fit_zernike_knots
-from torch_psf.spline import emitter_height_pos_fn
+from torch_psf.composition import ZMode
 INS = dict(T=1500, H=96, W=96, emitters_per_frame=8.0, seed=5)
 r = simulate_reference_movie('astigmatic', device=dev, **INS)
 tifffile.imwrite(os.path.join(a.out, 'insitu_movie.tif'), r['movie_adu'])
@@ -118,7 +118,7 @@ print('heldout', rep.get('heldout'), 'z_scale', rep.get('z_scale'), 'at_limit', 
 # the gradient at the start: spline grid of InSituEstimator (zpad 5), theta by localize, knot gradient, VJP
 spl5 = SplinePSF(15, (0.0, 0.8), oversample=2, dz_um=0.04, zpad=5, xy_limit=3.0, device=dev)
 big = start.resized(spl5.Pl)
-pf = emitter_height_pos_fn(0.4)
+pf = ZMode(big, 'emitter', focus=.4).coordinates
 spl5.knots = spl5.sample(big, pf, chunk=spl5.nz)
 sp = extract_spots(r['movie_adu'], 15, r['camera'], device=dev, max_spots=2 * 4500, threshold=6.0)
 par = split_checkerboard(sp.corner[:, 0] + 7, sp.corner[:, 1] + 7, 16)

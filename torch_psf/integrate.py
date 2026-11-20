@@ -84,7 +84,7 @@ class PixelIntegrator:
             centres = np.arange(self.size) - (self.size - 1) / 2
             u = (centres[:, None] + nodes / 2).reshape(-1)
             self.u = torch.tensor(u, dtype=torch.float32, device=model.dev) * model.pixel_um
-            self.weights = torch.tensor(weights / 2, dtype=torch.float32, device=model.dev)
+            self.weights = torch.tensor(weights / 2, dtype=model.u.dtype, device=model.dev)
         else:
             if self.fc is not None or blur is not None:
                 self.pad = 2 * PAD if coherent and self.fc is not None else PAD

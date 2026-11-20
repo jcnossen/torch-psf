@@ -107,7 +107,7 @@ def calibrate_beads(stacks, dz_um, start, camera=None, charges=(-1, 1), fit_cent
 
 def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=None, xy0=None, iters=400,
                       fit_center=True, fit_zernike=True, fit_offset=True, drift=True, height=0.0, fit_height=False,
-                      fit_nmed=False, fit_params=(), max_height=None, field=None, field_xy=None, spectrum=None,
+                      fit_nmed=False, fit_params=(), max_height=None, field=None, xy=None, spectrum=None,
                       lr=3e-3, log=None):
     """Plate (and aberration) calibration from z-stacks of fixed single molecules, e.g. dye molecules in PMMA imaged
     through focus with the plate in place (the bead stacks of Hulleman et al. are without it).
@@ -120,13 +120,14 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
     (fit_center), the Zernikes (fit_zernike), the emitter height above the coverslip (height, fit_height; one for all
     molecules; clamped to [0, max_height], max_height a number or the name of a model parameter), the medium index
     (fit_nmed) and any other parameters of the model named in fit_params, charge fixed.
-    field: torch_psf.field.FieldZernikes (fitted in place, with its ridge prior) and field_xy [nm, 2] the molecules'
-    field positions (camera px): the Zernikes of molecule m are psf.zcoef + field.offsets(field_xy[m]).
-    spectrum: (wavelengths_um, weights): polychromatic emission (orientation.Polychromatic). Adam on the Poisson NLL. mu0 [nm, 3], xy0 [nm, 2]:
+    field: torch_psf.field.FieldZernikes (fitted in place, with its ridge prior) and xy [nm, 2] the molecules'
+    field positions (camera px): the Zernikes of molecule m are psf.zcoef + field.offsets(xy[m]).
+    spectrum: (wavelengths_um, weights): polychromatic emission (Polychromatic). Adam on the Poisson NLL. mu0 [nm, 3], xy0 [nm, 2]:
     starting axis / position (e.g. from per-plane fit_orientation at the in-focus plane).
     Returns dict(psf (copy with the fitted Zernikes and plate), center, nll, nll_per_px, mu, g, xy, offset, I, bg,
     model)."""
-    from torch_psf.orientation import dipole_M, unit, Polychromatic
+    from torch_psf.composition import Polychromatic
+    from torch_psf.orientation import dipole_M, unit
     nm, nk, P = d.shape[0], d.shape[1], d.shape[-1]
     dev = d.device
     psf = vortex_psf(start=psf, roisize=P, charge=charge, center=center, levels=0, depth=depth)
@@ -136,6 +137,7 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
     psf.n_med.requires_grad_(fit_nmed)
     hz = torch.tensor(float(height), device=dev, requires_grad=fit_height)
     c = torch.tensor([float(center[0]), float(center[1])], device=dev, requires_grad=fit_center)
+    field_positions = xy
     xy = (torch.zeros(nm, 2, device=dev) if xy0 is None else xy0.clone().float().to(dev)).requires_grad_(True)
     off = torch.zeros(nm, device=dev, requires_grad=fit_offset)
     dr = torch.zeros(nk, 2, device=dev, requires_grad=drift)
@@ -162,7 +164,7 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
         field = field.to(dev)
         field.coef.requires_grad_(True)
         groups.append(dict(params=[field.coef], lr=lr))
-        fxy = torch.as_tensor(field_xy, dtype=torch.float32, device=dev)
+        fxy = torch.as_tensor(field_positions, dtype=torch.float32, device=dev)
     if fit_center:
         groups.append(dict(params=[c], lr=2e-3))
     if fit_zernike:
@@ -184,7 +186,9 @@ def fit_dipole_stacks(psf, d, focus, charge, center=(0.0, 0.0), depth=1.0, mu0=N
         if field is not None:
             zo = field.offsets(fxy, psf.zidx)[:, None].expand(-1, nk, -1).reshape(nm * nk, -1)
         mdl = psf if spectrum is None else Polychromatic(psf, *spectrum)
-        img = mdl(pos, f, dipM=M[:, None].expand(-1, nk, -1, -1).reshape(-1, 3, 3), zcoef_offset=zo)
+        if zo is not None:
+            mdl = mdl.with_field_offset(zo)
+        img = mdl.render(pos, focus=f, dipM=M[:, None].expand(-1, nk, -1, -1).reshape(-1, 3, 3))
         return torch.exp(logI).reshape(-1, 1, 1) * img + bg.reshape(-1, 1, 1)
 
     l = None

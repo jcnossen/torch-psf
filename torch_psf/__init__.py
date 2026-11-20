@@ -40,7 +40,8 @@ from torch_psf.spline import SplinePSF, to_spline
 from torch_psf.gaussian import GaussianPSF, AstigmaticGaussianPSF
 from torch_psf.multichannel import MultiChannelPSF, ChannelsPSF
 from torch_psf.fourpi import FourPiPSF, FourPiSplinePSF
-from torch_psf.field import FieldZernikes, FieldPSF, TiledSplinePSF
+from torch_psf.field import Bound, FieldZernikes, FieldPSF, TiledSplinePSF
+from torch_psf.composition import ZMode, Polychromatic
 from torch_psf.mapping import ChannelMap
 from torch_psf.matched_filter import MatchedFilterDetector
 from torch_psf.detect import detect_spots

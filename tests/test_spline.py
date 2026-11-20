@@ -37,13 +37,13 @@ def test_knot_gradient_matches_reference_indexing():
     pos = torch.rand(20, 3, device=DEV) * torch.tensor([1.0, 1.0, 0.5], device=DEV) - torch.tensor([0.5, 0.5, 0], device=DEV)
     w = torch.randn(20, 11, 11, device=DEV)
     K = spl.knots.clone().requires_grad_(True)
-    (spl.render(pos, knots=K) * w).sum().backward()
+    (spl.render_tables(pos, knots=K) * w).sum().backward()
     # the same with the knot block read by advanced indexing (a different backward kernel)
     K2 = spl.knots.clone().requires_grad_(True)
     orig = torch.Tensor.index_select
     try:
         torch.Tensor.index_select = lambda self, dim, idx: self[idx]
-        (spl.render(pos, knots=K2) * w).sum().backward()
+        (spl.render_tables(pos, knots=K2) * w).sum().backward()
     finally:
         torch.Tensor.index_select = orig
     assert torch.allclose(K.grad, K2.grad, atol=1e-5)

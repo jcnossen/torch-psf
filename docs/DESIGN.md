@@ -40,7 +40,8 @@ torch_psf/
   dataset.py       Dataset (the localizations; csv / hdf5 / Picasso / .smlm, FRC) and Drift (per-movie drift estimate)
   psf.py           PSF (base class; type registry used by PSF.load)
   vectorial.py     VectorialPSF (+ gauss_blur_os, dipole_tensor, photosel_tensor)
-  spline.py        SplinePSF (+ geometry_matrix, emitter_height_pos_fn, stage_scan_pos_fn)
+  composition.py   ZMode and Polychromatic optical wrappers
+  spline.py        SplinePSF (+ geometry_matrix)
   gaussian.py      GaussianPSF (2D), AstigmaticGaussianPSF
   multichannel.py  MultiChannelPSF (base of the [N, C, P, P] models), ChannelsPSF
   fourpi.py        FourPiPSF, FourPiSplinePSF

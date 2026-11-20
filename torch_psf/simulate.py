@@ -1,7 +1,7 @@
 """Simulated data with known truth: isolated emitters (patches), bead z-stacks and blinking SMLM movies.
 
 render functions: render(pos [n, 3]) -> normalized PSF [n, P, P] (e.g. SplinePSF.render, or
-lambda p: vec.forward_batched(p, focus)); for bead stacks render(pos, focus [n]) -> [n, P, P].
+lambda p: vec.forward_batched(p, focus)); for bead stacks render(pos, focus=[n]) -> [n, P, P].
 All random numbers come from the given torch.Generator (reproducible)."""
 import math
 import torch
@@ -35,7 +35,7 @@ def simulate_emitters(render, N, bg=30.0, photons=4000.0, photons_logsd=0.4, z_r
 def simulate_bead_stack(render, focus, nbeads=6, photons=40000.0, bg=30.0, emitter_z=0.0, generator=None, seed=0,
                         device=None):
     """Bead z-stack: nbeads beads at random sub-pixel positions (+-0.5 px) and height emitter_z, imaged at the focus
-    positions focus [nk] (um). render(pos, focus) -> [n, P, P]. Returns dict(d [nbeads, nk, P, P] photon counts,
+    positions focus [nk] (um). render(pos, focus=focus) -> [n, P, P]. Returns dict(d [nbeads, nk, P, P] photon counts,
     xy [nbeads, 2], focus [nk], photons, bg)."""
     device = resolve_device(device)
     g = _gen(generator, device, seed)
@@ -45,7 +45,7 @@ def simulate_bead_stack(render, focus, nbeads=6, photons=40000.0, bg=30.0, emitt
                     -1).reshape(-1, 3)
     f = focus[None].expand(nbeads, -1).reshape(-1)
     with torch.no_grad():
-        mu = photons * render(pos, f) + bg
+        mu = photons * render(pos, focus=f) + bg
     d = torch.poisson(mu, generator=g)
     P = d.shape[-1]
     return dict(d=d.reshape(nbeads, nk, P, P), xy=xy, focus=focus, photons=photons, bg=bg)

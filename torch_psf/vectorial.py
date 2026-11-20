@@ -64,6 +64,14 @@ def _angle_index(angle, n):
     return a
 
 
+def angle_indices(angle, n, device):
+    """Scalar or per-emitter integer selection into calibrated pattern-angle terms."""
+    a = torch.as_tensor(angle, device=device)
+    if a.dtype == torch.bool or a.ndim > 1 or (a != a.long()).any() or (a < 0).any() or (a >= n).any():
+        raise ValueError(f'angle must consist of integer indices in [0, {n})')
+    return a.long()
+
+
 def dipole_tensor(M=None, w=None, dev=None):
     """Emission-dipole second-moment tensor (trace 1) from M ([3, 3] or [B, 3, 3]) or diagonal weights w ([3], mean 1);
     None if both are None (isotropic emitter)."""
@@ -102,7 +110,7 @@ class _Pupil(NamedTuple):
     def image_fields(self, fields=None):
         """Transform the full pupil, or selected polarization fields with a channel phase ramp."""
         fields = self.fields if fields is None else fields
-        return self.Fy @ fields.to(torch.complex64) @ self.Fx.T
+        return self.Fy @ fields.to(self.Fy.dtype) @ self.Fx.T
 
 
 class VectorialPSF(torch.nn.Module, PSF):
@@ -119,6 +127,7 @@ class VectorialPSF(torch.nn.Module, PSF):
     diattenuation), dipM (3 x 3 dipole tensor) or dipw (its diagonal, mean 1); None = not applied.
     """
     type_name = 'vectorial'
+    dtype = property(lambda self: self.zcoef.dtype)
 
     def __init__(self, roisize, pixel_um=0.10833, NA=1.49, n_imm=1.518, n_med=1.33, wavelength_um=0.68,
                  zernike_indices=tuple(range(5, 22)), npupil=64, oversample=3, device=None, fit_NA=False,
@@ -190,13 +199,14 @@ class VectorialPSF(torch.nn.Module, PSF):
         k0 = 2 * math.pi / self.wavelength_um
         s_imm = NA * self.rho / self.n_imm
         c_imm = torch.sqrt((1 - s_imm ** 2).clamp(min=1e-6))
-        s_med = (NA * self.rho / self.n_med).to(torch.complex64)
+        complex_dtype = torch.complex128 if NA.dtype == torch.float64 else torch.complex64
+        s_med = (NA * self.rho / self.n_med).to(complex_dtype)
         c_med = torch.sqrt(1 - s_med ** 2)  # complex; imag > 0 for supercritical angles
         c_med = torch.where(c_med.imag < 0, -c_med, c_med)
         # a pupil sample exactly at the critical angle (NA rho = n_med, e.g. while NA is fitted) has c_med = 0; the
         # fields below are finite there (t_s, t_p ~ c_med cancel the 1 / c_med), so move it off the singularity
         c_med = torch.where(c_med.abs() < 1e-6, torch.full_like(c_med, 1e-6j), c_med)
-        n1, n2 = self.n_med.to(torch.complex64), self.n_imm
+        n1, n2 = self.n_med.to(complex_dtype), self.n_imm
         ts = 2 * n1 * c_med / (n1 * c_med + n2 * c_imm)
         tp = 2 * n1 * c_med / (n2 * c_med + n1 * c_imm)
         cphi, sphi = torch.cos(self.phi), torch.sin(self.phi)
@@ -236,13 +246,31 @@ class VectorialPSF(torch.nn.Module, PSF):
             axial = axial * stage_phase
         return P[None] * (ph * axial)[:, None]
 
+    def at_wavelength(self, wavelength):
+        """A wavelength-specific stage configuration sharing all learnable parameters and buffers."""
+        view = copy.copy(self)
+        view._phase_scale = self.wavelength_um / wavelength
+        view.wavelength_um = wavelength
+        return view
+
+    def with_field_offset(self, offset):
+        view = copy.copy(self)
+        view._field_offset = offset
+        return view
+
     def _pupil(self, pos, focus, u, zcoef=None, *, height=None, stage_um=None):
         """Prepare the emitter pupil and transform matrices at image coordinates u (um).
         zcoef is shared or per emitter. height overrides pos.z for a fixed or offset
         emitter depth, and stage_um propagates an independent coherent stage displacement."""
         P, kz_med, kz_imm, kx, ky = self.pupil_fields()
         zc = self.zcoef if zcoef is None else zcoef
-        W = (torch.einsum('...j,jnm->...nm', zc, self.Z) + self.pupil_phase) * (2 * math.pi)
+        phase = self.pupil_phase
+        scale = getattr(self, '_phase_scale', None)
+        if scale is not None:
+            phase = phase * scale
+            if zcoef is None:
+                zc = zc + zc * (scale - 1)
+        W = (torch.einsum('...j,jnm->...nm', zc, self.Z) + phase) * (2 * math.pi)
         x = pos[:, 0, None, None] * self.pixel_um
         y = pos[:, 1, None, None] * self.pixel_um
         ze = pos[:, 2, None, None] if height is None else height.reshape(-1, 1, 1)
@@ -266,6 +294,12 @@ class VectorialPSF(torch.nn.Module, PSF):
     def _fields(self, pos, focus, pixels, zcoef_offset):
         """Six image fields (Ex, Ey for each dipole), intensity scale and pupil energy."""
         zc = self.zcoef.expand(len(pos), -1)
+        field = getattr(self, '_field_offset', None)
+        if field is not None:
+            zcoef_offset = field if zcoef_offset is None else field + zcoef_offset
+        scale = getattr(self, '_phase_scale', None)
+        if scale is not None:
+            zcoef_offset = self.zcoef[None] * (scale - 1) + (0. if zcoef_offset is None else zcoef_offset * scale)
         if zcoef_offset is not None:
             zc = zc + zcoef_offset
         pupil = self._pupil(pos, focus, pixels.u, zc)
@@ -300,7 +334,7 @@ class VectorialPSF(torch.nn.Module, PSF):
             psf = psf + bg[:, None, None]
         return psf
 
-    def dipole_basis(self, pos, focus=None, zcoef_offset=None, blur=None):
+    def _basis_image(self, pos, focus=None, zcoef_offset=None, blur=None):
         """The six images the PSF is linear in, for a dipole second-moment tensor M: [B, 6, R, R] in the order
         (xx, yy, zz, xy, xz, yz), forward(dipM=M) = sum_k m_k basis_k with m = (M_xx, M_yy, M_zz, M_xy, M_xz, M_yz):
         basis_ii = |E_i|^2, basis_ij = 2 Re[E_i . E_j*] (i != j), normalized as forward (isotropic = (xx + yy + zz) / 3).
@@ -333,11 +367,40 @@ class VectorialPSF(torch.nn.Module, PSF):
         """Largest |x|, |y| offset (px) from the ROI centre that the fitter allows."""
         return self.roisize / 2 - 1.0
 
-    def render(self, pos, grad=False, focus=None, dipM=None):
+    def basis(self, pos, grad=False, *, dipM=None, **options):
+        images = self.dipole_basis(pos, grad, **options)
+        return tuple(v[:, None] for v in images) if grad else images[:, None]
+
+    def weights(self, pos, *, dipM=None, angle=None, **options):
+        if dipM is None:
+            dipM = dipole_tensor(self._angle_terms(angle).get('dipM', self.dipM), self.dipw, self.dev)
+        if dipM is None:
+            dipM = torch.eye(3, device=pos.device, dtype=pos.dtype) / 3
+        return super().weights(pos, dipM=dipM)
+
+    def _angle_terms(self, angle):
+        if angle is None:
+            return {}
+        terms = {name: values[angle_indices(angle, len(values), self.dev)] for name, values in
+                 [('dipM', self.dipM_angle), ('blur', self.blur_angle)] if values is not None}
+        if not terms:
+            raise ValueError('angle requires per-angle optical terms')
+        return terms
+
+    def _dipole_basis(self, pos, grad=False, *, focus=None, angle=None):
+        blur = self._angle_terms(angle).get('blur')
+        return render_with_grad(lambda p: self._basis_image(p, focus, blur=blur), pos, grad)
+
+    def _render(self, pos, grad=False, focus=None, dipM=None, angle=None):
         """Normalized PSF at pos [N, 3] = (x px, y px, z um) at the focus self.focus_um (or `focus`) -> [N, P, P].
         grad=True also returns d/dx, d/dy (per px) and d/dz (per um), by forward-mode automatic differentiation."""
         f = self.focus_um if focus is None else focus
-        return render_with_grad(lambda p: self(p, f, dipM=dipM), pos, grad)
+        terms = self._angle_terms(angle)
+        if dipM is not None:
+            terms['dipM'] = dipM
+        return render_with_grad(lambda p: self(p, f, **terms), pos, grad)
+
+    to = PSF.to
 
     def _apply(self, fn, *args, **kwargs):
         """torch.nn.Module semantics for .to(device / dtype), .cuda(), .cpu(), .float(): parameters and buffers are
@@ -438,7 +501,10 @@ class VectorialPSF(torch.nn.Module, PSF):
         return Optics(pixel_um=self.pixel_um, NA=float(self.NA), wavelength_um=self.wavelength_um, n_imm=self.n_imm,
                       n_med=float(self.n_med))
 
-    def resized(self, roisize, npupil=None, oversample=None, device=None, pixel_integration=None):
+    def resized(self, roisize):
+        return self.resampled(roisize)
+
+    def resampled(self, roisize, *, npupil=None, oversample=None, device=None, pixel_integration=None):
         """A copy with another ROI size (and optionally pupil sampling / oversampling / device / pixel integration):
         same optics, Zernikes, apodization, SAF, pupil maps (resampled if npupil changes), optional terms and (default)
         pixel integration."""
@@ -451,6 +517,7 @@ class VectorialPSF(torch.nn.Module, PSF):
         new.NA.requires_grad_(self.NA.requires_grad)
         new.n_med.requires_grad_(self.n_med.requires_grad)
         with torch.no_grad():
+            new.to(dtype=self.zcoef.dtype)
             new.zcoef.copy_(self.zcoef); new.apod.copy_(self.apod); new.saf.copy_(self.saf)
             if npupil == self.npupil:
                 new.pupil_phase.copy_(self.pupil_phase); new.pupil_amp.copy_(self.pupil_amp)
@@ -463,6 +530,8 @@ class VectorialPSF(torch.nn.Module, PSF):
             v = getattr(self, k, None)
             if v is not None:
                 setattr(new, k, v.detach().clone().to(new.dev) if torch.is_tensor(v) else copy.deepcopy(v))
+        if hasattr(self, '_phase_scale'):
+            new._phase_scale = self._phase_scale
         return new
 
     def set_zernike(self, coefs):

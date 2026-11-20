@@ -33,7 +33,6 @@ factor); a fixed dipole's detected total also depends on its orientation and hei
 import math
 import time
 import torch
-from torch_psf.psf import render_with_grad
 from torch_psf.vectorial import photosel_tensor
 from torch_psf.fit import lm_poisson, localize
 
@@ -180,13 +179,11 @@ def vortex_phase(model, charge=1, offset=0.0, apply=True, center=(0.0, 0.0), lev
 
 
 # ------------------------------------------------------------------ basis images
-def basis_images(psf, pos, focus=None, grad=False, zcoef_offset=None):
+def basis_images(psf, pos, focus=None, grad=False, xy=None):
     """The six basis images [N, 6, R, R] (BASIS order) of a VectorialPSF at pos [N, 3] (x px, y px, z um) and focus
     (default psf.focus_um): psf(dipM=M) = sum_k m_k B_k, m = M_to_m6(M). grad=True also returns d/dx, d/dy (per px),
     d/dz (per um), each [N, 6, R, R] (forward-mode autodiff)."""
-    f = psf.focus_um if focus is None else focus
-    fn = lambda p: psf.dipole_basis(p, f, zcoef_offset)
-    return render_with_grad(fn, pos, grad)
+    return psf.dipole_basis(pos, grad, focus=focus, xy=xy)
 
 
 @torch.no_grad()
@@ -225,7 +222,7 @@ def _amp_m(p6, K):
     return m, f
 
 
-def model_and_jacobian(psf, theta, T=1, focus=None, h=None, K=None, zcoef_offset=None, basis=None):
+def model_and_jacobian(psf, theta, T=1, focus=None, h=None, K=None, xy=None, basis=None, *, zcoef_offset=None):
     """Expected images mu [N, T, R, R] and Jacobian [N, 9, T, R, R] for theta [N, 9] = (x, y, z, I, bg, v, g):
     frame t of a track has mu_t = I h_t f_t sum_k m_k B_k(x, y, z) + bg, f_t = 3 tr(M K_t) (1 without K).
     h: [N, T] or [T] known per-frame brightness factors (default 1); K: [T, 3, 3] or [N, T, 3, 3] (default None:
@@ -234,8 +231,10 @@ def model_and_jacobian(psf, theta, T=1, focus=None, h=None, K=None, zcoef_offset
     one position for many orientations)."""
     N = theta.shape[0]
     dev = theta.device
+    if zcoef_offset is not None:
+        psf = psf.with_field_offset(zcoef_offset)
     B, Bx, By, Bz = basis if basis is not None else basis_images(psf, theta[:, :3], focus, grad=True,
-                                                                  zcoef_offset=zcoef_offset)
+                                                                  xy=xy)
     hh = torch.ones(N, T, device=dev) if h is None else torch.as_tensor(h, dtype=theta.dtype, device=dev).expand(N, T)
     p6 = theta[:, 3:]
     Kb = None if K is None else torch.as_tensor(K, dtype=theta.dtype, device=dev).expand(N, T, 3, 3)
@@ -277,13 +276,13 @@ def _clamp(th, psf, margin=0.05, z_limits=(0.0, 1.0), g_limits=(0.0, 1.0)):
 
 # ------------------------------------------------------------------ Fisher / CRLB
 @torch.no_grad()
-def fisher_orientation(psf, theta, T=1, focus=None, h=None, K=None, var=None, zcoef_offset=None, basis=None):
+def fisher_orientation(psf, theta, T=1, focus=None, h=None, K=None, var=None, xy=None, basis=None):
     """Poisson Fisher matrix [N, 8, 8] of (x, y, z, I, bg, a, b, g) at theta [N, 9], (a, b) = tangent coordinates of
     mu along (e_theta, e_phi). Track of T frames as model_and_jacobian (Fisher summed over the frames). var: read-noise
     variance (e^2)."""
     th = theta.clone()
     th[:, 5:8] = unit(th[:, 5:8])
-    mu, J = model_and_jacobian(psf, th, T, focus, h, K, zcoef_offset, basis)
+    mu, J = model_and_jacobian(psf, th, T, focus, h, K, xy, basis)
     e_th, e_ph = tangent_basis(th[:, 5:8])
     Jv = J[:, 5:8]
     Ja = torch.einsum('nc...,nc->n...', Jv, e_th)
@@ -294,12 +293,12 @@ def fisher_orientation(psf, theta, T=1, focus=None, h=None, K=None, var=None, zc
 
 
 @torch.no_grad()
-def crlb_orientation(psf, theta, T=1, focus=None, h=None, K=None, var=None, fixed=(), zcoef_offset=None, basis=None):
+def crlb_orientation(psf, theta, T=1, focus=None, h=None, K=None, var=None, fixed=(), xy=None, basis=None):
     """CRLB of an orientation fit at theta [N, 9]. fixed: indices into (x, y, z, I, bg, a, b, g) held known (e.g. (7,)
     for a known g). Returns a dict of standard deviations [N]: x, y (px), z (um), I, bg, theta, phi (deg; phi =
     sd(b) / sin theta), inplane (deg, sd(b): the in-plane angular error, finite at the pole), g; 'cov' [N, 8, 8] and
     'corr' [N, 8, 8] in the (x, y, z, I, bg, a, b, g) coordinates (rad for a, b)."""
-    F = fisher_orientation(psf, theta, T, focus, h, K, var, zcoef_offset=zcoef_offset, basis=basis)
+    F = fisher_orientation(psf, theta, T, focus, h, K, var, xy=xy, basis=basis)
     keep = [i for i in range(8) if i not in fixed]
     Fk = F[:, keep][:, :, keep]
     Ck = torch.linalg.pinv(Fk, hermitian=True)
@@ -324,7 +323,7 @@ def _track_dims(rois):
 @torch.no_grad()
 def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, theta0=None, z_limits=(0.0, 0.4),
                     g_limits=(0.0, 1.0), batch=500, mirror=True, iso_iters=30, zstarts=4, zgrid=None,
-                    zcoef_offset=None):
+                    xy=None, zcoef_offset=None):
     """Poisson MLE of theta = (x px, y px, z um, I, bg, v_x, v_y, v_z, g) per spot (rois [N, R, R]) or per track
     (rois [N, T, R, R]: frames sharing position, orientation, I and bg; per-frame known factors h [N, T] / [T] and
     optional excitation tensors K [T, 3, 3] or [N, T, 3, 3], see model_and_jacobian).
@@ -334,7 +333,7 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
     mirror=True also the mirror start (mu_z -> -mu_z, the other tilt sign); the best likelihood wins.
     zgrid: extra starts at these heights (um; x, y, I, bg from the isotropic fit, (mu, g) from the linear-M
     solution at each height, each with its mirror): for PSFs whose isotropic fit is a poor guide to z (Vortex).
-    zcoef_offset [N, nz]: per-ROI Zernike offsets (field-dependent aberrations, e.g. FieldZernikes.offsets at each
+    xy [N, 2]: per-ROI field coordinates in camera pixels (fixed at each
     ROI's field position); the isotropic start ignores them.
     Returns dict: theta [N, 9] (v unit, canonical mu_z >= 0), nll [N], theta_deg / phi_deg [N] (angles(mu)), g [N],
     crlb (crlb_orientation at the estimate), M_lin [N, 3, 3] (the linear solution)."""
@@ -348,7 +347,8 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
         db = d[s:s + batch]
         n = len(db)
         hb = None if hh is None else hh[s:s + batch]
-        zo = None if zcoef_offset is None else zcoef_offset[s:s + batch]
+        field_xy = None if xy is None else xy[s:s + batch]
+        model = psf if zcoef_offset is None else psf.with_field_offset(zcoef_offset[s:s + batch])
         Kb = None
         if K is not None:
             Kt = torch.as_tensor(K, dtype=d.dtype, device=dev)
@@ -359,13 +359,8 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
         else:
             hm = torch.ones(n, T, device=dev) if hb is None else hb
             dsum = db.sum(1)
-            zr0 = psf.z_range
-            psf.z_range = zl
-            try:
-                th_iso, _ = localize(psf, dsum, iters=iso_iters, zstarts=zstarts, batch=batch)
-            finally:
-                psf.z_range = zr0
-            Bb = basis_images(psf, th_iso[:, :3], focus, zcoef_offset=zo)
+            th_iso, _ = localize(psf, dsum, iters=iso_iters, zstarts=zstarts, batch=batch, z_limits=zl)
+            Bb = basis_images(model, th_iso[:, :3], focus, xy=field_xy)
             Ml, I0, bg0 = solve_M(Bb, db, h=hm)
             mu0, g0 = project_M(Ml)
             g0 = g0.clamp(0.1, 0.9)
@@ -376,7 +371,7 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
             starts = [base]
             for zg in (zgrid or ()):
                 pz = th_iso[:, :3].clone(); pz[:, 2] = float(zg)
-                Mz, _, _ = solve_M(basis_images(psf, pz, focus, zcoef_offset=zo), db, h=hm)
+                Mz, _, _ = solve_M(basis_images(model, pz, focus, xy=field_xy), db, h=hm)
                 mz, gz = project_M(Mz)
                 st = base.clone(); st[:, 2] = float(zg); st[:, 5:8] = mz; st[:, 8] = gz.clamp(0.1, 0.9)
                 starts.append(st)
@@ -386,7 +381,7 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
                     starts.append(alt)
         best, bnll = None, None
         for st in starts:
-            th, nll = lm_poisson(lambda t: model_and_jacobian(psf, t, T, focus, hb, Kb, zo), db, st, var=var,
+            th, nll = lm_poisson(lambda t: model_and_jacobian(model, t, T, focus, hb, Kb, field_xy), db, st, var=var,
                                  clamp=lambda t: _clamp(t, psf, z_limits=zl, g_limits=g_limits), iters=iters)
             if best is None:
                 best, bnll = th, nll
@@ -397,7 +392,8 @@ def fit_orientation(psf, rois, focus=None, h=None, K=None, var=None, iters=40, t
         out_th.append(best); out_nll.append(bnll); out_Ml.append(Ml)
     th = torch.cat(out_th)
     tdeg, pdeg = angles(th[:, 5:8])
-    cr = crlb_orientation(psf, th, T, focus, hh, K, var, zcoef_offset=zcoef_offset)
+    model = psf if zcoef_offset is None else psf.with_field_offset(zcoef_offset)
+    cr = crlb_orientation(model, th, T, focus, hh, K, var, xy=xy)
     return dict(theta=th, nll=torch.cat(out_nll), theta_deg=tdeg, phi_deg=pdeg, g=th[:, 8], crlb=cr,
                 M_lin=torch.cat(out_Ml))
 
@@ -407,45 +403,6 @@ def angle_error(mu_est, mu_true, deg=True):
     c = (unit(mu_est) * unit(mu_true)).sum(-1).abs().clamp(max=1)
     a = torch.acos(c)
     return torch.rad2deg(a) if deg else a
-
-
-# ------------------------------------------------------------------ z as defocus
-class FocusZ:
-    """A VectorialPSF seen with z = the emitter's axial position relative to the nominal focal plane, at a fixed
-    emitter height above the coverslip: the model is psf(pos (x, y, height), focus = psf.focus_um - z). Use it when
-    the emitters sit at a known height (on the coverslip, in a thin film) and z only measures defocus, e.g. with
-    supercritical-angle light (n_med < NA), where moving the emitter itself below the interface is unphysical. Every
-    function of this module (and torch_psf.fit.localize) accepts it in place of the VectorialPSF."""
-
-    def __init__(self, psf, height=0.0, z_range=None):
-        self.psf, self.height = psf, float(height)
-        self.z_range = tuple(z_range) if z_range is not None else tuple(psf.z_range)
-
-    roisize = property(lambda self: self.psf.roisize)
-    pixel_um = property(lambda self: self.psf.pixel_um)
-    dev = property(lambda self: self.psf.dev)
-    focus_um = property(lambda self: self.psf.focus_um)
-    xy_limit = property(lambda self: self.psf.xy_limit)
-    z_limits = property(lambda self: self.z_range)
-    n_dims = 3
-    vortex = property(lambda self: getattr(self.psf, 'vortex', None))
-
-    def _map(self, pos, focus):
-        f = self.psf.focus_um if focus is None else focus
-        p2 = torch.cat([pos[:, :2], torch.full_like(pos[:, 2:3], self.height)], 1)
-        return p2, f - pos[:, 2]
-
-    def dipole_basis(self, pos, focus=None, zcoef_offset=None):
-        p2, fe = self._map(pos, focus)
-        return self.psf.dipole_basis(p2, fe, zcoef_offset)
-
-    def __call__(self, pos, focus=None, **kw):
-        p2, fe = self._map(pos, focus)
-        return self.psf(p2, fe, **kw)
-
-    def render(self, pos, grad=False, focus=None):
-        fn = lambda p: self(p, focus)
-        return render_with_grad(fn, pos, grad)
 
 
 # ------------------------------------------------------------------ pipeline
@@ -498,18 +455,19 @@ class OrientationEstimator:
         if self.field is not None:
             if corners is None:
                 raise ValueError('a field model needs the ROI corners (field positions)')
-            zidx = psf.psf.zidx if isinstance(psf, FocusZ) else psf.zidx
+            from torch_psf.field import FieldPSF
+            psf = FieldPSF(psf, self.field)
             cxy = torch.as_tensor(corners, dtype=torch.float32, device=self.dev) + (P - 1) / 2
             with torch.no_grad():
-                zo_all = self.field.to(self.dev).offsets(cxy, zidx)
+                zo_all = cxy
         for s in range(0, N, self.batch):
             d = rois[s:s + self.batch]
             zo = None if zo_all is None else zo_all[s:s + self.batch]
             r = fit_orientation(psf, d, iters=self.iters, z_limits=self.z_limits, g_limits=self.g_limits,
                                 batch=self.batch, mirror=self.mirror, zstarts=self.zstarts, zgrid=self.zgrid,
-                                zcoef_offset=zo)
+                                xy=zo)
             th = r['theta']
-            mu, _ = model_and_jacobian(psf, th, zcoef_offset=zo)
+            mu, _ = model_and_jacobian(psf, th, xy=zo)
             mu = mu[:, 0]
             cols['th'].append(th); cols['nll'].append(r['nll']); cols['cr'].append(r['crlb'])
             cols['chi2'].append(((d - mu) ** 2 / mu.clamp_min(1e-6)).flatten(1).mean(1))
@@ -565,49 +523,3 @@ class OrientationEstimator:
         ds.meta['n_spots'] = len(sp)
         self.report = dict(n=len(ds), seconds=time.time() - t0, chi2_median=ds.meta.get('chi2_median'))
         return ds
-
-
-# ------------------------------------------------------------------ polychromatic emission
-class Polychromatic:
-    """A VectorialPSF averaged over an emission spectrum: sum_i w_i psf(lambda_i), the pupil phase (Zernikes and the
-    free pupil_phase, e.g. a vortex plate: a fixed optical path) scaled by lambda_0 / lambda_i, lambda_0 =
-    psf.wavelength_um; each wavelength normalised as VectorialPSF (an aberration-free isotropic emitter at the
-    coverslip integrates to 1), weights normalised to sum 1. Usable wherever this module takes a model (also inside
-    FocusZ); n_med / n_imm dispersion is ignored."""
-
-    def __init__(self, psf, wavelengths_um, weights=None):
-        self.psf = psf
-        self.wl = [float(w) for w in wavelengths_um]
-        w = torch.ones(len(self.wl)) if weights is None else torch.as_tensor(weights, dtype=torch.float32)
-        self.w = (w / w.sum()).tolist()
-
-    def __getattr__(self, name):          # roisize, pixel_um, dev, focus_um, z_range, zidx, ... of the base model
-        if name in ('psf', 'wl', 'w'):
-            raise AttributeError(name)
-        return getattr(self.psf, name)
-
-    def _each(self, fn, zcoef_offset):
-        m, wl0, pp0 = self.psf, self.psf.wavelength_um, self.psf.pupil_phase
-        out = None
-        try:
-            for wl, w in zip(self.wl, self.w):
-                s = wl0 / wl
-                m.wavelength_um = wl
-                m.pupil_phase = pp0 * s
-                zo = m.zcoef[None] * (s - 1) + (0.0 if zcoef_offset is None else zcoef_offset * s)
-                v = fn(zo)
-                out = v * w if out is None else out + v * w
-        finally:
-            m.wavelength_um, m.pupil_phase = wl0, pp0
-        return out
-
-    def dipole_basis(self, pos, focus, zcoef_offset=None, blur=None):
-        return self._each(lambda zo: self.psf.dipole_basis(pos, focus, zo.expand(len(pos), -1), blur), zcoef_offset)
-
-    def __call__(self, pos, focus=None, zcoef_offset=None, **kw):
-        f = self.psf.focus_um if focus is None else focus
-        return self._each(lambda zo: self.psf(pos, f, zcoef_offset=zo.expand(len(pos), -1), **kw), zcoef_offset)
-
-    def render(self, pos, grad=False, focus=None):
-        fn = lambda p: self(p, focus)
-        return render_with_grad(fn, pos, grad)

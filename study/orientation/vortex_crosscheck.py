@@ -9,7 +9,7 @@ Mapping of their model onto ours (found here, see main()):
     swapped likewise;
   * phase convention: their pupil uses exp(+i 2 pi W / lambda) with cos(theta_med) = -i |.| beyond the critical
     angle (and propagation exp(-i k.r)); ours uses +i |.|; checked here: conj (their W -> -W in ours) or not;
-  * z: their stage z enters as exp(-i kz_imm z); our FocusZ z as exp(+i kz_imm z) (focus = -z): z_ours = -z_theirs.
+  * z: their stage z enters as exp(-i kz_imm z); our ZMode z as exp(+i kz_imm z) (focus = -z): z_ours = -z_theirs.
 
 usage: python -I study/orientation/vortex_crosscheck.py      (CPU is enough)
 """
@@ -25,7 +25,8 @@ sys.path.insert(0, PORT)
 import numpy as np                                                                     # noqa: E402
 import torch                                                                           # noqa: E402
 from torch_psf import VectorialPSF                                                     # noqa: E402
-from torch_psf.orientation import FocusZ, dipole_M                                     # noqa: E402
+from torch_psf.composition import ZMode  # noqa: E402
+from torch_psf.orientation import dipole_M  # noqa: E402
 from vecfit.set_parameters_vortex_lambdaDNA import set_parameters_vortex_lambdaDNA    # noqa: E402
 from vecfit.funfit.get_pupil_matrix import pupil_static, get_pupil_matrix             # noqa: E402
 from vecfit.funfit.poissonrate import poissonrate                                     # noqa: E402
@@ -74,7 +75,7 @@ def our_image(p, st, theta, zc_nm, conj, swap, zsign=-1.0, xysign=1.0, dipflip=F
         else:
             pos = torch.tensor([[x / v.pixel_um, y / v.pixel_um, z]], dtype=torch.float32)
             mu = torch.tensor([mu_t], dtype=torch.float32)
-        f = FocusZ(v, height=0.0, z_range=(-1.1, 1.1))
+        f = ZMode(v, height=0.0, z_range=(-1.1, 1.1))
         pos[:, 2] = zsign * pos[:, 2]              # z_ours = -z_theirs (zsign = -1)
         pos[:, :2] = xysign * pos[:, :2]
         if dipflip:

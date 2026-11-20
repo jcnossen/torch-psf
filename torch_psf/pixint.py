@@ -35,7 +35,7 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
         spl = to_spline(vectorial, (0.0, zmax_um), roisize=R, oversample=S, dz_um=dz_um, xy_limit=xy_limit,
                                  kernel='bspline', value='density')
     knot_os = spectral_min_oversample(vectorial.band_limit())
-    big = vectorial.resized(spl.Pl, oversample=knot_os, pixel_integration='point')
+    big = vectorial.resampled(spl.Pl, oversample=knot_os, pixel_integration='point')
     big.zcoef.requires_grad_(True)
     focus = torch.tensor(float(focus_um), device=dev, requires_grad=True)
     rn2, pix = readnoise_variance(readnoise_e, B, R, dev)
@@ -97,7 +97,7 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
         nll = torch.where(mask[sl][..., None, None], nll, torch.zeros_like(nll)).sum()
         return nll, I, bg, mu, var, data
 
-    spl_render = lambda pos, g, K: spl.render(pos, knots=K[g])
+    spl_render = lambda pos, g, K: spl.render_tables(pos, knots=K[g])
     chunks = torch.arange(B, device=dev).split(batch)
     hist, t0, tot = [], time.time(), float('nan')
     params = [focus, big.zcoef] + ([BL] if BL is not None else []) + extra
@@ -124,7 +124,7 @@ def fit_tracks_spline(tracks, vectorial, readnoise_e=1.0, zmax_um=0.2, iters=600
         hist.append(dict(it=it, nll_per_px=tot, focus_um=float(focus.detach())))
         if log is not None:
             log(it, tot, time.time() - t0, big.zcoef.detach())
-    out = vectorial.resized(R, oversample=max(vectorial.os, knot_os), pixel_integration='spectral')
+    out = vectorial.resampled(R, oversample=max(vectorial.os, knot_os), pixel_integration='spectral')
     with torch.no_grad():
         out.zcoef.copy_(big.zcoef)
     out.focus_um = float(focus.detach())

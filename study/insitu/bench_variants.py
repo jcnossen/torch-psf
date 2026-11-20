@@ -41,7 +41,7 @@ def back(ev):
         return K.grad
     return f
 ref = spl.render(P3[:1000])
-for name, ev in (('conv2d', lambda o, K: spl.render(o, knots=K)), ('unfold+einsum', lambda o, K: ev_unfold(spl, o, K)), ('separable', lambda o, K: ev_sep(spl, o, K))):
+for name, ev in (('conv2d', lambda o, K: spl.render_tables(o, knots=K)), ('unfold+einsum', lambda o, K: ev_unfold(spl, o, K)), ('separable', lambda o, K: ev_sep(spl, o, K))):
     d = float((ev(P3[:1000], spl.knots) - ref).abs().max() / ref.abs().max())
     with torch.no_grad():
         tf, _ = tm(lambda: [ev(P3[s:s + NB], spl.knots) for s in range(0, N, NB)][-1])

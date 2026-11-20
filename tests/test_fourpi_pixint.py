@@ -15,11 +15,11 @@ def test_fourpi_midpoint_convergence(pixel_um):
               channel_offsets=[[0, 0], [.21, -.19], [0, 0], [-.1, .2]])
     pos = torch.tensor([[.13, -.34, -.12], [-.31, .25, .02], [.17, .04, .15]], device=DEV)
     phase = torch.tensor([.37, 1.6, 2.1], device=DEV)
-    exact = FourPiPSF(**kw, oversample=3 if pixel_um < .1 else 2, pixel_integration='spectral')(pos, phi_extra=phase)
-    high = FourPiPSF(**kw, oversample=16)(pos, phi_extra=phase)
+    exact = FourPiPSF(**kw, oversample=3 if pixel_um < .1 else 2, pixel_integration='spectral')(pos, phi=phase)
+    high = FourPiPSF(**kw, oversample=16)(pos, phi=phase)
     if pixel_um > .1:
         # Remove the O(1/os^2) midpoint error, still visible at os=16 for typical camera pixels.
-        low = FourPiPSF(**kw, oversample=8)(pos, phi_extra=phase)
+        low = FourPiPSF(**kw, oversample=8)(pos, phi=phase)
         high = (4 * high - low) / 3
     peak = exact.amax((-2, -1))
     assert torch.all((exact - high).abs().amax((-2, -1)) / peak < 1e-5)

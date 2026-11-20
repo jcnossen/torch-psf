@@ -50,8 +50,8 @@ import numpy as np                                                              
 import torch                                                                           # noqa: E402
 import vortex_real as VR                                                              # noqa: E402
 from torch_psf import VectorialPSF                                                     # noqa: E402
-from torch_psf.orientation import (fit_orientation, FocusZ, model_and_jacobian, vortex_phase, unit,
-                                   angles)                                             # noqa: E402
+from torch_psf.composition import ZMode  # noqa: E402
+from torch_psf.orientation import fit_orientation, model_and_jacobian, vortex_phase, unit, angles  # noqa: E402
 
 OUT = VR.OUT
 DEV = VR.DEV
@@ -263,11 +263,11 @@ def run_pmma(var, tag):
     cent = np.array([m[0] for m in mols])                      # (x = column, y = row) of the molecule
     if var['insitu']:      # our in-situ calibrated model (vortex_real.py plate2: plate centre, Zernikes, n_med, apod)
         psf = VR.sm_focusz(z_range=(-1.1, 1.1))
-        v = psf.psf
+        v = psf.base
         zo = None
     else:
         v = their_model(n_med, refnom=var['refnom'], wmis=var['wmis'])
-        psf = FocusZ(v, height=0.0, z_range=(-1.1, 1.1))
+        psf = ZMode(v, height=0.0, z_range=(-1.1, 1.1))
         zo = nat_offsets(cent[:, 1], cent[:, 0], 2048) if var['nat'] else None
     zz = None if zo is None else zo[:, None].expand(-1, nk, -1).reshape(nm * nk, -1)
     r = their_fit(psf, rv.reshape(-1, P, P), zz, zgrid=var['zgrid'])
@@ -310,7 +310,7 @@ def run_dna(var, tag, frames=(0, 600), crop=(400, 16, 256, 256)):
     rc = np.array(rc); fr = np.array(fr)
     log(f'{tag}: {len(rois)} spots detected ({time.time() - t0:.0f} s)')
     v = their_model(n_med, refnom=var['refnom'], wmis=var['wmis'])
-    psf = FocusZ(v, height=0.0, z_range=(-1.1, 1.1))
+    psf = ZMode(v, height=0.0, z_range=(-1.1, 1.1))
     zo = nat_offsets(rc[:, 0], rc[:, 1], 1024) if var['nat'] else None
     res = {k: [] for k in ('theta', 'theta_deg', 'phi_deg', 'chi2', 'outlier', 'crlb_xy', 'crlb_inplane', 'crlb_theta',
                            'crlb_g', 'crlb_z', 'nll')}

@@ -41,7 +41,7 @@ def test_indexed_bank_and_adjoint(kernel, value):
     a, b = torch.randn(2, 2, 2, dtype=knots.dtype)
     a.requires_grad_()
     kw = dict(weights={'tile': a, 'angle': b})
-    images = s.render(pos, grad=True, **kw)
+    images = s.render_tables(pos, grad=True, **kw)
     scalar = [[scalar_reference(s, bank, pos) for bank in row] for row in knots[ids]]
     ref = sum(im * (a[:, i] * b[:, j])[:, None, None]
               for i, row in enumerate(scalar) for j, im in enumerate(row))
@@ -55,11 +55,11 @@ def test_indexed_bank_and_adjoint(kernel, value):
     delta = torch.randn_like(a)
     eps = 1e-5
     def loss(w):
-        return (s.render(pos, weights={'tile': w, 'angle': b}) * sensitivity).sum()
+        return (s.render_tables(pos, weights={'tile': w, 'angle': b}) * sensitivity).sum()
     fd = (loss(a + eps * delta) - loss(a - eps * delta)) / (2 * eps)
     torch.testing.assert_close(fd, (got_w * delta).sum())
     s.backend = 'conv'
-    for got, expected in zip(s.render(pos, grad=True, **kw), images):
+    for got, expected in zip(s.render_tables(pos, grad=True, **kw), images):
         torch.testing.assert_close(got, expected)
 
 
@@ -91,11 +91,11 @@ def test_stored_angle_defaults_and_dipole_tables(tmp_path):
 @pytest.mark.parametrize('kernel,value', [('catmull', 'pixel'), ('bspline', 'density')])
 def test_stage_scan_knot_vjp(kernel, value):
     from torch_psf import VectorialPSF
-    from torch_psf.spline import stage_scan_pos_fn
+    from torch_psf.composition import ZMode
 
     spline = SplinePSF(5, (0., .06), 2, .02, 2, 1., device='cpu', kernel=kernel, value=value)
     source = VectorialPSF(spline.Pl, npupil=16, oversample=2, device='cpu')
-    scan = stage_scan_pos_fn(.11, .9, emitter_z=.03)
+    scan = ZMode(source, focus=.11, scale=.9, height=.03).coordinates
     knots = spline.sample(source, scan, chunk=2, differentiable=True)
     adjoint = torch.randn_like(knots)
     reference, = torch.autograd.grad(knots, source.zcoef, adjoint)

@@ -23,7 +23,7 @@ def _result(psf, report, history, data):
     return dict(psf=psf, report=report, history=history, **data)
 from torch_psf.fit import localize, poisson_nll, at_limit
 from torch_psf.zernike import zernike
-from torch_psf.spline import emitter_height_pos_fn
+from torch_psf.composition import ZMode
 from torch_psf.estimation.zscale import z_scale, FREE_KNOT_WARNING
 
 
@@ -33,7 +33,8 @@ def limit_fraction(spline, theta):
 
 
 def _copy(spline, knots):
-    s = spline.resized(spline.roisize, xy_limit=spline.xmax)
+    s = spline.resized(spline.roisize)
+    s.xmax = spline.xmax
     s.knots = knots.detach().clone()
     return s
 
@@ -53,7 +54,7 @@ def knot_loss(spline, knots, rois, theta, batch=4000, backward=True, weight=1.0,
     tot = 0.0
     for s in range(0, len(rois), batch):
         t = theta[s:s + batch]
-        mu = t[:, 3, None, None] * spline.render(t[:, :3], knots=knots) + t[:, 4, None, None]
+        mu = t[:, 3, None, None] * spline.render_tables(t[:, :3], knots=knots) + t[:, 4, None, None]
         v = var[s:s + batch] if (torch.is_tensor(var) and var.dim() > 0) else var
         l = weight * poisson_nll(rois[s:s + batch], mu, v).sum()
         if backward:
@@ -117,7 +118,7 @@ def fit_zernike_knots(spline, rois, vectorial, pos_fn=None, iters=80, lr=2e-3, r
     Returns dict(psf, report, history, ...): psf = copy of vectorial with the fitted Zernikes; data = dict(zcoef, theta (of the last
     localization), knots (the spline of the last localization step))."""
     spl, d, vec = spline, rois, vectorial
-    pos_fn = emitter_height_pos_fn(vec.focus_um) if pos_fn is None else pos_fn
+    pos_fn = ZMode(vec, 'emitter').coordinates if pos_fn is None else pos_fn
     big = vec.resized(spl.Pl)
     small = vec.resized(spl.roisize) if route == 'V' else None
     zc = vec.zcoef.detach().clone().to(spl.dev)
@@ -174,7 +175,7 @@ def fit_pupil_knots(spline, rois, vectorial, pos_fn=None, iters=200, lr_z=1e-3, 
     fit_zernike_knots. Returns dict(psf, report, history, ...): psf = copy of vectorial with the fitted Zernikes and maps; data =
     dict(zcoef, phase, la, theta, knots (built from the final model))."""
     spl, d, vec = spline, rois, vectorial
-    pos_fn = emitter_height_pos_fn(vec.focus_um) if pos_fn is None else pos_fn
+    pos_fn = ZMode(vec, 'emitter').coordinates if pos_fn is None else pos_fn
     big = vec.resized(spl.Pl)
     mask = big.mask.bool()
     low = torch.stack([zernike(j, big.rho.clamp(max=1), big.phi)[mask] for j in (1, 2, 3, 4)], 1)     # [npix, 4]
