@@ -17,7 +17,7 @@ n_frames, meta, **fields)`; `ds['pos']` / `ds.pos`, `len(ds)`, `ds[mask | slice 
 `filter_frames(start, stop)`, `crop(x0, y0, x1, y1, shift)`, `crop_from_edge(dist)`; `Dataset.concatenate(items,
 set_group)`, `+`; `render(pixel_nm, region, sigma_nm, weights)` (2D histogram), `frc(block=300, pixel_nm=5)` (even / odd
 blocks of frames, 5-ring smoothing, 1/7 threshold); files: `save` / `load` (.hdf5 / .h5 this format, .csv
-ThunderSTORM), `save_picasso` / `load_picasso`, `save_csv` / `load_csv`.
+ThunderSTORM, .smlm ShareLoc), `save_picasso` / `load_picasso`, `save_csv` / `load_csv`, `save_smlm` / `load_smlm`.
 
 `ds.estimate_drift(n_frames=None, rows=None, dims=2, device=None) -> Drift` estimates drift with DME v2
 (optional dependency). `tp.Drift(curve, info=None)` holds per-frame displacements in pixels and the run record.

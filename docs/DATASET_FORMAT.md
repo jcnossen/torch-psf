@@ -73,4 +73,8 @@ warns and omits the record. In either case, `tp.Drift.load(path)` retrieves the 
 
 `save_picasso(path)` writes a Picasso hdf5 ('locs' table: lpx / lpy = precision, sx / sy = PSF width; Picasso units: x, y, lpx, lpy in px, z and lpz in nm, so 3D needs pixel_nm) and its
 .yaml; `load_picasso` reads one. `save_csv(path)` / `load_csv(path, pixel_nm)` use the ThunderSTORM conventions
-(positions and uncertainties in nm, frames counted from 1, the centre of the first pixel at 0.5 px).
+(positions and uncertainties in nm, frames counted from 1, the centre of the first pixel at 0.5 px). `save_smlm(path)` /
+`load_smlm(path, pixel_nm)` read and write ShareLoc.XYZ .smlm files (a zip of manifest.json and one binary table, format
+0.2) with the same conventions; tables are float32 by default (`dtype='float64'` for a lossless round trip), and the
+manifest's `torch_psf` block records the pixel size, conventions, frame count and image size, so a file written here
+loads without `pixel_nm`.

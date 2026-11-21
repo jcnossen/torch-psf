@@ -1,4 +1,4 @@
-"""Dataset: construction, indexing and filters, concatenate, crop, drift, render / FRC, files (hdf5, Picasso, csv)."""
+"""Dataset: construction, indexing and filters, concatenate, crop, drift, render / FRC, files (hdf5, Picasso, csv, ShareLoc .smlm)."""
 import json
 
 import h5py
@@ -111,6 +111,53 @@ def test_files_roundtrip(tmp_path):
     c = Dataset.load_csv(tmp_path / 'c.csv', pixel_nm=108.0)
     assert torch.allclose(c.pos, ds.pos, atol=1e-5) and torch.equal(c.frame, ds.frame)
     assert torch.allclose(c.crlb[:, :2].float(), ds.crlb[:, :2], atol=1e-6)
+
+
+def test_smlm_roundtrip(tmp_path):
+    import zipfile
+    ds = make()
+    ds.add_fields(flag=ds.photons > 1200, track=torch.arange(len(ds), dtype=torch.int32) // 3)
+    b = Dataset.load(ds.save(tmp_path / 'a.smlm', dtype='float64'))            # pixel size etc. from the manifest
+    assert set(b.keys()) == set(ds.keys()) - {'intensities'}                    # 1D fields only
+    for k in b.keys():
+        if k in ('id', 'frame', 'n_frames', 'flag', 'track'):
+            assert b[k].dtype == ds[k].dtype and torch.equal(b[k], ds[k]), k
+        else:
+            assert torch.allclose(b[k].double(), ds[k].double(), rtol=1e-12, atol=1e-12), k
+    assert b.pixel_nm == 108.0 and b.meta['image_size'] == [80, 100] and b.num_frames == ds.num_frames
+    with zipfile.ZipFile(tmp_path / 'a.smlm') as z:
+        m = json.loads(z.read('manifest.json'))
+    f = m['formats'][m['files'][0]['format']]
+    assert m['format_version'] == '0.2' and f['mode'] == 'binary' and f['headers'][:5] == ['id', 'frame', 'x', 'y', 'z']
+    assert m['files'][0]['rows'] == len(ds) and f['units'][2] == 'nm'
+    assert np.isclose(m['files'][0]['min']['x'], float((ds.pos[:, 0].min() + 0.5) * 108.0))
+    # float32 (ShareLoc's usual table type), 2D, non-square pixels, other conventions
+    d2 = Dataset.from_arrays(ds.pos[:, :2], ds.frame, crlb=ds.crlb[:, :2], photons=ds.photons,
+                             meta=dict(pixel_nm=100.0, pixel_nm_y=120.0))
+    c = Dataset.load(d2.save(tmp_path / 'b.smlm', frame_base=0, offset_px=0.0))
+    assert c.n_dims == 2 and c.meta['pixel_nm_y'] == 120.0 and torch.equal(c.frame, d2.frame)
+    assert torch.allclose(c.pos, d2.pos, atol=1e-5) and torch.allclose(c.crlb, d2.crlb, atol=1e-6)
+    assert torch.allclose(Dataset.load_smlm(tmp_path / 'b.smlm', pixel_nm=50.0).pos[:, 0], d2.pos[:, 0] * 2, atol=1e-5)
+    with pytest.raises(ValueError):
+        Dataset.from_arrays(ds.pos, ds.frame).save_smlm(tmp_path / 'c.smlm')    # no pixel size
+
+
+def test_smlm_foreign_file(tmp_path):
+    """a ShareLoc-style table without the torch_psf block: pixel_nm is needed; one lateral uncertainty column"""
+    import zipfile
+    n, hdr = 20, ['frame', 'x', 'y', 'uncertainty_xy_nm_']
+    a = np.zeros(n, np.dtype([(h, '<f4') for h in hdr]))
+    a['frame'], a['x'], a['y'], a['uncertainty_xy_nm_'] = np.arange(1, n + 1), 150.0, 250.0, 10.0
+    p = tmp_path / 'f.smlm'
+    with zipfile.ZipFile(p, 'w') as z:
+        z.writestr('manifest.json', json.dumps(dict(format_version='0.2', formats={'t': dict(
+            type='table', mode='binary', headers=hdr, dtype=['float32'] * 4)}, files=[dict(name='t.bin', format='t', rows=n)])))
+        z.writestr('t.bin', a.tobytes())
+    with pytest.raises(ValueError):
+        Dataset.load(p)
+    L = Dataset.load(p, pixel_nm=100.0)
+    assert torch.allclose(L.pos[0], torch.tensor([1.0, 2.0], dtype=torch.float64)) and L.frame[0] == 0
+    assert torch.allclose(L.crlb, torch.full((n, 2), 0.1))
 
 
 def test_render_and_frc():
