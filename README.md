@@ -26,7 +26,7 @@ psf = tp.InSituEstimator(start=tp.PSF.load('beads.json'), camera=camera).estimat
 spline = psf.to_spline(roisize=13, z_range=(0.0, 0.8))                         # fast form of the same PSF
 locs = spline.localize('movie.tif', camera, frames=(0, 1000))                   # Dataset: pos, crlb, photons, bg, ...
 print(locs, locs.crlb[:, 0].mean())
-locs.save('locs.hdf5')                                                           # or .csv (ThunderSTORM), save_picasso
+locs.save('locs.hdf5')                                                           # or .csv (ThunderSTORM), .smlm (ShareLoc), save_picasso
 
 pos = torch.tensor([[0.2, -0.1, 0.3]], device=spline.dev)                       # x, y (px from the ROI centre), z (um)
 img, dx, dy, dz = spline.render(pos, grad=True)                                  # [1, 13, 13] each
@@ -80,7 +80,7 @@ psf.save('insitu.json')
 
 - Read multipart TIFF movies and NumPy stacks with `tp.open_movie`.
 - Read and write psf.zip calibrations from 0.2.x through 0.5.x with `tp.PSF.load` and `tp.io.save_zip`.
-- Filter and render localizations with `tp.Dataset`; estimate drift (DME v2) as a `tp.Drift` with `ds.estimate_drift` and apply it with `ds.drift_corrected`. Read and write HDF5, Picasso and ThunderSTORM CSV.
+- Filter and render localizations with `tp.Dataset`; estimate drift (DME v2) as a `tp.Drift` with `ds.estimate_drift` and apply it with `ds.drift_corrected`. Read and write HDF5, Picasso, ThunderSTORM CSV and ShareLoc .smlm.
 - Read frames and camera metadata from a PSF grab recording with `torch_psf.auto.read_psfgrab`.
 
 **Browser apps**

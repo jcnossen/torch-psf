@@ -34,6 +34,7 @@ Dependencies: torch, numpy; h5py for hdf5; scipy for render(sigma_nm > 0); the `
 import importlib
 import json
 import os
+import re
 import sys
 import warnings
 import zipfile
@@ -541,13 +542,16 @@ class Dataset:
 
     # ------------------------------------------------------------------ files
     def save(self, path, **kw):
-        """By extension: .hdf5 / .h5 (this format), .csv (ThunderSTORM). Picasso: save_picasso. Returns the path."""
+        """By extension: .hdf5 / .h5 (this format), .csv (ThunderSTORM), .smlm (ShareLoc). Picasso: save_picasso.
+        Returns the path."""
         ext = os.path.splitext(str(path))[1].lower()
         if ext in ('.hdf5', '.h5'):
             return self.save_hdf5(path, **kw)
         if ext == '.csv':
             return self.save_csv(path, **kw)
-        raise ValueError(f'unknown file type {ext!r} (.hdf5, .h5, .csv; Picasso: save_picasso)')
+        if ext == '.smlm':
+            return self.save_smlm(path, **kw)
+        raise ValueError(f'unknown file type {ext!r} (.hdf5, .h5, .csv, .smlm; Picasso: save_picasso)')
 
     @classmethod
     def load(cls, path, **kw):
@@ -744,21 +748,88 @@ class Dataset:
             F[k.split(' [')[0]] = v
         return cls(F, dict(source=os.path.abspath(str(path)), format='thunderstorm csv', **meta_px))
 
+    def save_smlm(self, path, name=None, description='', extra=True, frame_base=1, offset_px=0.5, dtype='float32'):
+        """A ShareLoc.XYZ .smlm file (zip: manifest.json + one binary table, format_version 0.2), read back by
+        load_smlm. ThunderSTORM conventions as in save_csv: x [nm] = (x + offset_px) pixel_nm (y: pixel_nm_y for
+        non-square pixels), z [nm] = z pixel_nm, frame + frame_base. Columns: id, frame, x, y (z), uncertainty_x_nm_
+        ... from crlb, intensity_photon_ / offset_photon_ from photons / bg, n_frames if any localization spans more
+        than one frame, and with extra the other 1D fields (names made column-safe). Floats are stored as `dtype`
+        (float32 as in ShareLoc's own files: 0.01 nm at 100 um; float64 for a lossless round trip), id / frame as
+        uint32. The manifest also records the pixel size, frame count, image size and the conventions under
+        'torch_psf', which load_smlm uses when they are not given. Needs meta['pixel_nm']. Returns the path."""
+        if self.pixel_nm is None:
+            raise ValueError("meta['pixel_nm'] is not set")
+        px, py = self.pixel_nm_xy
+        F, n, D, fd = self.numpy(), len(self), self.n_dims, np.dtype(dtype).name
+        it = lambda v: 'uint32' if not n or (v.min() >= 0 and v.max() < 2 ** 32) else 'int64'
+        fr = F['frame'].astype(np.int64) + frame_base
+        C = [('id', F['id'], it(F['id']), ''), ('frame', fr, it(fr), 'frame'),
+             ('x', (F['pos'][:, 0] + offset_px) * px, fd, 'nm'), ('y', (F['pos'][:, 1] + offset_px) * py, fd, 'nm')]
+        if D == 3:
+            C.append(('z', F['pos'][:, 2] * px, fd, 'nm'))
+        if 'crlb' in F:
+            cr = F['crlb'].astype(np.float64)
+            C += [(f'uncertainty_{a}_nm_', cr[:, i] * (py if i == 1 else px), fd, 'nm') for i, a in enumerate('xyz'[:D])]
+        C += [(h, F[k], fd, 'photon') for k, h in (('photons', 'intensity_photon_'), ('bg', 'offset_photon_')) if k in F]
+        if (F['n_frames'] != 1).any():
+            C.append(('n_frames', F['n_frames'], 'uint32', 'frame'))
+        if extra:
+            used = {c[0] for c in C}
+            for k, v in F.items():
+                h = re.sub(r'[^0-9A-Za-z_]', '_', k)
+                if k in CORE or v.ndim != 1 or h in used:
+                    continue
+                used.add(h)
+                C.append((h, v, 'uint8' if v.dtype == bool else v.dtype.name if v.dtype.kind in 'iu' else fd, ''))
+        a = np.zeros(n, np.dtype([(h, np.dtype(t).newbyteorder('<')) for h, _, t, _ in C]))
+        for h, v, _, _ in C:
+            a[h] = v
+        hdr = [c[0] for c in C]
+        stat = lambda g: {h: float(g(a[h])) if n else 0.0 for h in hdr}
+        tab = 'smlm-table(binary)'
+        m = dict(format_version='0.2', name=name or os.path.splitext(os.path.basename(str(path)))[0],
+                 description=description, tags=[],
+                 formats={tab: dict(type='table', mode='binary', dtype=[c[2] for c in C], shape=[len(C)],
+                                    columns=len(C), headers=hdr, units=[c[3] for c in C],
+                                    description='localization table')},
+                 files=[dict(name='table-0.bin', format=tab, type='table', channel='default', rows=n,
+                             offset=dict.fromkeys('xyz'[:D], 0), min=stat(np.min), max=stat(np.max),
+                             avg=stat(np.mean))],
+                 torch_psf=dict(pixel_nm=px, pixel_nm_y=py, n_frames=self.num_frames,
+                                image_size=self.meta.get('image_size'), frame_base=frame_base, offset_px=offset_px,
+                                bool_columns=[h for h, v, _, _ in C if v.dtype == bool],
+                                generated_by='torch_psf.Dataset.save_smlm'))
+        tmp = str(path) + '.tmp'
+        with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+            z.writestr('manifest.json', json.dumps(m, indent=1, default=_jsonable))
+            z.writestr('table-0.bin', a.tobytes())
+        os.replace(tmp, path)
+        return path
+
     @classmethod
-    def load_smlm(cls, path, pixel_nm, frame_base=1, offset_px=0.5):
+    def load_smlm(cls, path, pixel_nm=None, frame_base=None, offset_px=None):
         """A ShareLoc.XYZ .smlm file (zip: manifest.json + a binary table) -> Dataset in px. Positions in nm with the
         ThunderSTORM conventions of most ShareLoc tables (frames from 1, first pixel centre at 0.5 px; override with
         frame_base / offset_px). Columns: x, y (z) -> pos; uncertainty_* -> crlb; intensity_* -> photons; offset_* ->
         bg; frame, id, chi2; the rest are kept under their names. The first table of the file is read. pixel_nm: a
-        number, or (x, y) for non-square pixels."""
-        pixel_nm, pixel_y, meta_px = _pixel_pair_nm(pixel_nm)
+        number, or (x, y) for non-square pixels; needed unless the file was written by save_smlm, whose pixel size,
+        conventions, frame count and image size are used when not given."""
         z = zipfile.ZipFile(str(path))
         m = json.loads(z.read('manifest.json'))
+        T = m.get('torch_psf') or {}
+        if pixel_nm is None:
+            if T.get('pixel_nm') is None:
+                raise ValueError('pixel_nm is needed: the .smlm file does not record a pixel size')
+            pixel_nm = (T['pixel_nm'], T.get('pixel_nm_y') or T['pixel_nm'])
+        frame_base = T.get('frame_base', 1) if frame_base is None else frame_base
+        offset_px = T.get('offset_px', 0.5) if offset_px is None else offset_px
+        pixel_nm, pixel_y, meta_px = _pixel_pair_nm(pixel_nm)
+        meta_px.update({k: T[k] for k in ('n_frames', 'image_size') if T.get(k) is not None})
         f = next(q for q in m['files'] if q.get('type', 'table') == 'table')
         fmt = m['formats'][f['format']]
         if fmt.get('mode', 'binary') != 'binary':
             raise ValueError(f"only binary .smlm tables are supported (mode {fmt.get('mode')!r})")
-        dt = np.dtype([(h, d) for h, d in zip(fmt['headers'], fmt['dtype'])])
+        dt = np.dtype([(h, np.dtype(d).newbyteorder('<')) for h, d in zip(fmt['headers'], fmt['dtype'])])
         a = np.frombuffer(z.read(f['name']), dtype=dt, count=int(f['rows']))
         R = {h: a[h].astype(np.float64) for h in fmt['headers']}
         pick = lambda pred: next((R.pop(h) for h in list(R) if pred(h.lower())), None)
@@ -773,6 +844,7 @@ class Dataset:
         if ux is None and u is not None:
             ux = uy = u
         if ux is not None:
+            uy = ux if uy is None else uy                   # uncertainty_xy_nm_ (one lateral value) is picked as x
             F['crlb'] = np.stack([ux, uy] + ([uz if uz is not None else np.zeros_like(ux)] if zz is not None
                                              else []), 1) / \
                 (pixel_nm if pixel_y == pixel_nm else np.array([pixel_nm, pixel_y, pixel_nm][:2 + (zz is not None)]))
@@ -782,8 +854,9 @@ class Dataset:
                 F[dst] = v
         if 'id' in R:
             F['id'] = R.pop('id').astype(np.int64)
-        for k, v in R.items():
-            F[k.rstrip('_')] = v
+        for k in R:
+            v = a[k].astype(a[k].dtype.newbyteorder('='))                           # the stored dtype
+            F[k.rstrip('_')] = v.astype(bool) if k in T.get('bool_columns', ()) else v
         return cls(F, dict(source=os.path.abspath(str(path)), format='shareloc smlm', **meta_px))
 
 
