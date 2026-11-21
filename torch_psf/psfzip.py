@@ -1,4 +1,4 @@
-"""psf.zip: the shared PSF export (format 'torch-psf', versions 0.2.x to 0.5.x; see docs/PSF_FORMAT.md).
+"""psf.zip: the shared PSF export (format 'torch-psf', versions 0.2.x to 0.7.x; see docs/PSF_FORMAT.md).
 
 One zip holds every channel of a setup:
     psf.json         format / version, optics, camera, provenance, emitter_params, channels (model, arrays, mapping to
@@ -23,6 +23,7 @@ import zipfile
 import numpy as np
 import torch
 from torch_psf.psf import PSF, FORMAT, READ_VERSIONS, check_version, version_string
+from torch_psf import extensions as _ext
 from torch_psf.spline import SplinePSF
 from torch_psf.dataset import _plain
 from torch_psf.optics import pixel_json
@@ -277,7 +278,7 @@ def legacy(meta, arrays, channel=None):
         d, arr, typ = dict(ch['model']), _arrays_of(ch, arrays), ch['type']
         if ch.get('source'):
             s = ch['source']
-            d = {**s['model'], **d}
+            d = {**{k: v for k, v in s['model'].items() if k != 'extensions'}, **d}   # the source's extensions are its own
             arr = {**_arrays_of(s, arrays), **arr}
         fb = ch.get('field')
         if fb and fb.get('type') == 'zernike_poly':        # PSF.load returns the field-dependent model
@@ -333,7 +334,8 @@ def camera_from_meta(meta, arrays):
 
 def _model_from_block(block, arrays, roisize=None, device=None):
     d = dict(block['model'], type=block['type'])
-    return PSF._registry[block['type']]._from_file(d, _arrays_of(block, arrays), roisize=roisize, device=device)
+    m = PSF._registry[block['type']]._from_file(d, _arrays_of(block, arrays), roisize=roisize, device=device)
+    return _ext.apply(m, d.get('extensions'), f"PSF model ({block['type']})")
 
 
 @dataclasses.dataclass
@@ -407,6 +409,7 @@ class PSFZip:
         if coupled or len(chans) == 1:
             d, arr, typ = legacy(meta, arrays)
             psf = PSF._registry[typ]._from_file(d, arr, roisize=roisize, device=device)
+            psf = _ext.apply(psf, d.get('extensions'), f'PSF model ({typ})')
             psf.provenance = prov
         out = []
         for i, c in enumerate(chans):
@@ -417,6 +420,7 @@ class PSFZip:
                 else:
                     d, arr, typ = legacy(meta, arrays, i)
                     model = PSF._registry[typ]._from_file(d, arr, roisize=roisize, device=device)
+                    model = _ext.apply(model, d.get('extensions'), f'PSF model ({typ}, channel {i})')
                     model.provenance = prov
                 if c.get('source'):
                     source = _model_from_block(c['source'], arrays, device=device)
@@ -586,6 +590,7 @@ OPTICS_KEYS = ('pixel_um', 'pixelsize_um', 'NA', 'wavelength_um', 'n_imm', 'n_me
 def _model_block(model, prefix):
     """{type, model, arrays} of a PSF model (its 0.1.0 json keys) and {member: array}."""
     d, arrs = model._file_dict(None)
+    d = _ext.with_entries(model, d)
     members = {k: f'{prefix}/{k}.npy' for k in arrs}
     return (dict(type=model.type_name, model=_plain(d), arrays=members),
             {members[k]: np.asarray(v) for k, v in arrs.items()})
@@ -805,6 +810,8 @@ def save_zip(path, psf, camera=None, provenance=None, source=None, report=None, 
     names = [c['name'] for c in chans]
     if len(set(names)) != len(names):
         raise ValueError(f'channel names must be unique: {names}')
+    if _ext.used(chans) or _ext.used(sb):
+        version = max(version, _ext.EXTENSIONS_VERSION)
     meta = dict(format=FORMAT, version=version_string(version),
                 psf_type=models[0].type_name if len(models) == 1 else 'channels',
                 n_dims=models[0].n_dims, emitter_params=_emitter_params(models[0]), units=UNITS)

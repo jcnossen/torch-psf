@@ -23,7 +23,7 @@ from torch_psf.dataset import Dataset, _plain
 from torch_psf.optics import pixel_meta, pixel_size, pixel_x
 
 FORMAT = 'torch-psf'
-READ_VERSIONS = ((0, 2), (0, 3), (0, 4), (0, 5), (0, 6))
+READ_VERSIONS = ((0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7))
 PIXEL_PAIR_VERSION = (0, 6)     # non-square pixels: pixel_um stored as [x, y]
 
 
@@ -293,6 +293,11 @@ class PSF:
             raise NotImplementedError(f'{type(self).__name__} has no model file block')
         return pixel_version((0, 2), getattr(self, 'pixel_um', None))
 
+    def file_extensions(self):
+        """Extension entries (torch_psf.extensions.entry) stored with this model; none for the built-in models.
+        A model extension (a subclass or an attached module from another package) returns its own here."""
+        return []
+
     def json_format_version(self, source=None):
         """Minimum version in the standalone layout, which predates the 0.2 channel container."""
         version = self.format_version(source)
@@ -312,8 +317,13 @@ class PSF:
         .npz next to it when there are arrays (pupil maps, knots). source: for a spline, the vectorial model it was
         built from (its parameters are stored too). camera: optional Camera. provenance: dict stored with the model
         (default: self.provenance, which the estimators set to their settings and report). Returns the json dict."""
+        from torch_psf import extensions
         d, arrays = self._file_dict(source)
-        d = dict(format=FORMAT, version=version_string(self.json_format_version(source)), type=self.type_name, **d)
+        d = extensions.with_entries(self, d)
+        version = self.json_format_version(source)
+        if extensions.used(d):
+            version = max(version, extensions.EXTENSIONS_VERSION)
+        d = dict(format=FORMAT, version=version_string(version), type=self.type_name, **d)
         if camera is not None:
             d['camera'] = camera.to_dict()
         d['provenance'] = _plain(provenance if provenance is not None else (self.provenance or {}))
@@ -371,6 +381,8 @@ class PSF:
             raise ValueError(f'unknown PSF type {typ!r} (known: {sorted(PSF._registry)})')
         psf = PSF._registry[typ]._from_file(d, arrays, roisize=roisize, device=device, angle=angle, npupil=npupil,
                                             oversample=oversample)
+        from torch_psf import extensions
+        psf = extensions.apply(psf, d.get('extensions'), f'PSF model ({typ})')
         if angle is not None and not PSF._has_angle_terms(psf):
             unused = (d.get('provenance') or {}).get('unused_model_keys') or {}
             hint = (' (its per-angle terms are only in provenance.unused_model_keys: the file was converted by a '

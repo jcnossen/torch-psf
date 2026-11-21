@@ -152,12 +152,12 @@ def test_old_single_model_and_future_minor(tmp_path):
     old['version'] = '0.1.0'  # All single-model files through stage 3 used this header.
     path.write_text(json.dumps(old))
     equal_render(PSF.load(path, device='cpu'), model)
-    meta = dict(format='torch-psf', version='0.7.0', arrays='absent.npz')
-    with pytest.raises(ValueError, match=r'psf.json version 0\.7\.0'):
+    meta = dict(format='torch-psf', version='0.8.0', arrays='absent.npz')
+    with pytest.raises(ValueError, match=r'psf.json version 0\.8\.0'):
         PSF.load(meta)
     path = tmp_path / 'future.zip'
     with zipfile.ZipFile(path, 'w') as z:
         z.writestr('psf.json', json.dumps(meta))
         z.writestr('future.npy', b'unknown encoding')
-    with pytest.raises(ValueError, match=r'psf.zip version 0\.7\.0'):
+    with pytest.raises(ValueError, match=r'psf.zip version 0\.8\.0'):
         psfzip.PSFZip.read(path)

@@ -37,8 +37,9 @@ the optical state embedded in a phase spline. Readers check the major and minor 
 | Non-box 4Pi, integrated phase grid, spline dipole components, integrated or bilinearly blended field tiles | 0.4.0 | 0.4.0 for a single model |
 | Explicit `cubic_spline` grid (earlier name `spline_table`), including its use for a phase channel or a tile | 0.5.0 | 0.5.0 |
 | Non-square pixels: `pixel_um` / `pixelsize_um` / 4Pi `px` stored as `[x, y]` (only when x != y) | 0.6.0 | 0.6.0 |
+| Model extensions: an `extensions` list in a model block or 4Pi state (see [Model extensions](#model-extensions-070)) | 0.7.0 | 0.7.0 |
 
-Python reads zip minors 0.2 through 0.6. Standalone files have a top-level `type` and optional sidecar
+Python reads zip minors 0.2 through 0.7. Standalone files have a top-level `type` and optional sidecar
 `.npz`. Python also reads historical standalone 0.1 files, including those that already contained newer
 features, and plain SIMCODE calibration JSONs without a format header. The web reader accepts 0.2.x and
 0.3.x. A 0.4 reader knows only the two older spline representations and can rebuild a phase or tile with
@@ -261,6 +262,41 @@ default responses after weighting. If the weights are absent, use the stored `kn
 using `rebuild` regenerate all six splines per phase component. The standalone `fourpi_spline` JSON/NPZ form
 stacks the phase arrays as `dipole_knots[3,C,6,nz,n,n]`. Dipole components require at least version 0.4.0,
 including cubic grids built from a box-integrated source.
+
+### Model extensions (0.7.0)
+
+A model block (`channels[c].model`, `source.model`, a standalone json) or a 4Pi state (`fourpi`) may name
+extensions whose code is not part of torch-psf: a subclass or an attached module from another package.
+
+```json
+"extensions": [{"name": "mylab.custom_detection", "version": 1, "required": true,
+                "state": {"weights_re": [...], "weights_im": [...]}}]
+```
+
+- `name`: namespaced by the providing package, `<package>.<feature>`. Names starting with `torch_psf.` are reserved.
+- `version`: the version of the extension's own state layout (an integer), independent of the file version.
+- `required` (default true): whether the model is wrong without the extension.
+- `state`: the extension's parameters as plain JSON. They are interpreted only by the extension.
+
+The file never carries code. A reader applies each entry with the loader that the extension's package registers in
+the reading environment. The package registers it with `torch_psf.extensions.register_extension(name, load, version)`
+when imported, or with a `torch_psf.extensions` entry point named after the extension, so that it is found without an
+import. The loader is called as `load(model, state, version)` and returns the extended model.
+
+When no loader is installed, or the installed one is older than the entry's `version`:
+- a required entry makes reading fail with an `ExtensionError` that names the extension;
+- an optional entry gives a warning, and the base model is returned without it.
+
+Writers add a model's `file_extensions()` to its block and write version 0.7.0 when any block holds extensions.
+Files without extensions keep their version.
+
+For 4Pi, the extension entries of the source model live in its state (`fourpi.extensions`). The tabulated splines of a
+`fourpi_spline` file already contain the extended model's images, so a reader without the extension can still render
+them. Only rebuilding the knots (`spline_knots='rebuild'`) or using the source model needs the extension.
+
+`FourPiPSF.channel_field_weights()` is the hook for detection models. It returns complex weights `[2 (arm), C, 2]`
+on the camera-frame fields (E_x, E_y) of each arm, or `None` for the pure E_x / E_y channels. These come from
+`FourPiPSF.detection`: a `torch.nn.Module` with `weights(pol)` and, to be storable, `extension_entry()`.
 
 ### Mapping (`channels[c].mapping`)
 

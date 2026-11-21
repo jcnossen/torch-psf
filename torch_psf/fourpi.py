@@ -49,6 +49,7 @@ import torch
 from torch_psf.composition import _AxialCoordinate
 from torch_psf.optics import resolve_device, Optics, pixel_area, pixel_json, pixel_size
 from torch_psf.psf import PSF, pixel_version, render_with_grad
+from torch_psf import extensions as _ext
 from torch_psf.multichannel import MultiChannelPSF
 from torch_psf._dipole import M_to_m6, contract_fields
 from torch_psf.integrate import PixelIntegrator, pixel_integration_mode, spectral_cutoff, spectral_min_oversample
@@ -150,6 +151,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         self.top, self.bot = mk(NA_t, ni_t), mk(NA_b, ni_b)
         self.pixel_integration = pixel_integration
         self.register_buffer('pol', torch.tensor(list(pol), device=self.dev))
+        self.detection = None         # optional detection model (channel_field_weights); None = pure Ex / Ey channels
         C = len(pol)
         if phi is None:
             phi = [(-2 * math.pi * c / C) % (2 * math.pi) for c in range(C)]
@@ -338,7 +340,12 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         pixels = self._integrator()
         Et, Eb, energy = self.fields(pos, pixels)
         Mc = None if basis else self._dipole(dipM, len(pos), pos.device, Et.real.dtype)
-        pairs = ((Et[:, :, int(p)], Eb[:, :, int(p)]) for p in self.pol)
+        w = self.channel_field_weights()
+        if w is None:
+            pairs = ((Et[:, :, int(p)], Eb[:, :, int(p)]) for p in self.pol)
+        else:                       # linear detection of the camera-frame fields (channel_field_weights)
+            pairs = ((torch.einsum('j,bdjuv->bduv', w[0, c], Et), torch.einsum('j,bdjuv->bduv', w[1, c], Eb))
+                     for c in range(len(self.pol)))
         return self._channel_pixels(pairs, pixels, energy, Mc, phi, basis)
 
     def _forward_channels(self, pos_c, dipM=None, phi=None, basis=False):
@@ -360,6 +367,10 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         bot = self._pupil_at_depth(self.bot, pb, pixels)
         Pt, Pb = (arm.fields.unflatten(1, (3, 2)) for arm in (top, bot))
         Mc = None if basis else self._dipole(dipM, B, dev, Pt.real.dtype)
+        w = self.channel_field_weights()
+        if w is not None:           # bottom weights in its own frame: the camera-frame E_neg_pol is -flip(E)
+            w = w.clone()
+            w[1, :, neg_pol] = -w[1, :, neg_pol]
 
         def channel_fields():
             for c in range(C):
@@ -367,10 +378,16 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
                 sx, sy = sh[:, c, 0, None, None], sh[:, c, 1, None, None]
                 rt = torch.exp(-1j * (top.kx * sx + top.ky * sy))[:, None]
                 rb = torch.exp(-1j * (bot.kx * (sb[0] * sx) + bot.ky * (sb[1] * sy)))[:, None]
-                et = top.image_fields(Pt[:, :, p] * rt) * top.amplitude_scale
-                eb = bot.image_fields(Pb[:, :, p] * rb) * bot.amplitude_scale
+                if w is None:
+                    et = top.image_fields(Pt[:, :, p] * rt) * top.amplitude_scale
+                    eb = bot.image_fields(Pb[:, :, p] * rb) * bot.amplitude_scale
+                    sign = -1.0 if p == neg_pol else 1.0
+                else:
+                    et = top.image_fields(torch.einsum('j,bdjuv->bduv', w[0, c], Pt) * rt) * top.amplitude_scale
+                    eb = bot.image_fields(torch.einsum('j,bdjuv->bduv', w[1, c], Pb) * rb) * bot.amplitude_scale
+                    sign = 1.0
                 eb = eb * sgn_b.to(eb.real.dtype)[None, :, None, None]
-                yield et, torch.flip(eb, dims=[flip_dim]) * (-1.0 if p == neg_pol else 1.0)
+                yield et, torch.flip(eb, dims=[flip_dim]) * sign
 
         return self._channel_pixels(channel_fields(), pixels, top.energy, Mc, phi, basis)
 
@@ -413,6 +430,23 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         self.dev = self.phi.device
         return self
 
+    def channel_field_weights(self):
+        """Complex detection weights [2 (top, bottom arm), C, 2 (E_x, E_y)]: channel c images the field
+        w[k, c] . (E_x, E_y) of arm k (camera frame), or None (default) for the pure E_x / E_y channel of pol_c.
+        From self.detection (a torch.nn.Module with weights(pol) -> [2, C, 2] complex) when one is set. A detection
+        model is stored in files only through a model extension: its extension_entry() (torch_psf.extensions)."""
+        return None if self.detection is None else self.detection.weights(self.pol)
+
+    def file_extensions(self):
+        """Extension entries of this model (torch_psf.extensions): the detection model's, if it has one."""
+        if self.detection is None:
+            return []
+        fn = getattr(self.detection, 'extension_entry', None)
+        if fn is None:
+            raise ValueError(f'detection model {type(self.detection).__name__} has no extension_entry(): it cannot be '
+                             'stored in a state or file (torch_psf.extensions)')
+        return [fn()]
+
     def resized(self, roisize):
         """A copy for roisize x roisize patches (same parameters)."""
         new = copy.deepcopy(self)
@@ -446,7 +480,10 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         if self.asym:
             s['depth'] = _list(self.depth)
         s['raw'] = {k: _list(v) if v.dim() else float(v.detach()) for k, v in self.named_parameters()
-                    if not k.startswith(('top.', 'bot.')) and k != 'channel_offsets'}
+                    if not k.startswith(('top.', 'bot.', 'detection.')) and k != 'channel_offsets'}
+        ex = self.file_extensions()
+        if ex:
+            s['extensions'] = ex
         s['arms'] = {'top': _arm_state(t), 'bottom': _arm_state(b)}
         if self.has_offsets():
             s['channel_offsets'] = _list(self.channel_offsets)
@@ -489,7 +526,7 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
                     _arm_load(arm, arms[name])
             if s.get('channel_offsets') is not None:
                 p.channel_offsets.copy_(torch.as_tensor(s['channel_offsets'], dtype=torch.float32).reshape(-1, 2))
-        return p
+        return _ext.apply(p, s.get('extensions'), 'FourPiPSF state')
 
     # ------------------------------------------------------------------ files
     @staticmethod
@@ -497,7 +534,8 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         return (0, 2) if mode == 'midpoint' else (0, 4)
 
     def format_version(self, source=None):
-        return pixel_version(self.integration_version(self.pixel_integration), self.pixel_um)
+        version = pixel_version(self.integration_version(self.pixel_integration), self.pixel_um)
+        return max(version, _ext.EXTENSIONS_VERSION) if self.file_extensions() else version
 
     def _file_dict(self, source=None):
         o = Optics(pixel_um=self.pixel_um, NA=float(self.top.NA), wavelength_um=self.top.wavelength_um,
@@ -706,7 +744,9 @@ class FourPiSplinePSF(_CoupledChannels):
             return max(version, source.format_version())
         if self.source_state is not None:
             mode = pixel_integration_mode(self.source_state['meta'].get('pixel_integration'), from_file=True)
-            return max(version, FourPiPSF.integration_version(mode))
+            version = max(version, FourPiPSF.integration_version(mode))
+            if _ext.used(self.source_state):
+                version = max(version, _ext.EXTENSIONS_VERSION)
         return version
 
     def _stored_splines(self):
