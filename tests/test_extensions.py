@@ -239,3 +239,36 @@ def test_spline_of_detection_model(tmp_path, det_ext):
         torch.testing.assert_close(k.render(pos), s.render(pos), rtol=0, atol=1e-6)
         with pytest.raises(ext.ExtensionError):
             PSF.load(tmp_path / 'rebuild.psf.zip', device='cpu')               # rebuilding needs the source model
+
+
+DEVICES = ['cpu'] + (['cuda'] if torch.cuda.is_available() else [])
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_detection_loaded_to_the_read_device(tmp_path, det_ext, device):
+    """The loader creates its module on the CPU: reading to any device (and the knot rebuild, which tabulates the
+    source on the GPU when there is one) must still render there."""
+    p = fourpi()
+    p.detection = LinearDetection(mixing_weights(p))
+    s = to_spline(p, (-0.3, 0.3), roisize=13, oversample=2, dz_um=0.02)
+    pos = (POS * torch.tensor([1.0, 1.0, 0.5])).to(device)
+    with torch.no_grad():
+        save_zip(tmp_path / 'rebuild.psf.zip', s, spline_knots='rebuild')
+        save_zip(tmp_path / 'model.psf.zip', p)
+        ref = s.render(pos.cpu())
+        r = PSF.load(tmp_path / 'rebuild.psf.zip', device=device)
+        torch.testing.assert_close(r.render(pos).cpu(), ref, rtol=0, atol=1e-5 * float(ref.max()))
+        q = PSF.load(tmp_path / 'model.psf.zip', device=device)
+        assert q.detection.re.device.type == torch.device(device).type
+        torch.testing.assert_close(q.render(pos).cpu(), p.render(pos.cpu()), rtol=0, atol=1e-5 * float(ref.max()))
+        q2 = FourPiPSF.from_state(p.state(), device=device, roisize=13, z_range=(-0.4, 0.4))
+        torch.testing.assert_close(q2.render(pos).cpu(), p.render(pos.cpu()), rtol=0, atol=1e-5 * float(ref.max()))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='needs a GPU')
+def test_detection_module_on_another_device():
+    p = fourpi().to('cuda')
+    ref = p.render(POS.cuda()).detach()
+    p.detection = LinearDetection(identity_weights(p).cpu())          # attached by hand, still on the CPU
+    with torch.no_grad():
+        torch.testing.assert_close(p.render(POS.cuda()), ref, rtol=0, atol=1e-6 * float(ref.max()))

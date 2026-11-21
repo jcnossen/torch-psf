@@ -435,7 +435,9 @@ class FourPiPSF(torch.nn.Module, _CoupledChannels):
         w[k, c] . (E_x, E_y) of arm k (camera frame), or None (default) for the pure E_x / E_y channel of pol_c.
         From self.detection (a torch.nn.Module with weights(pol) -> [2, C, 2] complex) when one is set. A detection
         model is stored in files only through a model extension: its extension_entry() (torch_psf.extensions)."""
-        return None if self.detection is None else self.detection.weights(self.pol)
+        if self.detection is None:
+            return None
+        return self.detection.weights(self.pol).to(self.pol.device)     # also a detection module on another device
 
     def file_extensions(self):
         """Extension entries of this model (torch_psf.extensions): the detection model's, if it has one."""

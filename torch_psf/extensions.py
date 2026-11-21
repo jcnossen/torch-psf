@@ -8,7 +8,9 @@ environment, never from the file: register_extension(name, load, version) when t
 `torch_psf.extensions` entry point named after the extension (pyproject.toml:
 [project.entry-points."torch_psf.extensions"] "mylab.custom_detection" = "mylab.psf_detection:load").
 
-Reading a model applies its entries in order: load(model, state, version) -> the extended model. An extension that is
+Reading a model applies its entries in order: load(model, state, version) -> the extended model; a model that is a
+torch.nn.Module is then moved to the device it was read to (a loader need not place new modules itself; for other
+models the loader must create its tensors on model.dev). An extension that is
 not installed (or whose installed loader is older than the entry's version) is an error when the entry is required
 (the default) and a warning when it is optional (the base model is returned without it). Names are namespaced by the
 providing package ("<package>.<feature>"); names starting with "torch_psf." are reserved.
@@ -17,6 +19,8 @@ Writing: a model reports its entries with file_extensions() (PSF default: none).
 block (unless the block already holds them, as the FourPiPSF state does) and raise the file version to 0.7.
 """
 import warnings
+
+import torch
 
 EXTENSIONS_VERSION = (0, 7)
 ENTRY_POINT_GROUP = 'torch_psf.extensions'
@@ -98,7 +102,10 @@ def apply(model, entries, where='PSF model'):
                 raise ExtensionError(f'{where} {problem}{hint}')
             warnings.warn(f'{where} {problem}: loaded without it (optional extension)')
             continue
+        dev = getattr(model, 'dev', None)
         model = found[0](model, e.get('state'), version)
+        if dev is not None and isinstance(model, torch.nn.Module):
+            model = model.to(dev)   # modules the loader created (often on the CPU) to the device the model was read to
     return model
 
 
