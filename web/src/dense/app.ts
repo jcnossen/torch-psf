@@ -4,6 +4,7 @@ import {
   exportMovieReport,
   type MovieFit,
   type MovieObserver,
+  type PhotometrySnapshot,
   type MovieFrameObserver,
 } from './movie';
 import { moviePupilReport } from './report';
@@ -18,7 +19,13 @@ export function download(el: HTMLElement, name: string, data: BlobPart, type: st
 export function mount(
   title: string,
   finish?: (fit: MovieFit, el: HTMLElement) => Promise<void>,
-  live?: { start(): void; update: MovieObserver; frame?: MovieFrameObserver; end(): void },
+  live?: {
+    start(): void;
+    update: MovieObserver;
+    frame?: MovieFrameObserver;
+    photometry?: (snapshot: PhotometrySnapshot) => void;
+    end(): void;
+  },
 ) {
   const root = document.querySelector('main')!;
   root.innerHTML =
@@ -115,6 +122,7 @@ export function mount(
           await live?.update(dev, iteration);
         },
         live?.frame,
+        live?.photometry,
       );
       log('Writing PSF archive');
       const source = stackFile ? movieFile.name + ' / calibration: ' + stackFile.name : movieFile.name;
@@ -152,8 +160,8 @@ export function mount(
           ? 'Stack-calibrated pupil.'
           : 'Movie-only pupil. The sign of Z can be ambiguous near focus.') +
         ' ' +
-        r.boundaryFrames +
-        ' frames at the axial fit limit.';
+        r.focusWindowShifts +
+        ' axial lookup window shifts.';
       out.append(summary);
       if (finish) await finish(r, out);
       log('Fit complete');

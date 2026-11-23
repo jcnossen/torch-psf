@@ -26,6 +26,7 @@ export interface MovieFit {
   settings: Settings;
   stackCalibrated: boolean;
   boundaryFrames: number;
+  focusWindowShifts: number;
 }
 const R = 13,
   K = 3,
@@ -160,7 +161,14 @@ async function calibrate(
 }
 // Pixel-integrated vectorial PSFs, sampled at subpixel shifts. The six sphere
 // points reproduce the three second moments of a uniformly fluorescent bead.
-async function table(dev: GPUDevice, m: VectorialModel, diameter: number, half: number) {
+async function table(
+  dev: GPUDevice,
+  m: VectorialModel,
+  diameter: number,
+  half: number,
+  offsetUm = 0,
+  onlyPlane?: number,
+) {
   const eng = new VecEngine(
     dev,
     { ...m.optics, roisize: R, npupil: m.npupil, oversample: m.oversample, zernike_noll: m.noll },
@@ -182,7 +190,7 @@ async function table(dev: GPUDevice, m: VectorialModel, diameter: number, half: 
   const out = new Float32Array(NZ * SIDE * SIDE);
   try {
     eng.setZernike(m.zcoef);
-    for (let z = 0; z < NZ; z++) {
+    for (let z = onlyPlane ?? 0; z <= (onlyPlane ?? NZ - 1); z++) {
       const images = [];
       for (let iy = 0; iy < K; iy++)
         for (let ix = 0; ix < K; ix++)
@@ -191,7 +199,7 @@ async function table(dev: GPUDevice, m: VectorialModel, diameter: number, half: 
               x: (ix - 1) / K + dx / m.optics.pixel_um,
               y: (iy - 1) / K + dy / m.optics.pixel_um,
               ze: center + dz,
-              f: center + half * ((2 * z) / (NZ - 1) - 1),
+              f: center + offsetUm + half * ((2 * z) / (NZ - 1) - 1),
               I: 1,
               bg: 0,
             });
@@ -373,6 +381,10 @@ export interface MovieIteration {
   score?: number;
   driftNm?: number[];
 }
+export type PhotometrySnapshot = Pick<
+  MovieFit,
+  'xy' | 'width' | 'height' | 'drift' | 'intensity' | 'settings'
+>;
 export type MovieObserver = (device: GPUDevice, update: MovieIteration) => Promise<void>;
 /** Camera-corrected input plane, delivered before its processing step. */
 export type MovieFrameObserver = (
@@ -391,14 +403,15 @@ export async function fitMovie(
   log: (msg: string) => void,
   observe?: MovieObserver,
   onFrame?: MovieFrameObserver,
+  photometry?: (snapshot: PhotometrySnapshot) => void,
 ) {
   const t = await TiffMovie.open([file]);
   checkAxis(t, false);
   if (t.n < 2) throw Error('A movie requires multiple frames.');
   const model: VectorialModel = {
     optics: s.optics,
-    noll: [6],
-    zcoef: [0],
+    noll: [5, 6, 7, 8, 9, 10, 11],
+    zcoef: Array(7).fill(0),
     roisize: R,
     npupil: 32,
     oversample: 2,
@@ -461,9 +474,10 @@ export async function fitMovie(
     // Profile the mean image over focus and a single astigmatism coefficient.
     // Through-focus calibration supplies the signed, multi-mode pupil when available.
     let trial = 0;
+    const trialCount = (stack ? 1 : 3) * Math.floor((NZ - 2) / 2) + (stack ? 0 : 4 * model.noll.length);
     for (const coef of stack ? [0] : [0, 0.075, 0.15]) {
       if (coef) {
-        model.zcoef = [coef];
+        model.zcoef = [0, coef, 0, 0, 0, 0, 0];
         lut = await table(dev, model, s.diameterNm, half);
         dev.queue.writeBuffer(gpu.lut, 0, lut);
       }
@@ -483,7 +497,7 @@ export async function fitMovie(
           await observe(dev, {
             stage: 'profile',
             index: trial,
-            total: (stack ? 1 : 3) * Math.floor((NZ - 2) / 2),
+            total: trialCount,
             model,
             emitterHeightUm: s.diameterNm / 2000,
             focusUm: s.diameterNm / 2000 + (z - (NZ - 1) / 2) * dz,
@@ -497,7 +511,46 @@ export async function fitMovie(
       }
     }
     if (!stack) {
-      model.zcoef = [bestCoef];
+      const coefficients = [0, bestCoef, 0, 0, 0, 0, 0];
+      // Score independent signed perturbations of each pupil mode at the best focus.
+      for (const delta of [0.04, 0.02])
+        for (let mode = 0; mode < coefficients.length; mode++) {
+          const center = coefficients[mode];
+          for (const sign of [-1, 1]) {
+            const candidate = coefficients.slice();
+            candidate[mode] = center + sign * delta;
+            model.zcoef = candidate;
+            const offset = d[2] * SIDE * SIDE;
+            const bank = await table(dev, model, s.diameterNm, half, 0, d[2]);
+            dev.queue.writeBuffer(gpu.lut, offset * 4, bank.subarray(offset, offset + SIDE * SIDE));
+            b.set(base);
+            let cost = 0;
+            for (let j = 0; j < 3; j++) {
+              const stat = await gpu.step(b, d, bg);
+              cost = 0;
+              for (let i = 0; i < xy.length; i++) {
+                b[4 * i + 2] *= stat[9 * i];
+                cost += stat[9 * i + 7];
+              }
+            }
+            if (cost < best) {
+              best = cost;
+              coefficients[mode] = candidate[mode];
+            }
+            trial++;
+            if (observe)
+              await observe(dev, {
+                stage: 'profile',
+                index: trial,
+                total: trialCount,
+                model,
+                emitterHeightUm: s.diameterNm / 2000,
+                focusUm: s.diameterNm / 2000 + (d[2] - (NZ - 1) / 2) * dz,
+                score: cost,
+              });
+          }
+        }
+      model.zcoef = coefficients;
       lut = await table(dev, model, s.diameterNm, half);
       dev.queue.writeBuffer(gpu.lut, 0, lut);
     }
@@ -557,7 +610,11 @@ export async function fitMovie(
       intensity: number[][] = [],
       drift: number[][] = [],
       background: number[] = [];
-    let boundaryFrames = 0;
+    let focusWindowShifts = 0,
+      windowCenterUm = 0;
+    const fittedXY = xy.map((_, i) => [ref[4 * i], ref[4 * i + 1]]);
+    let minFocusUm = -half,
+      maxFocusUm = half;
     for (let frame = 0; frame < t.n; frame++) {
       log('Fitting frame ' + (frame + 1) + ' / ' + t.n);
       const im = photons(await t.read(frame, frame + 1), s),
@@ -568,6 +625,15 @@ export async function fitMovie(
       b.set(ref);
       for (let i = 0; i < xy.length; i++) b[i * 4 + 2] = groupFlux[frame % period][i * 4 + 2];
       for (let it = 0; it < 12; it++) {
+        // Re-tabulate around the current physical focus before interpolation approaches
+        // either edge. Keep the same Z spacing and preserve the absolute trajectory.
+        if (d[2] < 2 || d[2] > NZ - 3) {
+          focusWindowShifts++;
+          windowCenterUm += (d[2] - (NZ - 1) / 2) * dz;
+          d[2] = (NZ - 1) / 2;
+          lut = await table(dev, model, s.diameterNm, half, windowCenterUm);
+          dev.queue.writeBuffer(gpu.lut, 0, lut);
+        }
         const stat = await gpu.step(b, d, back),
           g = [0, 0, 0],
           h = [0, 0, 0];
@@ -580,15 +646,18 @@ export async function fitMovie(
           }
         }
         if (it >= 2 && it < 10)
-          for (let u = 0; u < 3; u++)
-            d[u] = clamp(
-              d[u] + 0.6 * clamp(g[u] / Math.max(1, h[u]), u === 2 ? -1 : -0.25, u === 2 ? 1 : 0.25),
-              u === 2 ? 0 : -4,
-              u === 2 ? NZ - 1 : 4,
-            );
+          for (let u = 0; u < 3; u++) {
+            const update = 0.6 * clamp(g[u] / Math.max(1, h[u]), u === 2 ? -1 : -0.25, u === 2 ? 1 : 0.25);
+            d[u] = u === 2 ? d[u] + update : clamp(d[u] + update, -4, 4);
+          }
       }
       intensity.push(xy.map((_, i) => b[i * 4 + 2]));
-      drift.push([d[0], d[1], (d[2] - (NZ - 1) / 2) * dz * 1000]);
+      const focusUm = windowCenterUm + (d[2] - (NZ - 1) / 2) * dz;
+      drift.push([d[0], d[1], focusUm * 1000]);
+      minFocusUm = Math.min(minFocusUm, focusUm);
+      maxFocusUm = Math.max(maxFocusUm, focusUm);
+      if (photometry && (frame === 11 || frame === 35) && frame + 1 < t.n)
+        photometry({ xy: fittedXY, width: t.W, height: t.H, intensity, drift, settings: s });
       if (observe)
         await observe(dev, {
           stage: 'frame',
@@ -599,8 +668,8 @@ export async function fitMovie(
           focusUm: s.diameterNm / 2000 + drift[frame][2] / 1000,
           driftNm: [d[0] * s.optics.pixel_um * 1000, d[1] * s.optics.pixel_um * 1000, drift[frame][2]],
         });
-      if (d[2] < 0.1 || d[2] > NZ - 1.1) boundaryFrames++;
     }
+    model.z_range_um = [minFocusUm, maxFocusUm];
     model.focus_um = s.diameterNm / 2000 + drift.reduce((sum, p) => sum + p[2], 0) / drift.length / 1000;
     if (observe)
       await observe(dev, {
@@ -614,14 +683,15 @@ export async function fitMovie(
     return {
       width: t.W,
       height: t.H,
-      xy: xy.map((_, i) => [ref[4 * i], ref[4 * i + 1]]),
+      xy: fittedXY,
       intensity,
       drift,
       background,
       model,
       settings: s,
       stackCalibrated: !!stack,
-      boundaryFrames,
+      boundaryFrames: 0, // Retained for earlier consumers. Axial motion is no longer clipped.
+      focusWindowShifts,
     } satisfies MovieFit;
   } finally {
     gpu.destroy();
@@ -644,7 +714,7 @@ export async function exportMovieReport(dev: GPUDevice, r: MovieFit, source?: st
     'fitted candidates': r.xy.length,
     frames: r.drift.length,
     'mean stage focus (nm)': 1000 * m.focus_um,
-    focus_boundary_frames: r.boundaryFrames,
+    focus_window_shifts: r.focusWindowShifts,
   };
   return buildPsfZip(dev, {
     vectorial: m,
@@ -677,7 +747,7 @@ export async function exportMovieReport(dev: GPUDevice, r: MovieFit, source?: st
         notes: [
           r.stackCalibrated
             ? 'The calibration stack supplied the fitted pupil.'
-            : 'Movie-only calibration searched one astigmatism coefficient (Noll 6). The axial sign can be ambiguous near focus.',
+            : 'Movie-only calibration profiled Noll modes 5 through 11. The axial sign can be ambiguous near focus.',
           'PSF slices show emitter height at the fitted mean stage focus.',
         ],
       }),
