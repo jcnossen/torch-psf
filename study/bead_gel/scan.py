@@ -392,13 +392,18 @@ def evaluate(out, passes):
         matched=len(i),
         recall=len(i) / len(xyz),
         precision=len(i) / len(est),
-        rms_xyz_nm=np.sqrt((err**2).mean(0)).tolist(),
+        rms_xyz_nm=np.sqrt((err**2).mean(0)).tolist() if len(i) else None,
         drift_rms_xyz_nm=(np.sqrt(((d - ref) ** 2).mean(0)) * 1000).tolist(),
-        usable_trace_relative_rms=float(np.sqrt(np.mean(e[valid] ** 2))),
-        usable_fraction=float(valid.mean()),
+        usable_trace_relative_rms=float(np.sqrt(np.mean(e[valid] ** 2))) if valid.any() else None,
+        usable_fraction=float(valid.mean()) if valid.size else None,
         projected_close=int(close.sum()),
         projected_close_matched=int(close[i].sum()),
     )
+    if len(xyz) and np.ptp(xyz[:,2]) < 1e-8:
+        lateral = np.linalg.norm(delta[:,:,:2],axis=2)
+        ia,ib = linear_sum_assignment(np.where(lateral <= .25, lateral, 1e4))
+        stats["slide_xy_recall"] = float(np.mean(lateral[ia,ib] <= .25) * len(ia)/len(xyz))
+        stats["slide_height_error_nm"] = float(1000*(np.median(est[:,2])-xyz[0,2]))
     (out / f"metrics_{passes}pass.json").write_text(json.dumps(stats, indent=2))
     print(json.dumps(stats), flush=True)
 
