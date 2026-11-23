@@ -1,5 +1,5 @@
 import { getDevice } from '../gpu/device';
-import { fitMovie, exportPsf, type MovieFit } from './movie';
+import { fitMovie, exportPsf, type MovieFit, type MovieObserver } from './movie';
 import './dense.css';
 export function download(el: HTMLElement, name: string, data: BlobPart, type: string) {
   const a = document.createElement('a');
@@ -8,7 +8,11 @@ export function download(el: HTMLElement, name: string, data: BlobPart, type: st
   a.textContent = name;
   el.append(a);
 }
-export function mount(title: string, finish?: (fit: MovieFit, el: HTMLElement) => Promise<void>) {
+export function mount(
+  title: string,
+  finish?: (fit: MovieFit, el: HTMLElement) => Promise<void>,
+  live?: { start(): void; update: MovieObserver; end(): void },
+) {
   const root = document.querySelector('main')!;
   root.innerHTML =
     '<h1></h1><p id="purpose"></p><form><section id="inputs"></section><details><summary>Acquisition settings</summary><section id="settings"></section></details><button>Fit movie</button></form><p role="status"></p><article></article>';
@@ -77,6 +81,7 @@ export function mount(title: string, finish?: (fit: MovieFit, el: HTMLElement) =
       status.textContent = s;
     };
     try {
+      live?.start();
       const [px, NA, wl, ni, ns, diameterNm, stepNm, offset, gain] = inputs.map((i) => Number(i.value));
       if (Math.min(px, NA, wl, ni, ns, gain) <= 0 || NA > ni || diameterNm < 0)
         throw Error('Check the optical and camera settings.');
@@ -95,6 +100,7 @@ export function mount(title: string, finish?: (fit: MovieFit, el: HTMLElement) =
           period: finish ? 6 : 1,
         },
         log,
+        live?.update,
       );
       log('Writing PSF archive');
       download(out, 'psf.zip', await exportPsf(device, r), 'application/zip');
@@ -126,6 +132,7 @@ export function mount(title: string, finish?: (fit: MovieFit, el: HTMLElement) =
     } catch (err) {
       log(err instanceof Error ? err.message : String(err));
     } finally {
+      live?.end();
       button.disabled = false;
     }
   };

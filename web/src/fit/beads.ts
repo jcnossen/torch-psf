@@ -323,7 +323,7 @@ export class BeadFitter {
         lambda *= 10;
       }
       hist.push(L);
-      onIter(it + 1, L, lambda);
+      await onIter(it + 1, L, lambda);
       if (!accepted) { converged = true; it++; break; }
       const n = hist.length;
       if (n > 5 && (hist[n - 6] - L) < 1e-6 * Math.abs(L + this.lgSum(sel))) { converged = true; it++; break; }
@@ -371,7 +371,7 @@ export class BeadFitter {
     const RR = this.R * this.R;
     const ntr = this.nimg(train) * RR;
     const r1 = await this.lm(train, glob, this.opt.maxIter, tok, (it, L, lam) => {
-      onProgress?.({ stage: 'fit', done: it, total: this.opt.maxIter, info: { nll_px: (L + this.lgSum(train)) / ntr, lambda: lam }, ...eta.update(it, this.opt.maxIter) });
+      return onProgress?.({ stage: 'fit', done: it, total: this.opt.maxIter, info: { nll_px: (L + this.lgSum(train)) / ntr, lambda: lam }, ...eta.update(it, this.opt.maxIter) });
     });
     const partial = !!tok?.stopEarly;
     if (tok) tok.check();
@@ -385,7 +385,7 @@ export class BeadFitter {
       if (tok?.signal === 'abort') tok2.abort();
       const nho = this.nimg(held) * RR;
       const r2 = await this.lm(held, g2, 60, tok2, (it, L) => {
-        onProgress?.({ stage: 'held-out', done: it, total: 60, info: { heldout_nll_px: (L + this.lgSum(held)) / nho } });
+        return onProgress?.({ stage: 'held-out', done: it, total: 60, info: { heldout_nll_px: (L + this.lgSum(held)) / nho } });
       });
       itHo = r2.it;
       nllHo = (r2.nll + this.lgSum(held)) / nho;

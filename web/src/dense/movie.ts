@@ -55,18 +55,20 @@ export function stackStepNm(description: string) {
   const pixels = xml.getElementsByTagNameNS('*', 'Pixels')[0];
   if (pixels) {
     const positions = Array.from(pixels.getElementsByTagNameNS('*', 'Plane'))
-      .filter(plane => plane.hasAttribute('PositionZ') && plane.hasAttribute('TheZ'))
-      .map(plane => ({
+      .filter((plane) => plane.hasAttribute('PositionZ') && plane.hasAttribute('TheZ'))
+      .map((plane) => ({
         index: Number(plane.getAttribute('TheZ')),
         nm: Number(plane.getAttribute('PositionZ')) * unit(plane.getAttribute('PositionZUnit') || ''),
       }))
-      .filter(plane => Number.isFinite(plane.nm))
-      .sort((a,b) => a.index-b.index);
+      .filter((plane) => Number.isFinite(plane.nm))
+      .sort((a, b) => a.index - b.index);
     if (positions.length > 1) {
-      const steps = positions.slice(1).map((p,i) => (p.nm-positions[i].nm)/(p.index-positions[i].index));
-      const step = steps.reduce((a,b) => a+b,0)/steps.length;
+      const steps = positions
+        .slice(1)
+        .map((p, i) => (p.nm - positions[i].nm) / (p.index - positions[i].index));
+      const step = steps.reduce((a, b) => a + b, 0) / steps.length;
       if (Number.isFinite(step) && step !== 0) {
-        if (steps.some(s => Math.abs(s-step) > Math.max(.01,Math.abs(step)*.03)))
+        if (steps.some((s) => Math.abs(s - step) > Math.max(0.01, Math.abs(step) * 0.03)))
           throw Error('The calibration Z positions are uneven. Resample the stack to a uniform Z grid.');
         return step;
       }
@@ -93,7 +95,13 @@ function checkAxis(m: TiffMovie, stack: boolean) {
       stack ? 'Supply a single-channel ZYX calibration stack.' : 'Supply a single-channel TYX movie.',
     );
 }
-async function calibrate(dev: GPUDevice, file: File, s: Settings, m: VectorialModel) {
+async function calibrate(
+  dev: GPUDevice,
+  file: File,
+  s: Settings,
+  m: VectorialModel,
+  observe?: MovieObserver,
+) {
   const t = await TiffMovie.open([file]);
   checkAxis(t, true);
   const dz = s.stepNm || stackStepNm(t.description);
@@ -126,7 +134,22 @@ async function calibrate(dev: GPUDevice, file: File, s: Settings, m: VectorialMo
     },
   );
   try {
-    const result = await fit.fit();
+    const result = await fit.fit(
+      undefined,
+      observe
+        ? async (progress) => {
+            await observe(dev, {
+              stage: 'calibration',
+              index: progress.done,
+              total: progress.total,
+              model: { ...m, zcoef: fit.st.zcoef },
+              emitterHeightUm: s.diameterNm / 2000,
+              focusUm: s.diameterNm / 2000,
+              score: Number(progress.info?.nll_px),
+            });
+          }
+        : undefined,
+    );
     m.zcoef = Array.from(result.state.zcoef);
     if (!Array.from(m.zcoef).every(Number.isFinite))
       throw Error('Calibration failed to fit finite pupil coefficients.');
@@ -340,12 +363,24 @@ class Joint {
     this.buffers.forEach((b) => b.destroy());
   }
 }
+export interface MovieIteration {
+  stage: 'calibration' | 'profile' | 'frame' | 'final';
+  index: number;
+  total: number;
+  model: VectorialModel;
+  emitterHeightUm: number;
+  focusUm: number;
+  score?: number;
+  driftNm?: number[];
+}
+export type MovieObserver = (device: GPUDevice, update: MovieIteration) => Promise<void>;
 export async function fitMovie(
   dev: GPUDevice,
   file: File,
   stack: File | null,
   s: Settings,
   log: (msg: string) => void,
+  observe?: MovieObserver,
 ) {
   const t = await TiffMovie.open([file]);
   checkAxis(t, false);
@@ -361,7 +396,7 @@ export async function fitMovie(
     z_range_um: [-0.4, 0.4],
   };
   log('Calibrating optics');
-  const half = stack ? await calibrate(dev, stack, s, model) : 0.35;
+  const half = stack ? await calibrate(dev, stack, s, model, observe) : 0.35;
   model.z_range_um = [-half, half];
   const dz = (2 * half) / (NZ - 1);
   const mean = new Float32Array(t.H * t.W);
@@ -413,6 +448,7 @@ export async function fitMovie(
     dev.queue.writeBuffer(gpu.obs, 0, mean);
     // Profile the mean image over focus and a single astigmatism coefficient.
     // Through-focus calibration supplies the signed, multi-mode pupil when available.
+    let trial = 0;
     for (const coef of stack ? [0] : [0, 0.075, 0.15]) {
       if (coef) {
         model.zcoef = [coef];
@@ -430,6 +466,17 @@ export async function fitMovie(
             cost += stat[9 * i + 7];
           }
         }
+        trial++;
+        if (observe)
+          await observe(dev, {
+            stage: 'profile',
+            index: trial,
+            total: (stack ? 1 : 3) * Math.floor((NZ - 2) / 2),
+            model,
+            emitterHeightUm: s.diameterNm / 2000,
+            focusUm: s.diameterNm / 2000 + (z - (NZ - 1) / 2) * dz,
+            score: cost,
+          });
         if (cost < best) {
           best = cost;
           d[2] = z;
@@ -443,6 +490,7 @@ export async function fitMovie(
       dev.queue.writeBuffer(gpu.lut, 0, lut);
     }
     b.set(base);
+    log('Refining bead positions');
     for (let it = 0; it < 10; it++) {
       const stat = await gpu.step(b, d, bg);
       for (let i = 0; i < xy.length; i++) {
@@ -459,6 +507,7 @@ export async function fitMovie(
     }
     const groupFlux = groups.map(() => b.slice());
     for (let round = 0; round < 7; round++) {
+      log('Refining grouped positions � ' + (round + 1) + ' / 7');
       const deriv = new Float64Array(xy.length * 4);
       for (let j = 0; j < period; j++) {
         const g = groupFlux[j];
@@ -527,9 +576,28 @@ export async function fitMovie(
       }
       intensity.push(xy.map((_, i) => b[i * 4 + 2]));
       drift.push([d[0], d[1], (d[2] - (NZ - 1) / 2) * dz * 1000]);
+      if (observe)
+        await observe(dev, {
+          stage: 'frame',
+          index: frame + 1,
+          total: t.n,
+          model,
+          emitterHeightUm: s.diameterNm / 2000,
+          focusUm: s.diameterNm / 2000 + drift[frame][2] / 1000,
+          driftNm: [d[0] * s.optics.pixel_um * 1000, d[1] * s.optics.pixel_um * 1000, drift[frame][2]],
+        });
       if (d[2] < 0.1 || d[2] > NZ - 1.1) boundaryFrames++;
     }
     model.focus_um = s.diameterNm / 2000 + drift.reduce((sum, p) => sum + p[2], 0) / drift.length / 1000;
+    if (observe)
+      await observe(dev, {
+        stage: 'final',
+        index: t.n,
+        total: t.n,
+        model,
+        emitterHeightUm: s.diameterNm / 2000,
+        focusUm: model.focus_um,
+      });
     return {
       width: t.W,
       height: t.H,
