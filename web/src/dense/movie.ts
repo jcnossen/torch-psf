@@ -374,6 +374,15 @@ export interface MovieIteration {
   driftNm?: number[];
 }
 export type MovieObserver = (device: GPUDevice, update: MovieIteration) => Promise<void>;
+/** Camera-corrected input plane, delivered before its processing step. */
+export type MovieFrameObserver = (
+  pixels: Float32Array,
+  width: number,
+  height: number,
+  index: number,
+  total: number,
+  stage: 'read' | 'fit',
+) => void;
 export async function fitMovie(
   dev: GPUDevice,
   file: File,
@@ -381,6 +390,7 @@ export async function fitMovie(
   s: Settings,
   log: (msg: string) => void,
   observe?: MovieObserver,
+  onFrame?: MovieFrameObserver,
 ) {
   const t = await TiffMovie.open([file]);
   checkAxis(t, false);
@@ -395,20 +405,22 @@ export async function fitMovie(
     focus_um: s.diameterNm / 2000,
     z_range_um: [-0.4, 0.4],
   };
-  log('Calibrating optics');
-  const half = stack ? await calibrate(dev, stack, s, model, observe) : 0.35;
-  model.z_range_um = [-half, half];
-  const dz = (2 * half) / (NZ - 1);
+  log('Reading movie');
   const mean = new Float32Array(t.H * t.W);
   const period = Math.min(t.n, s.period ?? 1),
     groups = Array.from({ length: period }, () => new Float32Array(mean.length));
   for (let i = 0; i < t.n; i++) {
     const f = photons(await t.read(i, i + 1), s);
+    onFrame?.(f, t.W, t.H, i + 1, t.n, 'read');
     for (let j = 0; j < f.length; j++) {
       mean[j] += f[j] / t.n;
       groups[i % period][j] += f[j] / Math.ceil((t.n - (i % period)) / period);
     }
   }
+  log('Calibrating optics');
+  const half = stack ? await calibrate(dev, stack, s, model, observe) : 0.35;
+  model.z_range_um = [-half, half];
+  const dz = (2 * half) / (NZ - 1);
   let lut = await table(dev, model, s.diameterNm, half);
   const xy = seeds(mean, t.W, t.H, t.n, lut);
   const bins = new Map<number, number[][]>();
@@ -550,6 +562,7 @@ export async function fitMovie(
       log('Fitting frame ' + (frame + 1) + ' / ' + t.n);
       const im = photons(await t.read(frame, frame + 1), s),
         back = quantile(im, 0.01);
+      onFrame?.(im, t.W, t.H, frame + 1, t.n, 'fit');
       background.push(back);
       dev.queue.writeBuffer(gpu.obs, 0, im);
       b.set(ref);

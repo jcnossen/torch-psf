@@ -1,5 +1,5 @@
 import { getDevice } from '../gpu/device';
-import { fitMovie, exportPsf, type MovieFit, type MovieObserver } from './movie';
+import { fitMovie, exportPsf, type MovieFit, type MovieObserver, type MovieFrameObserver } from './movie';
 import './dense.css';
 export function download(el: HTMLElement, name: string, data: BlobPart, type: string) {
   const a = document.createElement('a');
@@ -11,7 +11,7 @@ export function download(el: HTMLElement, name: string, data: BlobPart, type: st
 export function mount(
   title: string,
   finish?: (fit: MovieFit, el: HTMLElement) => Promise<void>,
-  live?: { start(): void; update: MovieObserver; end(): void },
+  live?: { start(): void; update: MovieObserver; frame?: MovieFrameObserver; end(): void },
 ) {
   const root = document.querySelector('main')!;
   root.innerHTML =
@@ -101,6 +101,7 @@ export function mount(
         },
         log,
         live?.update,
+        live?.frame,
       );
       log('Writing PSF archive');
       download(out, 'psf.zip', await exportPsf(device, r), 'application/zip');
