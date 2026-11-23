@@ -15,7 +15,8 @@ class FiniteBeadRenderer:
         self.side = 2*radius+1
         self.cfg = cfg
         self.radius = cfg['diameter_um']/2
-        self.model = tp.VectorialPSF(self.side, **{k:cfg[k] for k in
+        calibrated = cfg.get('calibrated_psf')
+        self.model = calibrated.resized(self.side) if calibrated is not None else tp.VectorialPSF(self.side, **{k:cfg[k] for k in
             ('pixel_um','NA','n_med','n_imm','wavelength_um','focus_um')},
             zernike_indices=(6,), npupil=32, oversample=2)
         self.device = self.model.dev
@@ -34,7 +35,7 @@ class FiniteBeadRenderer:
         pos = torch.cat((off, z), 1)[:, None, :] + self.nodes
         field = aberration[:, None].expand(n, 6).reshape(-1, 1)
         # Avoid excessively large pupil batches, including on a CPU-only installation.
-        images = [self.model(p, self.cfg['focus_um'], zcoef_offset=a)
+        images = [self.model(p, self.cfg['focus_um'], zcoef_offset=None if self.cfg.get('calibrated_psf') is not None else a)
                   for p, a in zip(pos.reshape(-1, 3).split(48), field.split(48))]
         return torch.cat(images).reshape(n, 6, self.side, self.side)
 

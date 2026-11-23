@@ -38,7 +38,7 @@ class Scene:
             delta=self.tensor(direction)
             deriv.append((kernel(offset+delta,wave,focus)-kernel(offset-delta,wave,focus))/.016)
         deriv.append((kernel(offset,wave+.001,focus)-kernel(offset,wave-.001,focus))/.002)
-        zlo,zhi=max(-.045,focus-.002),min(.045,focus+.002)
+        zlo,zhi=max(self.table.focus[0], focus-.002), min(self.table.focus[-1], focus+.002)
         deriv.append((kernel(offset,wave,zhi)-kernel(offset,wave,zlo))/(zhi-zlo))
         return rows,base,deriv,basis
 
@@ -97,7 +97,7 @@ class Scene:
             deriv=torch.stack([self.project(rows,flux[:,:,None]*g)[0] for g in (d[0],d[1],d[3])])
             step=torch.linalg.solve((deriv/pred)@deriv.T+torch.eye(3,device=xy.device),deriv@resid[0])
             motion+=step
-            motion[2].clamp_(-.045,.045)
+            motion[2].clamp_(self.table.focus[0], self.table.focus[-1])
         rows,psf=self.geometry(xy+motion[:2],coeff,float(motion[2]))
         flux,bg,*_=self.solve_flux(obs,rows,psf,flux,bg,7)
         return flux[0],bg[0],motion
@@ -107,7 +107,7 @@ class Scene:
 def fit_crowded_movie(movie,groups,optics,radius=7):
     """Fit vectorial Z6, bead positions and photon counts, planar backgrounds, and XYZ drift."""
     images,counts=grouped_images(movie.astype(np.float32),groups)
-    _,inv=np.unique(groups,return_inverse=True)
+    inv = np.arange(len(movie)) if groups is None else np.unique(groups, return_inverse=True)[1]
     scene=Scene(optics,movie.shape[1:],radius)
     peaks,_=find_all_beads(images,sigma=.6,threshold=.9,min_dist=1,bg_size=9)
     if not len(peaks): raise ValueError("No bead candidates")

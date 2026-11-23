@@ -1,5 +1,7 @@
 # torch-psf web (v1)
 
+Open **Dense bead movie fitter** on the start page (or visit `dense.html`) for a single-channel TIFF movie. Add a separate Z-stack from the same optical configuration to calibrate a seven-mode vectorial pupil. The fitter reads the axial spacing from TIFF metadata or accepts a signed step in nm. It renders finite-bead PSFs with WebGPU, jointly fits overlapping spots, and exports per-frame intensities, lateral motion in pixels, stage focus in nm, and a standard point-emitter `psf.zip`. The movie-only fit uses one astigmatism mode and can have ambiguous axial sign. The optional browser stack fit uses selected reference bead ROIs. For crowded calibration stacks the Python `DenseBeadEstimator.fit_movie(..., calibration_stack=stack, dz_um=step)` path fits overlapping clusters.
+
 A static web page that fits a vectorial PSF to a bead z-stack, and detects and localizes the spots of an SMLM movie,
 entirely in the browser: TypeScript + WebGPU (WGSL compute shaders), no server and no installation. The Python package
 torch-psf (`torch_psf`, in this repository) is the reference: every step is a port of a torch_psf function, and the

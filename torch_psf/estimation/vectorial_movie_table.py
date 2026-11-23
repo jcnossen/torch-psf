@@ -12,10 +12,12 @@ class VectorialMovieTable:
         self.radius = radius
         self.side = 2*radius+1
         self.device = self.optic.device
-        self.focus = np.linspace(-.045,.045,7)
+        span = optics.get('focus_span_um', .045)
+        calibrated = optics.get('calibrated_psf') is not None
+        self.focus = np.linspace(-span, span, 2 * min(50, max(3, int(np.ceil(span / .025)))) + 1)
         self.wave_limit = .18
         grid = np.linspace(-.52,.52,7)
-        a,y,x = np.meshgrid(np.linspace(-self.wave_limit,self.wave_limit,15),grid,grid,indexing="ij")
+        a,y,x = np.meshgrid(([0.] if calibrated else np.linspace(-self.wave_limit,self.wave_limit,15)),grid,grid,indexing="ij")
         offsets = self.tensor(np.stack([x.ravel(),y.ravel()],axis=1))
         wave = self.tensor(a.ravel())
         banks = []

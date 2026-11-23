@@ -327,12 +327,33 @@ class DenseBeadEstimator(Estimator):
         self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
 
     @staticmethod
-    def fit_movie(movie, groups=None, *, optics=None, radius=7):
+    def fit_movie(movie, groups=None, *, optics=None, radius=7, calibration_stack=None, dz_um=None):
         """Fit overlapping beads at a single fixed focus. Supply a TYX movie in photoelectrons.
         Optional groups are condition IDs, one per exposure. Returns a DenseMovieFit with
         the in-plane PSF, positions, per-frame bead photons, drift and background. This
-        fixed-plane entry point takes its own arguments independently of the z-stack recipe.
+        movie entry point also accepts a calibration ZYX stack in photoelectrons and its signed
+        step dz_um in micrometres. The stack fits the shared pupil before movie XYZ drift.
+        optics supplies the bead diameter and the nominal movie focus in micrometres.
         """
+        if calibration_stack is not None:
+            from os import PathLike, fspath
+            from torch_psf.estimation.crowded_movie import fit_crowded_movie
+            if optics is None or 'diameter_um' not in optics or 'focus_um' not in optics:
+                raise ValueError('stack-calibrated movies require optics with diameter_um and focus_um')
+            if dz_um is None or not np.isfinite(dz_um) or dz_um == 0:
+                raise ValueError('supply the signed calibration stack spacing dz_um')
+            stack = tifffile.imread(fspath(calibration_stack)) if isinstance(calibration_stack, (str, PathLike)) else calibration_stack
+            if stack.ndim != 3 or len(stack) < 3:
+                raise ValueError('expected a ZYX calibration stack with at least three planes')
+            calibration = DenseBeadEstimator(optics=optics, patch=2*radius+1, sign=np.sign(dz_um),
+                emitter_z_um=optics['diameter_um']/2, zernike_indices=tuple(range(5,12)),
+                field_stop=False, npupil=32, oversample_pupil=2)
+            psf = calibration.estimate(stack, abs(dz_um))
+            settings = dict(optics, calibrated_psf=psf, focus_span_um=abs(dz_um)*(len(stack)-1)/2)
+            frames = movie.detach().cpu().numpy() if torch.is_tensor(movie) else np.asarray(movie)
+            if frames.ndim != 3 or not len(frames) or not np.isfinite(frames).all():
+                raise ValueError('expected a finite TYX movie')
+            return fit_crowded_movie(frames, groups, settings, radius)
         from torch_psf.estimation.bead_movie import fit_bead_movie
         return fit_bead_movie(movie, groups, optics=optics, radius=radius)
 

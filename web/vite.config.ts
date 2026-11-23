@@ -13,7 +13,7 @@ export default defineConfig({
   worker: { format: 'es' },
   build: {
     target: 'es2022',
-    rollupOptions: { input: { main: resolve(__dirname, 'index.html') } },
+    rollupOptions: { input: { main: resolve(__dirname, 'index.html'), dense: resolve(__dirname, 'dense.html') } },
   },
   plugins: [{
     name: 'testdata',

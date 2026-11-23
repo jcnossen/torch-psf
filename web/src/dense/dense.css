@@ -1,0 +1,116 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #eef2f2;
+  color: #193136;
+  font:
+    16px/1.5 'Segoe UI',
+    Arial,
+    sans-serif;
+}
+main {
+  max-width: 1050px;
+  margin: 6vh auto;
+  padding: 32px;
+}
+header {
+  letter-spacing: 0.18em;
+  font-size: 0.72rem;
+  color: #396267;
+}
+h1 {
+  font-size: clamp(2.4rem, 6vw, 4rem);
+  font-weight: 550;
+  line-height: 1.05;
+  margin: 20px 0;
+}
+form,
+article:not(:empty) {
+  background: #fff;
+  border: 1px solid #c5d2d1;
+  border-radius: 12px;
+  padding: 24px;
+  margin: 24px 0;
+}
+#inputs,
+#settings {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(205px, 1fr));
+}
+.drop {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  border: 1px dashed #658c8e;
+  padding: 24px;
+  border-radius: 8px;
+  background: #f4f8f8;
+  cursor: pointer;
+}
+.drop input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  width: 100%;
+  cursor: pointer;
+}
+.drop:focus-within {
+  outline: 2px solid #00676c;
+}
+label span,
+summary {
+  color: #426669;
+}
+details {
+  margin: 20px 0;
+}
+summary {
+  cursor: pointer;
+}
+#settings {
+  padding-top: 12px;
+}
+#settings label {
+  font-size: 14px;
+}
+input[type='number'] {
+  display: block;
+  width: 100%;
+  padding: 7px;
+  border: 1px solid #aabdbc;
+  border-radius: 4px;
+}
+button,
+article a {
+  background: #125a60;
+  color: white;
+  border: 0;
+  border-radius: 5px;
+  padding: 10px 16px;
+  font: inherit;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.55;
+}
+article a {
+  display: inline-block;
+  margin: 4px;
+}
+canvas {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+table {
+  border-collapse: collapse;
+}
+td,
+th {
+  text-align: left;
+  padding: 6px 12px;
+  border-bottom: 1px solid #ccc;
+}
