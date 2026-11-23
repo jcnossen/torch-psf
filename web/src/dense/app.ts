@@ -21,6 +21,7 @@ export function mount(
   finish?: (fit: MovieFit, el: HTMLElement) => Promise<void>,
   live?: {
     start(): void;
+    period?: () => number;
     update: MovieObserver;
     frame?: MovieFrameObserver;
     photometry?: (snapshot: PhotometrySnapshot) => void;
@@ -114,7 +115,7 @@ export function mount(
           stepNm,
           offset,
           gain,
-          period: finish ? 6 : 1,
+          period: live?.period?.() ?? (finish ? 6 : 1),
         },
         log,
         async (dev, iteration) => {

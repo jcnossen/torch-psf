@@ -1,3 +1,4 @@
+import { observedShape, fitMovieShapes } from './movie-shapes';
 import { VecEngine } from '../gpu/ops';
 import { TiffMovie } from '../io/tiff';
 import { BeadFitter, extractRoi, findBeads } from '../fit/beads';
@@ -422,8 +423,22 @@ export async function fitMovie(
   const mean = new Float32Array(t.H * t.W);
   const period = Math.min(t.n, s.period ?? 1),
     groups = Array.from({ length: period }, () => new Float32Array(mean.length));
+  const sampleFrames = new Set(
+    Array.from({ length: Math.min(11, t.n) }, (_, i) =>
+      Math.round((i * (t.n - 1)) / (Math.min(11, t.n) - 1)),
+    ),
+  );
+  const shapes: NonNullable<ReturnType<typeof observedShape>>[] = [];
+  const sampleIndices: number[] = [];
   for (let i = 0; i < t.n; i++) {
     const f = photons(await t.read(i, i + 1), s);
+    if (!stack && sampleFrames.has(i)) {
+      const shape = observedShape(f, t.W, t.H);
+      if (shape) {
+        shapes.push(shape);
+        sampleIndices.push(i);
+      }
+    }
     onFrame?.(f, t.W, t.H, i + 1, t.n, 'read');
     for (let j = 0; j < f.length; j++) {
       mean[j] += f[j] / t.n;
@@ -434,7 +449,13 @@ export async function fitMovie(
   const half = stack ? await calibrate(dev, stack, s, model, observe) : 0.35;
   model.z_range_um = [-half, half];
   const dz = (2 * half) / (NZ - 1);
-  let lut = await table(dev, model, s.diameterNm, half);
+  const shapeTrace =
+    !stack && shapes.length >= 3
+      ? await fitMovieShapes(dev, model, s.diameterNm, shapes, observe)
+      : undefined;
+  const shapeFocus = shapeTrace?.[0];
+  const initialCenter = shapeFocus ?? 0;
+  let lut = await table(dev, model, s.diameterNm, half, initialCenter);
   const xy = seeds(mean, t.W, t.H, t.n, lut);
   const bins = new Map<number, number[][]>();
   const bin = (x: number, y: number) => Math.floor(y / 2) * t.W + Math.floor(x / 2);
@@ -475,7 +496,7 @@ export async function fitMovie(
     // Through-focus calibration supplies the signed, multi-mode pupil when available.
     let trial = 0;
     const trialCount = (stack ? 1 : 3) * Math.floor((NZ - 2) / 2) + (stack ? 0 : 4 * model.noll.length);
-    for (const coef of stack ? [0] : [0, 0.075, 0.15]) {
+    for (const coef of shapeFocus !== undefined ? [] : stack ? [0] : [0, 0.075, 0.15]) {
       if (coef) {
         model.zcoef = [0, coef, 0, 0, 0, 0, 0];
         lut = await table(dev, model, s.diameterNm, half);
@@ -510,7 +531,7 @@ export async function fitMovie(
         }
       }
     }
-    if (!stack) {
+    if (!stack && shapeFocus === undefined) {
       const coefficients = [0, bestCoef, 0, 0, 0, 0, 0];
       // Score independent signed perturbations of each pupil mode at the best focus.
       for (const delta of [0.04, 0.02])
@@ -611,11 +632,19 @@ export async function fitMovie(
       drift: number[][] = [],
       background: number[] = [];
     let focusWindowShifts = 0,
-      windowCenterUm = 0;
+      windowCenterUm = initialCenter;
     const fittedXY = xy.map((_, i) => [ref[4 * i], ref[4 * i + 1]]);
     let minFocusUm = -half,
       maxFocusUm = half;
     for (let frame = 0; frame < t.n; frame++) {
+      if (shapeTrace) {
+        let j = 0;
+        while (j + 1 < sampleIndices.length && sampleIndices[j + 1] <= frame) j++;
+        const k = Math.min(shapeTrace.length - 1, j + 1);
+        const f = clamp((frame - sampleIndices[j]) / Math.max(1, sampleIndices[k] - sampleIndices[j]), 0, 1);
+        const target = shapeTrace[j] + f * (shapeTrace[k] - shapeTrace[j]);
+        d[2] = (NZ - 1) / 2 + (target - windowCenterUm) / dz;
+      }
       log('Fitting frame ' + (frame + 1) + ' / ' + t.n);
       const im = photons(await t.read(frame, frame + 1), s),
         back = quantile(im, 0.01);
