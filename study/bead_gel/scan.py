@@ -6,6 +6,7 @@ Distances in micrometres except emitter x/y in camera pixels. CUDA recommended.
 import argparse
 import json
 import time
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -122,13 +123,16 @@ def simulate(out, seed, count, references):
         k = kernels(bank, 0.05, coords, z + motion[i, 2], tensor(motion[i, :2] / PIXEL))
         mu = (flux_gpu @ k).reshape(BURST, SIZE, SIZE) + bg
         movie[i] = torch.poisson(mu).cpu().numpy().astype(np.uint16)
+    # An exact decimal ratio keeps TIFF resolution fields within signed 32-bit range for Fiji.
+    scale = 1 / Fraction(str(PIXEL))
+    resolution = (scale.numerator, scale.denominator)
     tifffile.imwrite(
         out / "movie.tif",
         movie.reshape(-1, SIZE, SIZE),
         photometric="minisblack",
         imagej=True,
         metadata={"axes": "TYX", "unit": "um"},
-        resolution=(1 / PIXEL, 1 / PIXEL),
+        resolution=(resolution, resolution),
     )
     np.savez_compressed(out / "truth.npz", xyz=xyz, drift_um=motion, flux=flux)
     np.savetxt(
