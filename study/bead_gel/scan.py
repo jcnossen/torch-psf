@@ -30,10 +30,11 @@ def tensor(x):
 
 
 @torch.no_grad()
-def optical_bank(step):
+def optical_bank(step, pupil=None):
     """Index-matched optics make the PSF shift-invariant in z. Axis 0 is focus minus bead depth."""
     nz = round(25.6 / step)
     stage = (torch.arange(nz, device=DEVICE) - nz // 2) * step
+    pupil = {6: 0.075} if pupil is None else pupil
     model = VectorialPSF(
         129,
         pixel_um=PIXEL,
@@ -41,11 +42,11 @@ def optical_bank(step):
         n_imm=1.33,
         n_med=1.33,
         wavelength_um=0.70,
-        zernike_indices=(6,),
+        zernike_indices=tuple(pupil),
         npupil=96,
         oversample=2,
         device=DEVICE,
-    ).set_zernike({6: 0.075})
+    ).set_zernike(pupil)
     bank = torch.empty((nz, SIDE, SIDE), device=DEVICE)
     for start in range(0, nz, 8):
         z = stage[start : start + 8]
@@ -82,10 +83,15 @@ def kernels(bank, step, xyz, focus, shift):
     return F.grid_sample(bank[None, None], grid[None], align_corners=True)[0, 0].flatten(1)
 
 
-def simulate(out, seed, count, references):
+def simulate(out, seed, count, references, illumination=None, sample="gel", pupil=None):
+    """Optional illumination(xyz, motion, stage, brightness) returns photons per burst, state and bead."""
     rng = np.random.default_rng(seed)
     torch.manual_seed(seed)
     xyz = rng.uniform([0, 0, 0.05], [SIZE - 1, SIZE - 1, 9.95], (count, 3))
+    if sample not in ("slide", "gel"):
+        raise ValueError("sample must be slide or gel")
+    if sample == "slide":
+        xyz[:, 2] = 5.0
     up = np.linspace(0, 10, 101)
     stage = np.concatenate([up, up[::-1], up])
     scan_index = np.arange(len(stage))
@@ -113,15 +119,20 @@ def simulate(out, seed, count, references):
     flux = np.stack(
         [bright * (1 + 0.72 * np.cos(phase[j // 3] + j % 3 * 2 * np.pi / 3)) for j in range(BURST)]
     )
+    if illumination is not None:
+        flux = np.asarray(illumination(xyz, motion, stage, bright))
+        if flux.shape != (len(stage), BURST, count) or not np.isfinite(flux).all() or (flux < 0).any():
+            raise ValueError("Expected finite, nonnegative photons for each burst, state and bead")
     x, y = camera_grid()
     bg = 24 + 5 * x / (SIZE - 1) + 3 * y / (SIZE - 1)
-    bank = optical_bank(0.05)
+    bank = optical_bank(0.05, pupil)
     movie = np.empty((len(stage), BURST, SIZE, SIZE), np.uint16)
     coords = tensor(xyz)
     flux_gpu = tensor(flux)
     for i, z in enumerate(stage):
         k = kernels(bank, 0.05, coords, z + motion[i, 2], tensor(motion[i, :2] / PIXEL))
-        mu = (flux_gpu @ k).reshape(BURST, SIZE, SIZE) + bg
+        photons = flux_gpu[i] if flux_gpu.ndim == 3 else flux_gpu
+        mu = (photons @ k).reshape(BURST, SIZE, SIZE) + bg
         movie[i] = torch.poisson(mu).cpu().numpy().astype(np.uint16)
     # An exact decimal ratio keeps TIFF resolution fields within signed 32-bit range for Fiji.
     scale = 1 / Fraction(str(PIXEL))
@@ -171,7 +182,10 @@ def drift_basis(n):
 class Scene:
     """Splat the bead volume, convolve with the 3D vectorial kernel, then sample the moving camera planes."""
 
-    def __init__(self, bank, stage):
+    def __init__(self, bank, stage, sample="gel"):
+        if sample not in ("gel", "slide"):
+            raise ValueError("sample must be slide or gel")
+        self.sample = sample
         self.bank = torch.fft.rfftn(torch.fft.ifftshift(bank))
         self.shape = bank.shape
         self.stage = tensor(stage)
@@ -227,7 +241,22 @@ def residual_seeds(scene, residual, drift, previous):
 def fit_geometry(scene, avg, steps, first_up, initial=None):
     seed = detect(avg[first_up]) if initial is None else initial[0]
     print("3D candidates:", len(seed), flush=True)
-    xyz = tensor(seed).requires_grad_()
+    if not len(seed):
+        raise ValueError("No bead candidates in the scan")
+    if scene.sample == "slide":
+        height = float(np.median(seed[:, 2]))
+        if initial is None:
+            seed = seed[np.abs(seed[:,2]-height) < 0.55]
+        lateral = tensor(seed[:, :2]).requires_grad_()
+        plane = tensor([height]).requires_grad_()
+        position_parameters = [lateral, plane]
+        def positions():
+            return torch.cat((lateral, plane.expand(len(lateral), 1)), dim=1)
+    else:
+        free_positions = tensor(seed).requires_grad_()
+        position_parameters = [free_positions]
+        def positions():
+            return free_positions
     logs = tensor(np.zeros(len(seed))).requires_grad_()
     knots = tensor(np.zeros((scene.basis.shape[1], 3))).requires_grad_()
     bg = tensor([25, 0, 0]).requires_grad_()
@@ -239,7 +268,7 @@ def fit_geometry(scene, avg, steps, first_up, initial=None):
     obs = tensor(avg)
     opt = torch.optim.Adam(
         [
-            {"params": [xyz], "lr": 0.045},
+            {"params": position_parameters, "lr": 0.045},
             {"params": [logs], "lr": 0.04},
             {"params": [knots], "lr": 0.012},
             {"params": [bg], "lr": 0.45},
@@ -252,7 +281,7 @@ def fit_geometry(scene, avg, steps, first_up, initial=None):
         if it in (steps * 2 // 3, steps * 5 // 6):
             for g in opt.param_groups:
                 g["lr"] *= 0.4
-        mu, drift = scene.render(xyz, 5500 * logs.exp(), knots, bg)
+        mu, drift = scene.render(positions(), 5500 * logs.exp(), knots, bg)
         mu = mu.clamp_min(1)
         # Poisson deviance of burst means; second differences suppress unobservable fast drift.
         loss = (mu - obs + obs * torch.log(obs.clamp_min(1) / mu)).mean() + 0.5 * knots.diff(
@@ -266,13 +295,16 @@ def fit_geometry(scene, avg, steps, first_up, initial=None):
     with torch.no_grad():
         photons = (5500 * logs.exp()).cpu().numpy()
         keep = photons > 800
-        points = xyz.cpu().numpy().copy()
+        points = positions().cpu().numpy().copy()
         motions = (scene.basis @ knots).cpu().numpy()
         bg_np = bg.cpu().numpy().copy()
         new = np.empty((0, 3))
         if initial is None:
-            mu, _ = scene.render(xyz, 5500 * logs.exp(), knots, bg)
+            mu, _ = scene.render(positions(), 5500 * logs.exp(), knots, bg)
             new = residual_seeds(scene, (obs - mu).cpu().numpy(), motions, points[keep])
+            if scene.sample == "slide" and len(new):
+                new = new[np.abs(new[:,2]-points[0,2]) < .55]
+                new[:,2] = points[0,2]
         state = (
             np.vstack([points[keep], new]),
             np.r_[photons[keep], np.full(len(new), 1800)],
@@ -308,7 +340,7 @@ def photometry(bank, movie, stage, xyz, photons, drift, bg):
     return result, visible
 
 
-def recover(out, passes, steps):
+def recover(out, passes, steps, sample="gel", pupil=None):
     schedule = np.loadtxt(out / "scan.csv", skiprows=1, delimiter=",")[::BURST]
     scan_index = schedule[:, 3] if schedule.shape[1] > 3 else np.arange(len(schedule))
     stop = np.flatnonzero(scan_index == 101 * passes - 1)[0] + 1
@@ -316,8 +348,8 @@ def recover(out, passes, steps):
     stage = schedule[:stop, 1]
     first_up = (scan_index[:stop] >= 0) & (scan_index[:stop] < 101)
     avg = raw.mean(1, dtype=np.float32)
-    bank = optical_bank(0.1)
-    scene = Scene(bank, stage)
+    bank = optical_bank(0.1, pupil)
+    scene = Scene(bank, stage, sample)
     xyz, photons, drift, bg = fit_geometry(scene, avg, steps, first_up)
     del scene
     flux, visible = photometry(bank, raw, stage, xyz, photons, drift, bg)
@@ -345,7 +377,8 @@ def evaluate(out, passes):
     err = delta[i, j] * 1000
     d = fit["drift_um"]
     ref = truth["drift_um"][: len(d)]
-    signal = np.tile(truth["flux"][:, i], (len(d), 1))
+    flux = truth["flux"]
+    signal = (flux[:len(d)].reshape(-1,len(xyz))[:,i] if flux.ndim == 3 else np.tile(flux[:,i], (len(d), 1)))
     estimate = fit["flux"][:, j]
     valid = fit["usable"][:, j]
     e = (estimate - signal) / signal.mean(0)

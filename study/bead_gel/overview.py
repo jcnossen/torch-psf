@@ -51,7 +51,8 @@ def summarize(folder):
         c.legend()
     c.set(xlabel="Six-exposure burst", ylabel="Commanded focus (µm)", title="10 µm scan and return visits")
     # Show a typical matched trace using the median normalized intensity RMSE.
-    target = np.tile(true["flux"][:, i], (n, 1))
+    flux = true["flux"]
+    target = (flux[:n].reshape(-1, flux.shape[-1])[:,i] if flux.ndim == 3 else np.tile(flux[:,i], (n, 1)))
     observed = fit["flux"][:, j]
     valid = fit["usable"][:, j]
     rmse = np.sqrt(np.sum(((target - observed) / target.mean(0)) ** 2 * valid, axis=0) / valid.sum(0))
