@@ -57,7 +57,7 @@ export function moviePupilReport(out: HTMLElement) {
     if (key === previous) return;
     const maps = pupilMaps(m.optics, m.noll, Array.from(m.zcoef), m.npupil);
     section.innerHTML =
-      '<h2>PSF report</h2><div class="pupil-grid"></div><p class="pupil-axes"></p><h3>Zernike aberrations</h3><table><thead><tr><th>Noll index</th><th>Mode</th><th>Coefficient (waves RMS)</th><th aria-label="Signed coefficient relative to largest absolute mode"></th></tr></thead><tbody></tbody></table>';
+      '<h2>PSF report</h2><div class="pupil-grid"></div><p class="pupil-axes"></p><h3>Zernike aberrations</h3><table><thead><tr><th>Noll index</th><th>Mode</th><th>Coefficient (mλ RMS)</th><th aria-label="Signed coefficient relative to largest absolute mode"></th></tr></thead><tbody></tbody></table>';
     section
       .querySelector('.pupil-grid')!
       .append(
@@ -71,7 +71,7 @@ export function moviePupilReport(out: HTMLElement) {
     m.noll.forEach((n, i) => {
       const row = body.insertRow(),
         v = m.zcoef[i];
-      for (const value of [String(n), zernikeName(n), (v > 0 ? '+' : '') + v.toFixed(4)])
+      for (const value of [String(n), zernikeName(n), (v > 0 ? '+' : '') + (1000 * v).toFixed(1)])
         row.insertCell().textContent = value;
       const signedBar = document.createElement('div');
       signedBar.className = 'coefficient-axis';
