@@ -92,6 +92,49 @@ function powers(image: Float32Array, w: number, windowed: boolean) {
   return normalize(output);
 }
 
+// The lagged third central moment of Poisson-distributed bead positions is
+// proportional to the correlation of h^2 and h. Unlike the power spectrum,
+// this statistic contains the handedness of an asymmetric intensity PSF.
+function thirdMoment(im: Float32Array, w: number, h: number, isTemplate: boolean) {
+  const r = 6,
+    padded = isTemplate ? r + 5 : 0;
+  const W = w + 2 * padded,
+    H = h + 2 * padded;
+  const a = new Float32Array(W * H),
+    b = new Float32Array(W * H),
+    u = new Float32Array(W * H);
+  for (let y = 0; y < h; y++) a.set(im.subarray(y * w, (y + 1) * w), (y + padded) * W + padded);
+  for (let y = 0; y < H; y++) {
+    let sum = 0;
+    for (let x = 0; x < W; x++) {
+      sum += a[y * W + x];
+      if (x >= 2 * r + 1) sum -= a[y * W + x - 2 * r - 1];
+      if (x >= 2 * r) b[y * W + x - r] = sum / (2 * r + 1);
+    }
+  }
+  for (let x = r; x < W - r; x++) {
+    let sum = 0;
+    for (let y = 0; y < H; y++) {
+      sum += b[y * W + x];
+      if (y >= 2 * r + 1) sum -= b[(y - 2 * r - 1) * W + x];
+      if (y >= 2 * r) {
+        const i = (y - r) * W + x;
+        u[i] = a[i] - sum / (2 * r + 1);
+      }
+    }
+  }
+  const moments = new Float64Array(81);
+  const stride = isTemplate ? 1 : Math.max(1, Math.floor(Math.min(w, h) / 160));
+  for (let y = r + 4; y < H - r - 4; y += stride)
+    for (let x = r + 4; x < W - r - 4; x += stride) {
+      const i = y * W + x,
+        v = u[i] * u[i];
+      for (let dy = -4; dy <= 4; dy++)
+        for (let dx = -4; dx <= 4; dx++) moments[(dy + 4) * 9 + dx + 4] += v * u[i + dy * W + dx];
+    }
+  return normalize(moments);
+}
+
 export function observedShape(im: Float32Array, w: number, h: number) {
   const peaks: { index: number; score: number }[] = [];
   for (let y = 6; y < h - 6; y++)
@@ -119,7 +162,11 @@ export function observedShape(im: Float32Array, w: number, h: number) {
     const values = patches.map((p) => p[j]).sort((a, b) => a - b);
     shape[j] = values[Math.floor(values.length / 2)];
   }
-  return { patch: normalize(shape), spectrum: w >= 32 && h >= 32 ? powers(im, w, true) : undefined };
+  return {
+    moment: thirdMoment(im, w, h, false),
+    patch: normalize(shape),
+    spectrum: w >= 32 && h >= 32 ? powers(im, w, true) : undefined,
+  };
 }
 
 export async function fitMovieShapes(
@@ -129,7 +176,7 @@ export async function fitMovieShapes(
   observations: NonNullable<ReturnType<typeof observedShape>>[],
   observe?: MovieObserver,
 ) {
-  const R = 21,
+  const R = 31,
     height = diameterNm / 2000,
     node = height * Math.sqrt(3 / 5);
   const nodes = node
@@ -154,7 +201,7 @@ export async function fitMovieShapes(
     [],
   );
   // Use the same finite-bead model as the photometry fit at each trial focus.
-  const focus = Array.from({ length: 33 }, (_, i) => (i - 16) * profileHalfRangeUm / 16);
+  const focus = Array.from({ length: 33 }, (_, i) => ((i - 16) * profileHalfRangeUm) / 16);
   const images = focus.flatMap((z) =>
     nodes.map(([x, y, dz]) => ({
       x: x / model.optics.pixel_um,
@@ -169,7 +216,7 @@ export async function fitMovieShapes(
   let cost = Infinity,
     focusTrace: number[] = [],
     trial = 0;
-  const steps = [0.08, 0.04, 0.02],
+  const steps = [0.08, 0.04, 0.04, 0.02, 0.02],
     total = 2 + 2 * (steps.length + 1) * best.length;
   try {
     engine.setImages(images);
@@ -184,23 +231,52 @@ export async function fitMovieShapes(
         let peak = (R * R - 1) / 2;
         for (let y = 6; y < R - 6; y++)
           for (let x = 6; x < R - 6; x++) if (psf[y * R + x] > psf[peak]) peak = y * R + x;
-        return { patch: normalize(centeredPatch(psf, R, peak)), spectrum: powers(psf, R, false) };
+        // Empirical subpixel registration applies linear interpolation, which broadens the measured patch.
+        // Approximate the blur of subpixel resampling with a separable triangular interpolant.
+        const smoothed = psf.slice();
+        for (let y = 1; y < R - 1; y++)
+          for (let x = 1; x < R - 1; x++) {
+            const i = y * R + x;
+            smoothed[i] =
+              (16 * psf[i] +
+                4 * (psf[i - 1] + psf[i + 1] + psf[i - R] + psf[i + R]) +
+                psf[i - R - 1] +
+                psf[i - R + 1] +
+                psf[i + R - 1] +
+                psf[i + R + 1]) /
+              36;
+          }
+        return {
+          moment: thirdMoment(psf, R, R, true),
+          patch: normalize(centeredPatch(smoothed, R, peak)),
+          spectrum: powers(psf, R, false),
+        };
       });
       const zs: number[] = [];
       let residual = 0;
       for (const obs of observations) {
         let min = Infinity,
           plane = 0;
-        templates.forEach((p, z) => {
+        const errors = templates.map((p, z) => {
           const error =
-            p.patch.reduce((s, v, j) => s + (v - obs.patch[j]) ** 2, 0) +
+            0.2 * p.patch.reduce((s, v, j) => s + (v - obs.patch[j]) ** 2, 0) +
+            4 * p.moment.reduce((s, v, j) => s + (v - obs.moment[j]) ** 2, 0) +
             (obs.spectrum ? 3 * p.spectrum.reduce((s, v, j) => s + (v - obs.spectrum![j]) ** 2, 0) : 0);
           if (error < min) {
             min = error;
             plane = z;
           }
+          return error;
         });
-        zs.push(focus[plane]);
+        let zBest = focus[plane];
+        if (plane > 0 && plane + 1 < focus.length) {
+          const slope = (errors[plane + 1] - errors[plane - 1]) / 2;
+          const curvature = errors[plane + 1] + errors[plane - 1] - 2 * min;
+          const offset = curvature > 0 ? Math.max(-0.5, Math.min(0.5, -slope / curvature)) : 0;
+          zBest += offset * (focus[1] - focus[0]);
+          min += offset * slope + 0.5 * offset * offset * curvature;
+        }
+        zs.push(zBest);
         residual += min;
       }
       residual /= observations.length;
