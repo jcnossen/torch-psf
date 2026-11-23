@@ -1,5 +1,12 @@
 import { getDevice } from '../gpu/device';
-import { fitMovie, exportPsf, type MovieFit, type MovieObserver, type MovieFrameObserver } from './movie';
+import {
+  fitMovie,
+  exportMovieReport,
+  type MovieFit,
+  type MovieObserver,
+  type MovieFrameObserver,
+} from './movie';
+import { moviePupilReport } from './report';
 import './dense.css';
 export function download(el: HTMLElement, name: string, data: BlobPart, type: string) {
   const a = document.createElement('a');
@@ -87,10 +94,13 @@ export function mount(
         throw Error('Check the optical and camera settings.');
       log('Opening WebGPU device');
       const { device } = await getDevice();
+      const renderPupil = moviePupilReport(out);
+      const movieFile = files[0],
+        stackFile = files[1];
       const r = await fitMovie(
         device,
-        files[0],
-        files[1],
+        movieFile,
+        stackFile,
         {
           optics: { pixel_um: px / 1000, NA, wavelength_um: wl / 1000, n_imm: ni, n_med: ns },
           diameterNm,
@@ -100,11 +110,28 @@ export function mount(
           period: finish ? 6 : 1,
         },
         log,
-        live?.update,
+        async (dev, iteration) => {
+          renderPupil(iteration.model);
+          await live?.update(dev, iteration);
+        },
         live?.frame,
       );
       log('Writing PSF archive');
-      download(out, 'psf.zip', await exportPsf(device, r), 'application/zip');
+      const source = stackFile ? movieFile.name + ' / calibration: ' + stackFile.name : movieFile.name;
+      const { bytes, pdf } = await exportMovieReport(device, r, source);
+      const report = out.querySelector<HTMLElement>('#psf-report')!;
+      const open = document.createElement('a');
+      open.textContent = 'Open PSF report (PDF)';
+      open.target = '_blank';
+      open.rel = 'noopener';
+      open.href = URL.createObjectURL(new Blob([pdf], { type: 'application/pdf' }));
+      report.append(open);
+      const save = document.createElement('a');
+      save.textContent = 'Download PDF';
+      save.href = open.href;
+      save.download = 'fit_report.pdf';
+      report.append(save);
+      download(out, 'psf.zip', bytes, 'application/zip');
       download(
         out,
         'bead-fit.json',

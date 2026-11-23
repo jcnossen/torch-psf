@@ -114,3 +114,55 @@ th {
   padding: 6px 12px;
   border-bottom: 1px solid #ccc;
 }
+
+.dense-pupil {
+  margin: 0 0 1.5rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #c5d2d1;
+}
+.pupil-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 215px));
+  gap: 1.5rem;
+}
+.pupil-grid figure {
+  margin: 0;
+}
+.pupil-grid figcaption {
+  font-weight: 600;
+}
+.pupil-grid canvas {
+  width: 100%;
+  aspect-ratio: 1;
+}
+.pupil-scale {
+  height: 8px;
+}
+.pupil-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+}
+.dense-pupil td:last-child {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.dense-pupil table {
+  margin-bottom: 1rem;
+}
+.coefficient-axis {
+  width: clamp(40px, 12vw, 130px);
+  position: relative;
+  height: 1rem;
+  background: linear-gradient(to right, transparent 49.5%, #8da4a6 50%, transparent 50.5%);
+}
+.coefficient-axis i {
+  position: absolute;
+  top: 20%;
+  height: 60%;
+}
+.dense-pupil td:nth-child(3) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

@@ -4,7 +4,7 @@ import { BeadFitter, extractRoi, findBeads } from '../fit/beads';
 import type { VectorialModel } from '../psf/zstack';
 import type { Optics } from '../psf/vectorial';
 import { buildPsfZip } from '../psf/makezip';
-import { makeFitReport } from '../report/fitreport';
+import { makeFitReport, pupilMaps, volumeSlices } from '../report/fromapp';
 import shader from './joint.wgsl?raw';
 
 export interface Settings {
@@ -627,20 +627,62 @@ export async function fitMovie(
     gpu.destroy();
   }
 }
-export async function exportPsf(dev: GPUDevice, r: MovieFit) {
-  const settings = { bead_diameter_nm: r.settings.diameterNm, stack_calibrated: r.stackCalibrated };
-  const results = { beads: r.xy.length, frames: r.drift.length, focus_boundary_frames: r.boundaryFrames };
-  const pdf = await makeFitReport({
-    title: 'Dense bead movie PSF',
-    settings,
-    results,
-    zernike: { noll: r.model.noll, values: r.model.zcoef },
+export async function exportMovieReport(dev: GPUDevice, r: MovieFit, source?: string) {
+  const m = r.model,
+    optics = m.optics;
+  const settings = {
+    bead_diameter_nm: r.settings.diameterNm,
+    stack_calibrated: r.stackCalibrated,
+    'pixel size (nm)': 1000 * optics.pixel_um,
+    NA: optics.NA,
+    'emission wavelength (nm)': 1000 * optics.wavelength_um,
+    'immersion / sample index': [optics.n_imm, optics.n_med],
+    'gain (photons/ADU)': r.settings.gain,
+    'offset (ADU)': r.settings.offset,
+  };
+  const results = {
+    'fitted candidates': r.xy.length,
+    frames: r.drift.length,
+    'mean stage focus (nm)': 1000 * m.focus_um,
+    focus_boundary_frames: r.boundaryFrames,
+  };
+  return buildPsfZip(dev, {
+    vectorial: m,
+    report: { estimator: 'dense bead movie', settings, results },
+    pdf: (volume) =>
+      makeFitReport({
+        title: 'Dense bead movie PSF',
+        subtitle: source,
+        settings,
+        results,
+        zernike: { noll: m.noll, values: m.zcoef },
+        pupil: pupilMaps(optics, m.noll, Array.from(m.zcoef), m.npupil),
+        psf: volumeSlices(
+          volume.stack,
+          {
+            optics,
+            npupil: m.npupil,
+            noll: m.noll,
+            zcoef: Array.from(m.zcoef),
+            nxy: volume.W,
+            nz: volume.Z,
+            dxy_um: optics.pixel_um * volume.sample_px,
+            zmin: volume.z_um[0],
+            zmax: volume.z_um[volume.Z - 1],
+            ze_um: 0,
+            focus_um: m.focus_um,
+          },
+          'z',
+        ),
+        notes: [
+          r.stackCalibrated
+            ? 'The calibration stack supplied the fitted pupil.'
+            : 'Movie-only calibration searched one astigmatism coefficient (Noll 6). The axial sign can be ambiguous near focus.',
+          'PSF slices show emitter height at the fitted mean stage focus.',
+        ],
+      }),
   });
-  return (
-    await buildPsfZip(dev, {
-      vectorial: r.model,
-      pdf,
-      report: { estimator: 'dense bead movie', settings, results },
-    })
-  ).bytes;
+}
+export async function exportPsf(dev: GPUDevice, r: MovieFit) {
+  return (await exportMovieReport(dev, r)).bytes;
 }

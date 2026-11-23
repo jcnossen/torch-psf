@@ -3,7 +3,7 @@
 // (io/psfzip.ts). Runs where a GPUDevice is (the compute worker; the tests). The PDF comes from the caller
 // (report/fromapp.ts, written without a creation date).
 import { buildKnots } from './spline';
-import { SplineModel, VectorialModel, splineDict, splineZstack, vectorialZstack } from './zstack';
+import { type ZStack, SplineModel, VectorialModel, splineDict, splineZstack, vectorialZstack } from './zstack';
 import { previewPng } from '../report/preview';
 import { CameraInfo, writePsfZip } from '../io/psfzip';
 
@@ -34,12 +34,16 @@ export async function splineOf(dev: GPUDevice, v: VectorialModel, s: NonNullable
   return { ...g, knots };
 }
 
-export async function buildPsfZip(dev: GPUDevice, r: PsfZipRequest): Promise<{ bytes: Uint8Array; meta: Record<string, unknown> }> {
+export async function buildPsfZip(dev: GPUDevice, r: Omit<PsfZipRequest,'pdf'> & {
+  pdf: Uint8Array | ((volume: ZStack) => Promise<Uint8Array>);
+}): Promise<{ bytes: Uint8Array; meta: Record<string, unknown>; pdf: Uint8Array }> {
   const planes = Math.round(r.zstack?.planes ?? 25), k = Math.round(r.zstack?.k ?? 1);
   if (!(planes >= 1 && planes <= 401)) throw new Error('z-stack planes: 1 to 401');
   if (!(k >= 1 && k <= 8)) throw new Error('z-stack sampling 1 / k px: k from 1 to 8');
   const spline = r.spline ? await splineOf(dev, r.vectorial, r.spline) : null;
   const zs = spline ? splineZstack(spline, planes, k) : await vectorialZstack(dev, r.vectorial, planes, k);
   const png = await previewPng(zs, ['ch0'], r.title ?? `${spline ? 'spline' : 'vectorial'} PSF`);
-  return writePsfZip({ vectorial: r.vectorial, spline, camera: r.camera, provenance: r.provenance, report: r.report, zstack: zs, png, pdf: r.pdf });
+  const pdf = typeof r.pdf === 'function' ? await r.pdf(zs) : r.pdf;
+  const archive = await writePsfZip({ vectorial: r.vectorial, spline, camera: r.camera, provenance: r.provenance, report: r.report, zstack: zs, png, pdf });
+  return { ...archive, pdf };
 }
