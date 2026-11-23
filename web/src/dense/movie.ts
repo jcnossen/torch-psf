@@ -1,3 +1,4 @@
+import { framePower, exposureFocus } from './frame-focus';
 import { CycleSpectra, refineDiversePupil } from './diversity';
 import { observedShape, fitMovieShapes, profileHalfRangeUm } from './movie-shapes';
 import { VecEngine } from '../gpu/ops';
@@ -27,6 +28,7 @@ export interface MovieFit {
   background: number[];
   settings: Settings;
   stackCalibrated: boolean;
+  exposureFocusTracked?: boolean;
   diversityScores?: {cost:number; alternative:number; constantCost:number};
   boundaryFrames: number;
   focusWindowShifts: number;
@@ -426,6 +428,8 @@ export async function fitMovie(
   const period = Math.min(t.n, s.period ?? 1),
     groups = Array.from({ length: period }, () => new Float32Array(mean.length));
   const cycles = stack ? undefined : new CycleSpectra(t.W,t.H,t.n,period);
+  const frameSpectra: Float64Array[] = [];
+  const trackFrames = !!cycles && Math.min(t.W,t.H)>=96 && Math.floor(t.n/period)>=5;
   const sampleFrames = new Set(
     Array.from({ length: Math.min(11, t.n) }, (_, i) =>
       Math.round((i * (t.n - 1)) / (Math.min(11, t.n) - 1)),
@@ -436,6 +440,7 @@ export async function fitMovie(
   for (let i = 0; i < t.n; i++) {
     const f = photons(await t.read(i, i + 1), s);
     cycles?.add(f,i);
+    if(trackFrames) frameSpectra.push(framePower(f,t.W,t.H));
     if (!stack && sampleFrames.has(i)) {
       const shape = observedShape(f, t.W, t.H);
       if (shape) {
@@ -457,6 +462,7 @@ export async function fitMovie(
     !stack && shapes.length >= 3
       ? await fitMovieShapes(dev, model, s.diameterNm, shapes, observe)
       : undefined;
+  let trackedFocus: number[] | undefined;
   let diversityScores: {cost:number; alternative:number; constantCost:number} | undefined;
   if(cycles?.frames.length && shapeTrace){
     const seed=cycles.frames.map(t=>{
@@ -466,16 +472,31 @@ export async function fitMovie(
       return shapeTrace![j]+a*(shapeTrace![k]-shapeTrace![j]);
     });
     log('Refining signed pupil across illumination cycles');
-    const optical = await refineDiversePupil(dev,model,s.diameterNm,cycles,seed,observe);
+    let optical = await refineDiversePupil(dev,model,s.diameterNm,cycles,seed,observe);
     if(optical){
       model.zcoef=optical.coefficients;
+      trackedFocus = await exposureFocus(dev,model,s.diameterNm,frameSpectra,period,cycles.frames,optical.focus);
+      if(trackedFocus && period>1 && period<=16){
+        const trace=trackedFocus;
+        const offsets=cycles.frames.map(center=>{
+          const start=center-(period-1)/2, group=trace.slice(start,start+period);
+          const mean=group.reduce((a,b)=>a+b,0)/period;
+          return group.map(z=>z-mean);
+        });
+        const blurred=await refineDiversePupil(dev,model,s.diameterNm,cycles,optical.focus,observe,offsets);
+        if(blurred){
+          const candidate={...model,zcoef:blurred.coefficients};
+          const refined=await exposureFocus(dev,candidate,s.diameterNm,frameSpectra,period,cycles.frames,blurred.focus);
+          if(refined){optical=blurred;model.zcoef=blurred.coefficients;trackedFocus=refined;}
+        }
+      }
       shapeTrace=optical.focus;
       sampleIndices.splice(0,sampleIndices.length,...cycles.frames);
       diversityScores={cost:optical.cost,alternative:optical.alternative,constantCost:optical.constantCost};
     }
   }
   const shapeFocus = shapeTrace?.[0];
-  const initialCenter = shapeFocus ?? 0;
+  const initialCenter = trackedFocus?.[0] ?? shapeFocus ?? 0;
   let lut = await table(dev, model, s.diameterNm, half, initialCenter);
   const xy = seeds(mean, t.W, t.H, t.n, lut);
   const bins = new Map<number, number[][]>();
@@ -658,7 +679,9 @@ export async function fitMovie(
     let minFocusUm = -half,
       maxFocusUm = half;
     for (let frame = 0; frame < t.n; frame++) {
-      if (shapeTrace) {
+      if (trackedFocus) {
+        d[2] = (NZ-1)/2 + (trackedFocus[frame]-windowCenterUm)/dz;
+      } else if (shapeTrace) {
         let j = 0;
         while (j + 1 < sampleIndices.length && sampleIndices[j + 1] <= frame) j++;
         const k = Math.min(shapeTrace.length - 1, j + 1);
@@ -699,7 +722,7 @@ export async function fitMovie(
           }
         }
         if (it >= 2 && it < 10)
-          for (let u = 0; u < 3; u++) {
+          for (let u = 0; u < (trackedFocus ? 2 : 3); u++) {
             const update = 0.6 * clamp(g[u] / Math.max(1, h[u]), u === 2 ? -1 : -0.25, u === 2 ? 1 : 0.25);
             d[u] = u === 2 ? d[u] + update : clamp(d[u] + update, -4, 4);
           }
@@ -743,6 +766,7 @@ export async function fitMovie(
       model,
       settings: s,
       stackCalibrated: !!stack,
+      exposureFocusTracked: !!trackedFocus,
       diversityScores,
       boundaryFrames: 0, // Retained for earlier consumers. Axial motion is no longer clipped.
       focusWindowShifts,

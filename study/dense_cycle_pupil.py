@@ -63,7 +63,7 @@ def data(file, period):
     )
 
 
-def fit(file, base, period, optics, height_um, device):
+def fit(file, base, period, optics, height_um, device, offsets=None):
     def tensor(x):
         return torch.as_tensor(x, device=device, dtype=torch.float32)
 
@@ -92,6 +92,8 @@ def fit(file, base, period, optics, height_um, device):
     )
     basez = np.interp(frac, np.linspace(0, 1, len(base["z"])), base["z"])
 
+    offsets_tensor = tensor(offsets) if offsets is not None else None
+
     def run(sign):
         z0 = basez * sign
         c0 = np.array(base["coef"]) * np.array([sign, sign, 1, 1, 1, 1, sign])
@@ -109,7 +111,18 @@ def fit(file, base, period, optics, height_um, device):
 
         def closure():
             opt.zero_grad()
-            p = q(pos, height_um + z)
+            if offsets_tensor is None:
+                p = q(pos, height_um + z)
+            else:
+                planes = z[:, None] + offsets_tensor * sign
+                p = (
+                    q(
+                        pos.repeat_interleave(planes.shape[1], dim=0),
+                        height_um + planes.flatten(),
+                    )
+                    .reshape(n, -1, 33, 33)
+                    .mean(1)
+                )
             H = (p.flatten(1).to(torch.complex64) @ dft) * torch.exp(
                 -2j * torch.pi * ((shift - shift[:1]) @ f.T)
             )

@@ -134,6 +134,7 @@ export async function refineDiversePupil(
   data: CycleSpectra,
   initial: number[],
   observe?: MovieObserver,
+  cycleOffsets?: number[][],
 ) {
   const n = data.frames.length,
     nm = m.noll.length,
@@ -148,13 +149,28 @@ export async function refineDiversePupil(
     { ...m.optics, roisize: 33, npupil: m.npupil, oversample: m.oversample, zernike_noll: m.noll },
     [],
   );
-  async function transfer(x: Float64Array) {
+  async function transfer(x: Float64Array, sign: number) {
     engine.setZernike(x.subarray(0, nm));
-    engine.setImages(
-      data.frames.map((_, t) => ({ x: 0, y: 0, ze: height, f: height + x[nm + t], I: 1, bg: 0 })),
+    const groups = cycleOffsets ?? data.frames.map(() => [0]);
+    const images = groups.flatMap((offsets, t) =>
+      offsets.map((offset) => ({
+        x: 0,
+        y: 0,
+        ze: height,
+        f: height + x[nm + t] + sign * offset,
+        I: 1,
+        bg: 0,
+      })),
     );
-    await engine.run(n, 'psf');
-    const bank = await engine.readPsf(n);
+    engine.setImages(images);
+    await engine.run(images.length, 'psf');
+    const planes = await engine.readPsf(images.length);
+    const bank = new Float64Array(n * 33 * 33);
+    let source = 0;
+    groups.forEach((offsets, t) => {
+      for (const _ of offsets) for (let j = 0; j < 33 * 33; j++) bank[t * 33 * 33 + j] += planes[source++];
+      for (let j = 0; j < 33 * 33; j++) bank[t * 33 * 33 + j] /= offsets.length;
+    });
     const h = new Float64Array(2 * n * nf);
     for (let t = 0; t < n; t++) {
       const re = new Float64Array(grid * grid),
@@ -211,7 +227,7 @@ export async function refineDiversePupil(
       initial.map((z) => sign * z),
       nm,
     );
-    let h = await transfer(x),
+    let h = await transfer(x, sign),
       r = residual(h, x),
       cost = norm2(r),
       lambda = 0.01;
@@ -220,12 +236,12 @@ export async function refineDiversePupil(
         eps = 0.0005;
       const shifted = x.slice();
       for (let t = 0; t < n; t++) shifted[nm + t] += eps;
-      const hz = await transfer(shifted);
+      const hz = await transfer(shifted, sign);
       for (let j = 0; j < npar; j++) {
         const xp = x.slice();
         xp[j] += eps;
         let hp: Float64Array;
-        if (j < nm) hp = await transfer(xp);
+        if (j < nm) hp = await transfer(xp, sign);
         else {
           hp = h.slice();
           const z = j < nm + n,
@@ -266,7 +282,7 @@ export async function refineDiversePupil(
           ...delta.map((v, j) => Math.abs(v) / (j < nm ? 0.07 : j < nm + n ? 0.16 : 0.45)),
         );
         const xp = x.map((v, j) => v + delta[j] / scale),
-          hp = await transfer(xp),
+          hp = await transfer(xp, sign),
           rp = residual(hp, xp),
           cp = norm2(rp);
         if (cp < cost) {
@@ -293,7 +309,7 @@ export async function refineDiversePupil(
         });
       if (!accepted || improvement < 1e-7 * nf) break;
     }
-    return { x, cost: cost / nf };
+    return { x, sign, cost: cost / nf };
   }
   try {
     const a = await branch(1, 0),
@@ -301,7 +317,7 @@ export async function refineDiversePupil(
     const best = a.cost <= b.cost ? a : b,
       constant = best.x.slice();
     constant.fill(best.x[nm], nm, nm + n);
-    const flatCost = norm2(residual(await transfer(constant), constant)) / nf;
+    const flatCost = norm2(residual(await transfer(constant, best.sign), constant)) / nf;
     if (!(best.cost < 0.08 && best.cost < 0.85 * flatCost)) return;
     return {
       coefficients: Array.from(best.x.subarray(0, nm)),
