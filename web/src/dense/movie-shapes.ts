@@ -2,6 +2,7 @@ import { VecEngine } from '../gpu/ops';
 import type { VectorialModel } from '../psf/zstack';
 import type { MovieObserver } from './movie';
 
+export const profileHalfRangeUm = 0.8;
 const radius = 4;
 const side = 2 * radius + 1;
 
@@ -153,7 +154,7 @@ export async function fitMovieShapes(
     [],
   );
   // Use the same finite-bead model as the photometry fit at each trial focus.
-  const focus = Array.from({ length: 33 }, (_, i) => (i - 16) * 0.05);
+  const focus = Array.from({ length: 33 }, (_, i) => (i - 16) * profileHalfRangeUm / 16);
   const images = focus.flatMap((z) =>
     nodes.map(([x, y, dz]) => ({
       x: x / model.optics.pixel_um,

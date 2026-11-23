@@ -1,4 +1,4 @@
-import { observedShape, fitMovieShapes } from './movie-shapes';
+import { observedShape, fitMovieShapes, profileHalfRangeUm } from './movie-shapes';
 import { VecEngine } from '../gpu/ops';
 import { TiffMovie } from '../io/tiff';
 import { BeadFitter, extractRoi, findBeads } from '../fit/beads';
@@ -643,7 +643,10 @@ export async function fitMovie(
         const k = Math.min(shapeTrace.length - 1, j + 1);
         const f = clamp((frame - sampleIndices[j]) / Math.max(1, sampleIndices[k] - sampleIndices[j]), 0, 1);
         const target = shapeTrace[j] + f * (shapeTrace[k] - shapeTrace[j]);
-        d[2] = (NZ - 1) / 2 + (target - windowCenterUm) / dz;
+        // A boundary template provides only a direction. Carry the running
+        // estimate forward there so the moving table can follow larger drift.
+        if (Math.abs(target) < profileHalfRangeUm - 1e-6)
+          d[2] = (NZ - 1) / 2 + (target - windowCenterUm) / dz;
       }
       log('Fitting frame ' + (frame + 1) + ' / ' + t.n);
       const im = photons(await t.read(frame, frame + 1), s),
