@@ -326,6 +326,16 @@ class DenseBeadEstimator(Estimator):
         self.extent_rel, self.max_patch = extent_rel, max_patch
         self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
 
+    @staticmethod
+    def fit_movie(movie, groups=None, *, optics=None, radius=7):
+        """Fit overlapping beads at a single fixed focus. Supply a TYX movie in photoelectrons.
+        Optional groups are condition IDs, one per exposure. Returns a DenseMovieFit with
+        the in-plane PSF, positions, per-frame bead photons, drift and background. This
+        fixed-plane entry point takes its own arguments independently of the z-stack recipe.
+        """
+        from torch_psf.estimation.bead_movie import fit_bead_movie
+        return fit_bead_movie(movie, groups, optics=optics, radius=radius)
+
     def _stacks(self, stacks):
         if isinstance(stacks, (str, np.ndarray)) or torch.is_tensor(stacks):
             stacks = [stacks]
