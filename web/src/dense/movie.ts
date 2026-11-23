@@ -1,3 +1,4 @@
+import { CycleSpectra, refineDiversePupil } from './diversity';
 import { observedShape, fitMovieShapes, profileHalfRangeUm } from './movie-shapes';
 import { VecEngine } from '../gpu/ops';
 import { TiffMovie } from '../io/tiff';
@@ -26,6 +27,7 @@ export interface MovieFit {
   background: number[];
   settings: Settings;
   stackCalibrated: boolean;
+  diversityScores?: {cost:number; alternative:number; constantCost:number};
   boundaryFrames: number;
   focusWindowShifts: number;
 }
@@ -373,7 +375,7 @@ class Joint {
   }
 }
 export interface MovieIteration {
-  stage: 'calibration' | 'profile' | 'frame' | 'final';
+  stage: 'diversity' | 'calibration' | 'profile' | 'frame' | 'final';
   index: number;
   total: number;
   model: VectorialModel;
@@ -423,6 +425,7 @@ export async function fitMovie(
   const mean = new Float32Array(t.H * t.W);
   const period = Math.min(t.n, s.period ?? 1),
     groups = Array.from({ length: period }, () => new Float32Array(mean.length));
+  const cycles = stack ? undefined : new CycleSpectra(t.W,t.H,t.n,period);
   const sampleFrames = new Set(
     Array.from({ length: Math.min(11, t.n) }, (_, i) =>
       Math.round((i * (t.n - 1)) / (Math.min(11, t.n) - 1)),
@@ -432,6 +435,7 @@ export async function fitMovie(
   const sampleIndices: number[] = [];
   for (let i = 0; i < t.n; i++) {
     const f = photons(await t.read(i, i + 1), s);
+    cycles?.add(f,i);
     if (!stack && sampleFrames.has(i)) {
       const shape = observedShape(f, t.W, t.H);
       if (shape) {
@@ -449,10 +453,27 @@ export async function fitMovie(
   const half = stack ? await calibrate(dev, stack, s, model, observe) : 0.35;
   model.z_range_um = [-half, half];
   const dz = (2 * half) / (NZ - 1);
-  const shapeTrace =
+  let shapeTrace =
     !stack && shapes.length >= 3
       ? await fitMovieShapes(dev, model, s.diameterNm, shapes, observe)
       : undefined;
+  let diversityScores: {cost:number; alternative:number; constantCost:number} | undefined;
+  if(cycles?.frames.length && shapeTrace){
+    const seed=cycles.frames.map(t=>{
+      let j=0;while(j+1<sampleIndices.length && sampleIndices[j+1]<=t)j++;
+      const k=Math.min(j+1,sampleIndices.length-1);
+      const a=clamp((t-sampleIndices[j])/Math.max(1,sampleIndices[k]-sampleIndices[j]),0,1);
+      return shapeTrace![j]+a*(shapeTrace![k]-shapeTrace![j]);
+    });
+    log('Refining signed pupil across illumination cycles');
+    const optical = await refineDiversePupil(dev,model,s.diameterNm,cycles,seed,observe);
+    if(optical){
+      model.zcoef=optical.coefficients;
+      shapeTrace=optical.focus;
+      sampleIndices.splice(0,sampleIndices.length,...cycles.frames);
+      diversityScores={cost:optical.cost,alternative:optical.alternative,constantCost:optical.constantCost};
+    }
+  }
   const shapeFocus = shapeTrace?.[0];
   const initialCenter = shapeFocus ?? 0;
   let lut = await table(dev, model, s.diameterNm, half, initialCenter);
@@ -722,6 +743,7 @@ export async function fitMovie(
       model,
       settings: s,
       stackCalibrated: !!stack,
+      diversityScores,
       boundaryFrames: 0, // Retained for earlier consumers. Axial motion is no longer clipped.
       focusWindowShifts,
     } satisfies MovieFit;
@@ -779,7 +801,7 @@ export async function exportMovieReport(dev: GPUDevice, r: MovieFit, source?: st
         notes: [
           r.stackCalibrated
             ? 'The calibration stack supplied the fitted pupil.'
-            : 'Movie-only calibration profiled Noll modes 5 through 11. The axial sign can be ambiguous near focus.',
+            : r.diversityScores ? 'Signed Noll modes 5 through 11 refined by multi-cycle phase diversity.' : 'Movie-only calibration profiled Noll modes 5 through 11. The axial sign can be ambiguous near focus.',
           'PSF slices show emitter height at the fitted mean stage focus.',
         ],
       }),

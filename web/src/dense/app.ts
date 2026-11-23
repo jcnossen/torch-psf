@@ -159,7 +159,7 @@ export function mount(
         ' frames · ' +
         (r.stackCalibrated
           ? 'Stack-calibrated pupil.'
-          : 'Movie-only pupil. The sign of Z can be ambiguous near focus.') +
+          : r.diversityScores ? 'Movie-only pupil refined across complete illumination cycles.' : 'Coarse movie-only pupil. The sign of Z can be ambiguous near focus.') +
         ' ' +
         r.focusWindowShifts +
         ' axial lookup window shifts.';
