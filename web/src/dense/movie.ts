@@ -1,3 +1,4 @@
+import { solve } from '../fit/linalg';
 import { framePower, exposureFocus } from './frame-focus';
 import { CycleSpectra, refineDiversePupil } from './diversity';
 import { observedShape, fitMovieShapes, profileHalfRangeUm } from './movie-shapes';
@@ -29,6 +30,8 @@ export interface MovieFit {
   background: number[];
   settings: Settings;
   stackCalibrated: boolean;
+  nominalFocusNm?: number[];
+  backgroundSlopes?: number[][];
   exposureFocusTracked?: boolean;
   diversityScores?: {cost:number; alternative:number; constantCost:number};
   boundaryFrames: number;
@@ -300,6 +303,7 @@ class Joint {
     private h: number,
     private xy: number[][],
     lut: Float32Array,
+    fitExposure=false,
   ) {
     const make = (size: number, usage: number) => {
       const b = dev.createBuffer({ size, usage });
@@ -312,7 +316,7 @@ class Joint {
       dev.queue.writeBuffer(b, 0, data);
       return b;
     };
-    this.params = make(48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    this.params = make(64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
     this.lut = put(lut);
     const cols = Math.ceil(w / 8),
       rows = Math.ceil(h / 8),
@@ -340,8 +344,9 @@ class Joint {
     index[tiles.length] = offset;
     this.bead = make(xy.length * 16, storage);
     this.obs = make(w * h * 4, storage);
-    this.out = make(xy.length * 36, storage | GPUBufferUsage.COPY_SRC);
-    this.read = make(xy.length * 36, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
+    const bytes=Math.max(xy.length*36,fitExposure ? rows*cols*27*4 : 0);
+    this.out = make(bytes, storage | GPUBufferUsage.COPY_SRC);
+    this.read = make(bytes, GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
     const buffers = [
       this.params,
       this.lut,
@@ -352,12 +357,13 @@ class Joint {
       this.out,
     ];
     const module = dev.createShaderModule({ code: shader });
-    this.pipes = ['render', 'fit'].map((entryPoint) =>
+    this.pipes = (fitExposure ? ['render','fit','exposure'] : ['render','fit']).map((entryPoint) =>
       dev.createComputePipeline({ layout: 'auto', compute: { module, entryPoint } }),
     );
     this.groups = [
       [0, 1, 2, 3, 5],
       [0, 1, 3, 4, 5, 6],
+      ...(fitExposure ? [[0,1,2,3,4,5,6]] : []),
     ].map((ids, i) =>
       dev.createBindGroup({
         layout: this.pipes[i].getBindGroupLayout(0),
@@ -365,25 +371,28 @@ class Joint {
       }),
     );
   }
-  async step(b: Float32Array, d: number[], bg: number) {
+  async step(b: Float32Array, d: number[], bg: number, slopes=[0,0], exposure=false) {
     const { dev, w, h, xy } = this;
-    const data = new ArrayBuffer(48);
+    const data = new ArrayBuffer(64);
     new Uint32Array(data).set([w, h, xy.length, SIDE, Math.ceil(w / 8), NZ]);
-    new Float32Array(data).set([K, 1, ...d, bg], 6);
+    new Float32Array(data).set([K, 1, ...d, bg,...slopes], 6);
     dev.queue.writeBuffer(this.params, 0, data);
     dev.queue.writeBuffer(this.bead, 0, b);
     const enc = dev.createCommandEncoder();
-    this.pipes.forEach((pipe, i) => {
+    for(const i of [0,exposure ? 2 : 1]){
+      const pipe=this.pipes[i];
       const pass = enc.beginComputePass();
       pass.setPipeline(pipe);
       pass.setBindGroup(0, this.groups[i]);
-      pass.dispatchWorkgroups(Math.ceil((i ? xy.length : w * h) / 64));
+      if(i===2)pass.dispatchWorkgroups(Math.ceil(w/8),Math.ceil(h/8));
+      else pass.dispatchWorkgroups(Math.ceil((i ? xy.length : w*h)/64));
       pass.end();
-    });
-    enc.copyBufferToBuffer(this.out, 0, this.read, 0, this.read.size);
+    }
+    const bytes=exposure ? Math.ceil(w/8)*Math.ceil(h/8)*27*4 : xy.length*36;
+    enc.copyBufferToBuffer(this.out, 0, this.read, 0, bytes);
     dev.queue.submit([enc.finish()]);
-    await this.read.mapAsync(GPUMapMode.READ);
-    const result = new Float32Array(this.read.getMappedRange().slice(0));
+    await this.read.mapAsync(GPUMapMode.READ,0,bytes);
+    const result = new Float32Array(this.read.getMappedRange(0,bytes).slice(0));
     this.read.unmap();
     return result;
   }
@@ -523,7 +532,25 @@ export async function fitMovie(
   }
   const initialCenter = primaryScan ? -scanOrigin : trackedFocus?.[0] ?? shapeFocus ?? 0;
   let lut = await table(dev, model, s.diameterNm, half, initialCenter);
-  const xy = seeds(mean, t.W, t.H, t.n, lut);
+  // A scan average contains many defocused footprints. Subtract its average PSF
+  // during residual detection, rather than a sharp PSF from one focus plane.
+  const seedKernel=primaryScan ? lut.slice() : lut;
+  if(primaryScan){
+    const area=SIDE*SIDE, middle=((NZ-1)/2)*area;
+    const stops=t.n/s.framesPerStep!;
+    const weights=new Float64Array(NZ);
+    for(let j=0;j<stops;j++){
+      const plane=j*(NZ-1)/(stops-1), lo=Math.floor(plane);
+      weights[lo]+=(1-(plane-lo))/stops;
+      if(lo+1<NZ) weights[lo+1]+=(plane-lo)/stops;
+    }
+    for(let p=0;p<area;p++){
+      let sum=0;
+      for(let z=0;z<NZ;z++) sum+=lut[z*area+p]*weights[z];
+      seedKernel[middle+p]=sum;
+    }
+  }
+  const xy = seeds(mean, t.W, t.H, t.n, seedKernel);
   const bins = new Map<number, number[][]>();
   const bin = (x: number, y: number) => Math.floor(y / 2) * t.W + Math.floor(x / 2);
   const insert = (p: number[]) => {
@@ -534,7 +561,7 @@ export async function fitMovie(
   xy.forEach(insert);
   if (period > 1)
     for (const group of groups)
-      for (const p of seeds(group, t.W, t.H, t.n / period, lut)) {
+      for (const p of seeds(group, t.W, t.H, t.n / period, seedKernel)) {
         let near = false;
         for (const dy of [-2, 0, 2])
           for (const dx of [-2, 0, 2])
@@ -549,7 +576,7 @@ export async function fitMovie(
           insert(p);
         }
       }
-  const gpu = new Joint(dev, t.W, t.H, xy, lut);
+  const gpu = new Joint(dev, t.W, t.H, xy, lut, primaryScan);
   const b = new Float32Array(xy.length * 4);
   xy.forEach((v, i) => b.set(v, 4 * i));
   const base = b.slice(),
@@ -698,6 +725,7 @@ export async function fitMovie(
       intensity: number[][] = [],
       drift: number[][] = [],
       background: number[] = [];
+    const backgroundSlopes:number[][]=[];
     let focusWindowShifts = 0,
       windowCenterUm = initialCenter;
     const fittedXY = xy.map((_, i) => [ref[4 * i], ref[4 * i + 1]]);
@@ -725,7 +753,35 @@ export async function fitMovie(
       dev.queue.writeBuffer(gpu.obs, 0, im);
       b.set(ref);
       for (let i = 0; i < xy.length; i++) b[i * 4 + 2] = groupFlux[frame % period][i * 4 + 2];
-      for (let it = 0; it < 12; it++) {
+      if(primaryScan){
+        d[0]=d[1]=0;
+        let level=back;
+        const slopes=[0,0];
+        for(let round=0;round<4;round++){
+          if(d[2]<2 || d[2]>NZ-3){
+            windowCenterUm+=(d[2]-(NZ-1)/2)*dz; d[2]=(NZ-1)/2; focusWindowShifts++;
+            lut=await table(dev,model,s.diameterNm,half,windowCenterUm); dev.queue.writeBuffer(gpu.lut,0,lut);
+          }
+          for(let iter=0;iter<(round===3 ? 7 : 5);iter++){
+            const stat=await gpu.step(b,d,level,slopes);
+            for(let i=0;i<xy.length;i++) b[4*i+2]=Math.max(.5,b[4*i+2]*stat[9*i]);
+          }
+          if(round===3) break;
+          const tiles=await gpu.step(b,d,level,slopes,true), normal=new Float64Array(27);
+          for(let i=0;i<tiles.length;i++) normal[i%27]+=tiles[i];
+          const gram=new Float64Array(36);
+          for(let i=0,k=6;i<6;i++){
+            for(let j=0;j<=i;j++) gram[i*6+j]=gram[j*6+i]=normal[k++];
+            gram[i*6+i]+=i<3 ? 1 : 1e-6;
+          }
+          const delta=solve(gram,normal.slice(0,6),6);
+          for(let j=0;j<2;j++) d[j]=clamp(d[j]+delta[j],-4,4);
+          d[2]+=clamp(delta[2],-4,4);
+          level=Math.max(1,level+delta[3]); slopes[0]+=delta[4]; slopes[1]+=delta[5];
+        }
+        background[frame]=level;
+        backgroundSlopes.push(slopes);
+      } else for (let it = 0; it < 12; it++) {
         // Re-tabulate around the current physical focus before interpolation approaches
         // either edge. Keep the same Z spacing and preserve the absolute trajectory.
         if (d[2] < 2 || d[2] > NZ - 3) {
@@ -791,6 +847,7 @@ export async function fitMovie(
       model,
       settings: s,
       stackCalibrated: !!stack,
+      ...(primaryScan ? {nominalFocusNm:trackedFocus!.map(z=>z*1000),backgroundSlopes} : {}),
       exposureFocusTracked: !!trackedFocus,
       diversityScores,
       boundaryFrames: 0, // Retained for earlier consumers. Axial motion is no longer clipped.

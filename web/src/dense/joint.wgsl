@@ -1,6 +1,6 @@
 // Each camera pixel sees every bead whose footprint touches its tile.
 struct Params { w:u32,h:u32,nb:u32,side:u32, tileCols:u32,nz:u32, sampling:f32,dz:f32,
-  dx:f32,dy:f32,zi:f32,bg:f32 }
+  dx:f32,dy:f32,zi:f32,bg:f32, bgSlope:vec2f }
 @group(0) @binding(0) var<uniform> p:Params;
 @group(0) @binding(1) var<storage,read> lut:array<f32>;
 @group(0) @binding(2) var<storage,read> tiles:array<u32>;
@@ -21,7 +21,7 @@ fn kernel(d:vec2f,z:f32)->f32 {
 @compute @workgroup_size(64) fn render(@builtin(global_invocation_id) id:vec3u){
  let i=id.x; if(i>=p.w*p.h){return;}
  let xy=vec2u(i%p.w,i/p.w); let t=xy.y/8*p.tileCols+xy.x/8;
- var mu=p.bg;
+ var mu=p.bg+dot(p.bgSlope,2.*vec2f(xy)/vec2f(vec2u(p.w-1,p.h-1))-1.);
  for(var j=tiles[t];j<tiles[t+1];j++){let b=beads[tiles[j]];
  mu+=b.z*kernel(vec2f(xy)-b.xy-vec2f(p.dx,p.dy),p.zi);}
  model[i]=max(mu,0.001);
@@ -43,4 +43,37 @@ fn kernel(d:vec2f,z:f32)->f32 {
  }}
  let o=n*9;sums[o]=num/max(den,1e-9);sums[o+1]=g.x;sums[o+2]=g.y;sums[o+3]=g.z;
  sums[o+4]=h.x;sums[o+5]=h.y;sums[o+6]=h.z;sums[o+7]=cost;sums[o+8]=den;
+}
+
+// Six global derivatives: camera translation XYZ and the three background terms.
+// Sum emitter derivatives at a pixel before forming the Poisson normal matrix.
+var<workgroup> partial:array<array<f32,27>,64>;
+@compute @workgroup_size(8,8) fn exposure(@builtin(global_invocation_id) id:vec3u,
+ @builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) block:vec3u){
+ if(id.x<p.w && id.y<p.h){
+  let pixel=id.y*p.w+id.x; let tile=block.y*p.tileCols+block.x;
+  var grad=vec3f(0.);
+  for(var j=tiles[tile];j<tiles[tile+1];j++){
+   let b=beads[tiles[j]];let d=vec2f(id.xy)-b.xy-vec2f(p.dx,p.dy);
+   grad+=b.z*vec3f((kernel(d-vec2f(.008,0),p.zi)-kernel(d+vec2f(.008,0),p.zi))/.016,
+                    (kernel(d-vec2f(0,.008),p.zi)-kernel(d+vec2f(0,.008),p.zi))/.016,
+                    (kernel(d,p.zi+.1)-kernel(d,p.zi-.1))/.2);
+  }
+  let uv=2.*vec2f(id.xy)/vec2f(vec2u(p.w-1,p.h-1))-1.;
+  var g=array<f32,6>(grad.x,grad.y,grad.z,1.,uv.x,uv.y);
+  let pred=max(model[pixel],2.);let resid=(obs[pixel]-pred)/pred;
+  var k=6u;
+  for(var i=0u;i<6;i++){
+   partial[lane][i]=g[i]*resid;
+   for(var j=0u;j<=i;j++){partial[lane][k]=g[i]*g[j]/pred;k++;}
+  }
+ }
+ workgroupBarrier();
+ for(var stride=32u;stride>0;stride/=2u){
+  if(lane<stride){for(var k=0u;k<27;k++){ partial[lane][k]+=partial[lane+stride][k]; }}
+  workgroupBarrier();
+ }
+ if(lane==0u){let off=(block.y*p.tileCols+block.x)*27u;
+  for(var k=0u;k<27;k++){sums[off+k]=partial[0][k];}
+ }
 }

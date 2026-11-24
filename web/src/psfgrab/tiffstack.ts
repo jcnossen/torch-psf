@@ -8,6 +8,7 @@
 
 export interface StackOpts {
   axis?: 'frames' | 'slices';
+  stepUm?: number;
   info?: string;                 // free text in the ImageJ description (a single line, no '=' needed)
 }
 
@@ -16,6 +17,7 @@ export function imagejDescription(N: number, C: number, opts: StackOpts = {}): s
   if (C > 1) d += `channels=${C}\n`;
   if (N > 1) d += `${opts.axis ?? 'frames'}=${N}\n`;
   d += `hyperstack=true\nmode=${C === 3 ? 'composite' : 'grayscale'}\nloop=false\n`;
+  if(opts.stepUm !== undefined) d+='unit=um\nspacing='+opts.stepUm+'\n';
   if (opts.info) d += 'Info=' + opts.info.replace(/[\r\n\0]+/g, ' ') + '\n';
   return d;
 }
