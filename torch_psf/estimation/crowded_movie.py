@@ -4,6 +4,7 @@ import torch
 from scipy import ndimage, spatial
 from .bead_movie import DenseMovieFit, grouped_images, propose
 from .dense_beads import find_all_beads
+from .lateral_registration import lateral_registration, registered_frame, movie_candidates
 from .vectorial_movie_table import VectorialMovieTable
 
 
@@ -87,12 +88,12 @@ class Scene:
         flux,bg,pred,_=self.solve_flux(obs,rows,psf,flux,bg,4)
         return xy,coeff,flux,bg,pred
 
-    def exposure(self,frame,xy,coeff,flux,bg,reference):
+    def exposure(self,frame,xy,coeff,flux,bg,reference,initial=(0.,0.,0.)):
         obs=self.tensor(frame.reshape(1,-1))
-        motion=self.tensor([0,0,0])
+        motion=self.tensor(initial)
         for iteration in range(3):
             focus=float(motion[2])
-            rows,psf,d,_=reference if iteration==0 else self.geometry(xy+motion[:2],coeff,focus,True)
+            rows,psf,d,_=reference if iteration==0 and reference is not None else self.geometry(xy+motion[:2],coeff,focus,True)
             flux,bg,pred,resid=self.solve_flux(obs,rows,psf,flux,bg,5)
             deriv=torch.stack([self.project(rows,flux[:,:,None]*g)[0] for g in (d[0],d[1],d[3])])
             step=torch.linalg.solve((deriv/pred)@deriv.T+torch.eye(3,device=xy.device),deriv@resid[0])
@@ -106,10 +107,19 @@ class Scene:
 @torch.no_grad()
 def fit_crowded_movie(movie,groups,optics,radius=7):
     """Fit vectorial Z6, bead positions and photon counts, planar backgrounds, and XYZ drift."""
-    images,counts=grouped_images(movie.astype(np.float32),groups)
+    movie=np.asarray(movie,dtype=np.float32)
+    motion=lateral_registration(movie) if len(movie)>=8 and min(movie.shape[1:])>=24 else None
+    aligned=movie if motion is None else np.stack([registered_frame(im,d) for im,d in zip(movie,motion)])
+    images,counts=grouped_images(aligned,groups)
+    del aligned
     inv = np.arange(len(movie)) if groups is None else np.unique(groups, return_inverse=True)[1]
     scene=Scene(optics,movie.shape[1:],radius)
-    peaks,_=find_all_beads(images,sigma=.6,threshold=.9,min_dist=1,bg_size=9)
+    focus=np.asarray(optics.get('frame_focus_offsets_um',np.zeros(len(movie))),dtype=float)
+    if focus.shape!=(len(movie),) or not np.isfinite(focus).all() or (np.abs(focus)>scene.table.focus[-1]+1e-7).any():
+        raise ValueError("frame_focus_offsets_um must supply one finite offset inside the optical table per exposure")
+    recurring=movie_candidates(movie,motion) if motion is not None else []
+    if len(recurring): peaks=recurring[:,:2]
+    else: peaks,_=find_all_beads(images,sigma=.6,threshold=.9,min_dist=1,bg_size=9)
     if not len(peaks): raise ValueError("No bead candidates")
     xy=scene.tensor(peaks)
     coeff=scene.tensor(np.zeros(3))
@@ -118,7 +128,7 @@ def fit_crowded_movie(movie,groups,optics,radius=7):
     for stage,steps in enumerate((20,16,16,16,20)):
         print("Group fit",stage+1,"candidates",len(xy),flush=True)
         xy,coeff,flux,bg,pred=scene.groups_fit(images,xy,coeff,flux,bg,steps)
-        if stage==4: break
+        if stage==4 or len(recurring): break
         expected=pred.cpu().numpy().reshape(images.shape)
         residual=images-expected
         score=(ndimage.gaussian_filter(residual,(0,.7,.7))/np.sqrt(expected.clip(3)/counts[:,None,None])).max(0)
@@ -129,11 +139,26 @@ def fit_crowded_movie(movie,groups,optics,radius=7):
     keep=flux.mean(0)>max(100,.07*float(flux.mean(0).median()))
     xy,flux=xy[keep],flux[:,keep]
     xy,coeff,flux,bg,_=scene.groups_fit(images,xy,coeff,flux,bg,10)
-    reference=scene.geometry(xy,coeff,derivatives=True)
+    if motion is not None:
+        # Refine the common coordinates against the raw exposures. Sum the
+        # per-emitter Poisson score and curvature over the selected exposures.
+        for _ in range(2):
+            grad=torch.zeros_like(xy)
+            curvature=torch.zeros_like(xy)
+            for t in np.rint(np.linspace(0,len(movie)-1,min(12,len(movie)))).astype(int):
+                rows,psf,deriv,_=scene.geometry(xy+scene.tensor(motion[t]),coeff,float(focus[t]),derivatives=True)
+                obs=scene.tensor(movie[t].reshape(1,-1))
+                f,_,pred,resid=scene.solve_flux(obs,rows,psf,flux[inv[t]:inv[t]+1],bg[inv[t]:inv[t]+1],3)
+                for axis,g in enumerate(deriv[:2]):
+                    jac=f[0,:,None]*g
+                    grad[:,axis]+=(jac*resid[0,rows]).sum(1)
+                    curvature[:,axis]+=(jac.square()/pred[0,rows]).sum(1)
+            xy+=.6*(grad/curvature.clamp_min(1)).clamp(-.4,.4)
+    reference=scene.geometry(xy,coeff,derivatives=True) if motion is None and not focus.any() else None
     phot,background,motions=[],[],[]
     for t,frame in enumerate(movie):
         if t%25==0: print("Exposure",t+1,flush=True)
-        f,b,m=scene.exposure(frame,xy,coeff,flux[inv[t]:inv[t]+1],bg[inv[t]:inv[t]+1],reference)
+        f,b,m=scene.exposure(frame,xy,coeff,flux[inv[t]:inv[t]+1],bg[inv[t]:inv[t]+1],reference,(*((0.,0.) if motion is None else motion[t]),focus[t]))
         phot.append(f.cpu().numpy()); background.append(b.cpu().numpy()); motions.append(m.cpu().numpy())
     motion=np.array(motions)
     mean=motion[:,:2].mean(0)

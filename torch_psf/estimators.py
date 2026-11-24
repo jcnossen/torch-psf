@@ -334,6 +334,8 @@ class DenseBeadEstimator(Estimator):
         movie entry point also accepts a calibration ZYX stack in photoelectrons and its signed
         step dz_um in micrometres. The stack fits the shared pupil before movie XYZ drift.
         optics supplies the bead diameter and the nominal movie focus in micrometres.
+        A repeated planar movie with optical settings and sufficient focus diversity
+        estimates its pupil from XY-registered illumination cycles.
         """
         if calibration_stack is not None:
             from os import PathLike, fspath
@@ -354,6 +356,15 @@ class DenseBeadEstimator(Estimator):
             if frames.ndim != 3 or not len(frames) or not np.isfinite(frames).all():
                 raise ValueError('expected a finite TYX movie')
             return fit_crowded_movie(frames, groups, settings, radius)
+        if optics is not None and (groups is not None or optics.get('calibrated_psf') is not None):
+            from torch_psf.estimation.cycle_pupil import movie_optics
+            from torch_psf.estimation.crowded_movie import fit_crowded_movie
+            frames = movie.detach().cpu().numpy() if torch.is_tensor(movie) else np.asarray(movie)
+            if frames.ndim != 3 or not len(frames) or not np.isfinite(frames).all():
+                raise ValueError('expected a finite TYX movie')
+            calibrated = optics if optics.get('calibrated_psf') is not None else movie_optics(frames, groups, optics, radius)
+            if calibrated is not None:
+                return fit_crowded_movie(frames, groups, calibrated, radius)
         from torch_psf.estimation.bead_movie import fit_bead_movie
         return fit_bead_movie(movie, groups, optics=optics, radius=radius)
 

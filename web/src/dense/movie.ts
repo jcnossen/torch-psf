@@ -1,3 +1,4 @@
+import { centralPatch, lateralRegistration, addRegistered, MovieCandidates } from './lateral-registration';
 import { solve } from '../fit/linalg';
 import { framePower, exposureFocus } from './frame-focus';
 import { CycleSpectra, refineDiversePupil, type DiversityDiagnostic } from './diversity';
@@ -325,6 +326,7 @@ class Joint {
     private xy: number[][],
     lut: Float32Array,
     fitExposure=false,
+    driftMargin=0,
   ) {
     const make = (size: number, usage: number) => {
       const b = dev.createBuffer({ size, usage });
@@ -344,13 +346,13 @@ class Joint {
       tiles: number[][] = Array.from({ length: cols * rows }, () => []);
     xy.forEach(([x, y], i) => {
       for (
-        let ty = Math.max(0, Math.floor((y - 12) / 8));
-        ty <= Math.min(rows - 1, Math.floor((y + 12) / 8));
+        let ty = Math.max(0, Math.floor((y - 12 - driftMargin) / 8));
+        ty <= Math.min(rows - 1, Math.floor((y + 12 + driftMargin) / 8));
         ty++
       )
         for (
-          let tx = Math.max(0, Math.floor((x - 12) / 8));
-          tx <= Math.min(cols - 1, Math.floor((x + 12) / 8));
+          let tx = Math.max(0, Math.floor((x - 12 - driftMargin) / 8));
+          tx <= Math.min(cols - 1, Math.floor((x + 12 + driftMargin) / 8));
           tx++
         )
           tiles[ty * cols + tx].push(i);
@@ -485,11 +487,14 @@ export async function fitMovie(
       Math.round((i * (t.n - 1)) / (Math.min(11, t.n) - 1)),
     ),
   );
+  const patches:Float32Array[]=[];
+  const register=!primaryScan && t.n>=8 && Math.min(t.W,t.H)>=24;
   const shapes: NonNullable<ReturnType<typeof observedShape>>[] = [];
   const sampleIndices: number[] = [];
   for (let i = 0; i < t.n; i++) {
     const f = photons(await t.read(i, i + 1), s);
-    cycles?.add(f,i);
+    if(register) patches.push(centralPatch(f,t.W,t.H));
+    if(!register) cycles?.add(f,i);
     if(trackFrames) frameSpectra.push(framePower(f,t.W,t.H));
     if (!stack && sampleFrames.has(i)) {
       const shape = observedShape(f, t.W, t.H);
@@ -503,6 +508,28 @@ export async function fitMovie(
       mean[j] += f[j] / t.n;
       groups[i % period][j] += f[j] / Math.ceil((t.n - (i % period)) / period);
     }
+  }
+  const motion=register ? lateralRegistration(patches) : undefined;
+  patches.length=0;
+  let recurring:number[][]=[];
+  if(motion){
+    log('Registering exposures and detecting overlapping beads');
+    const votes=new MovieCandidates(t.W,t.H);
+    mean.fill(0);groups.forEach(group=>group.fill(0));
+    for(let frame=0;frame<t.n;frame++){
+      const im=photons(await t.read(frame,frame+1),s),slot=frame%period;
+      votes.add(im,motion[frame]);
+      const aligned=new Float32Array(im.length);
+      addRegistered(aligned,im,t.W,t.H,motion[frame],1);
+      cycles?.add(aligned,frame);
+      const count=Math.ceil((t.n-slot)/period);
+      for(let k=0;k<im.length;k++)groups[slot][k]+=aligned[k]/count;
+    }
+    for(let slot=0;slot<period;slot++){
+      const weight=Math.ceil((t.n-slot)/period)/t.n;
+      for(let k=0;k<mean.length;k++)mean[k]+=weight*groups[slot][k];
+    }
+    recurring=votes.finish(t.n);
   }
   log('Calibrating optics');
   let scanOrigin=0;
@@ -573,7 +600,11 @@ export async function fitMovie(
       seedKernel[middle+p]=sum;
     }
   }
-  const xy = seeds(mean, t.W, t.H, t.n, seedKernel);
+  if(recurring.length){
+    const middle=((NZ-1)/2*SIDE+(SIDE-1)/2)*SIDE+(SIDE-1)/2;
+    for(const p of recurring)p[2]/=Math.max(1e-6,seedKernel[middle]);
+  }
+  const xy = recurring.length ? recurring : seeds(mean, t.W, t.H, t.n, seedKernel);
   const bins = new Map<number, number[][]>();
   const bin = (x: number, y: number) => Math.floor(y / 2) * t.W + Math.floor(x / 2);
   const insert = (p: number[]) => {
@@ -582,7 +613,7 @@ export async function fitMovie(
     bins.get(k)!.push(p);
   };
   xy.forEach(insert);
-  if (period > 1)
+  if (!recurring.length && period > 1)
     for (const group of groups)
       for (const p of seeds(group, t.W, t.H, t.n / period, seedKernel)) {
         let near = false;
@@ -599,7 +630,7 @@ export async function fitMovie(
           insert(p);
         }
       }
-  const gpu = new Joint(dev, t.W, t.H, xy, lut, primaryScan);
+  const gpu = new Joint(dev, t.W, t.H, xy, lut, primaryScan, motion?.reduce((v,d)=>Math.max(v,Math.abs(d[0]),Math.abs(d[1])),0) ?? 0);
   const b = new Float32Array(xy.length * 4);
   xy.forEach((v, i) => b.set(v, 4 * i));
   const base = b.slice(),
@@ -744,6 +775,34 @@ export async function fitMovie(
           );
         }
     }
+    // Refit the static catalog against original exposures at their own XY and focus.
+    // Group averages supply initial fluxes only. Each pass accumulates gradients
+    // from the same raw pixels under the joint overlapping-emitter model.
+    if(motion){
+      const count=Math.min(12,t.n);
+      for(let round=0;round<2;round++){
+        log('Refining drift-corrected catalog '+(round+1)+' / 2');
+        const normal=new Float64Array(b.length);
+        for(let i=0;i<count;i++){
+          const frame=Math.round(i*(t.n-1)/(count-1));
+          const im=photons(await t.read(frame,frame+1),s),back=quantile(im,.01);
+          dev.queue.writeBuffer(gpu.obs,0,im);
+          const beads=b.slice(),group=groupFlux[frame%period];
+          const plane=trackedFocus ? clamp((NZ-1)/2+(trackedFocus[frame]-initialCenter)/dz,0,NZ-1) : d[2];
+          const shift=[...motion[frame],plane];
+          for(let k=2;k<b.length;k+=4)beads[k]=group[k];
+          for(let iter=0;iter<4;iter++){
+            const stat=await gpu.step(beads,shift,back);
+            for(let j=0;j<xy.length;j++){
+              const k=j*4,o=j*9;beads[k+2]*=stat[o];
+              if(iter===3)for(let u=0;u<2;u++){normal[k+u]+=stat[o+1+u];normal[k+2+u]+=stat[o+4+u];}
+            }
+          }
+        }
+        for(let k=0;k<b.length;k+=4)for(let u=0;u<2;u++)
+          b[k+u]+=0.6*clamp(normal[k+u]/Math.max(1,normal[k+2+u]),-.4,.4);
+      }
+    }
     const ref = b.slice(),
       intensity: number[][] = [],
       drift: number[][] = [],
@@ -755,6 +814,7 @@ export async function fitMovie(
     let minFocusUm = -half,
       maxFocusUm = half;
     for (let frame = 0; frame < t.n; frame++) {
+      if(motion){d[0]=motion[frame][0]; d[1]=motion[frame][1];}
       if (trackedFocus) {
         d[2] = (NZ-1)/2 + (trackedFocus[frame]-windowCenterUm)/dz;
       } else if (shapeTrace) {
@@ -828,7 +888,7 @@ export async function fitMovie(
         if (it >= 2 && it < 10)
           for (let u = 0; u < (trackedFocus ? 2 : 3); u++) {
             const update = 0.6 * clamp(g[u] / Math.max(1, h[u]), u === 2 ? -1 : -0.25, u === 2 ? 1 : 0.25);
-            d[u] = u === 2 ? d[u] + update : clamp(d[u] + update, -4, 4);
+            d[u] = u === 2 ? d[u] + update : clamp(d[u] + update, (motion?.[frame][u] ?? 0)-4, (motion?.[frame][u] ?? 0)+4);
           }
       }
       intensity.push(xy.map((_, i) => b[i * 4 + 2]));
