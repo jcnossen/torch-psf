@@ -127,6 +127,19 @@ function targets(data: CycleSpectra) {
   return { target, weight };
 }
 
+export interface PupilTrial {
+  sign:number;
+  iterations:number;
+  stop:string;
+  cost:number;
+  coefficients:number[];
+}
+export interface DiversityDiagnostic {
+  focusSpanUm:number;
+  decision:string;
+  trials:PupilTrial[];
+  constantCost?:number;
+}
 export async function refineDiversePupil(
   dev: GPUDevice,
   m: VectorialModel,
@@ -135,12 +148,17 @@ export async function refineDiversePupil(
   initial: number[],
   observe?: MovieObserver,
   cycleOffsets?: number[][],
+  record?:(trial:DiversityDiagnostic)=>void,
 ) {
   const n = data.frames.length,
     nm = m.noll.length,
     nf = freq.length,
     npar = nm + n + 2 * (n - 1);
-  if (n < 5 || Math.max(...initial) - Math.min(...initial) < 0.04) return;
+  const focusSpanUm=Math.max(...initial)-Math.min(...initial);
+  if(n<5 || focusSpanUm<.04){
+    record?.({focusSpanUm,decision:n<5?'Too few complete cycles':'Initial focus span below 40 nm',trials:[]});
+    return;
+  }
   const { target, weight } = targets(data),
     base = Array.from(m.zcoef),
     height = diameter / 2000;
@@ -231,7 +249,9 @@ export async function refineDiversePupil(
       r = residual(h, x),
       cost = norm2(r),
       lambda = 0.01;
+    let used=0,stop='Iteration limit';
     for (let it = 0; it < iterations; it++) {
+      used=it+1;
       const jac: Float64Array[] = [],
         eps = 0.0005;
       const shifted = x.slice();
@@ -307,9 +327,11 @@ export async function refineDiversePupil(
           focusUm: height + x[nm],
           score: cost / nf,
         });
-      if (!accepted || improvement < 1e-7 * nf) break;
+      if(!accepted || improvement<1e-7*nf){
+        stop=accepted?'Score improvement below tolerance':'No downhill step';break;
+      }
     }
-    return { x, sign, cost: cost / nf };
+    return { x, sign, cost: cost / nf, used, stop };
   }
   try {
     const a = await branch(1, 0),
@@ -318,7 +340,10 @@ export async function refineDiversePupil(
       constant = best.x.slice();
     constant.fill(best.x[nm], nm, nm + n);
     const flatCost = norm2(residual(await transfer(constant, best.sign), constant)) / nf;
-    if (!(best.cost < 0.08 && best.cost < 0.85 * flatCost)) return;
+    const accepted=best.cost<.08 && best.cost<.85*flatCost;
+    record?.({focusSpanUm,constantCost:flatCost,decision:accepted?'Accepted':'Failed score or focus-diversity comparison',
+      trials:[a,b].map(v=>({sign:v.sign,iterations:v.used,stop:v.stop,cost:v.cost,coefficients:Array.from(v.x.subarray(0,nm))}))});
+    if(!accepted)return;
     return {
       coefficients: Array.from(best.x.subarray(0, nm)),
       focus: Array.from(best.x.subarray(nm, nm + n)),

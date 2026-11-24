@@ -1,6 +1,6 @@
 import { solve } from '../fit/linalg';
 import { framePower, exposureFocus } from './frame-focus';
-import { CycleSpectra, refineDiversePupil } from './diversity';
+import { CycleSpectra, refineDiversePupil, type DiversityDiagnostic } from './diversity';
 import { observedShape, fitMovieShapes, profileHalfRangeUm } from './movie-shapes';
 import { VecEngine } from '../gpu/ops';
 import { TiffMovie } from '../io/tiff';
@@ -33,6 +33,7 @@ export interface MovieFit {
   nominalFocusNm?: number[];
   backgroundSlopes?: number[][];
   exposureFocusTracked?: boolean;
+  pupilDiagnostics?:{coarse:number[];completeCycles:number;usedCycles:number;passes:DiversityDiagnostic[]};
   diversityScores?: {cost:number; alternative:number; constantCost:number};
   boundaryFrames: number;
   focusWindowShifts: number;
@@ -243,6 +244,26 @@ async function table(
     eng.destroy();
   }
   return out;
+}
+/** Render independent flux predictions through one fitted finite-bead PSF plane. */
+export async function predictMovieFrame(dev:GPUDevice,fit:MovieFit,drift:number[],flux:number[][],background:number) {
+  const center=(NZ-1)/2;
+  const bank=await table(dev,fit.model,fit.settings.diameterNm,0,drift[2]/1000,center);
+  const planes=flux.map(()=>new Float32Array(fit.width*fit.height).fill(background));
+  const offset=center*SIDE*SIDE, mid=(SIDE-1)/2;
+  for(let j=0;j<fit.xy.length;j++){
+    const x=fit.xy[j][0]+drift[0], y=fit.xy[j][1]+drift[1];
+    for(let py=Math.max(0,Math.ceil(y-mid/K));py<Math.min(fit.height,y+mid/K);py++){
+      const v=(py-y)*K+mid, iy=Math.floor(v), fy=v-iy;
+      for(let px=Math.max(0,Math.ceil(x-mid/K));px<Math.min(fit.width,x+mid/K);px++){
+        const u=(px-x)*K+mid, ix=Math.floor(u), fx=u-ix;
+        const i=offset+iy*SIDE+ix;
+        const k=(1-fy)*((1-fx)*bank[i]+fx*bank[i+1])+fy*((1-fx)*bank[i+SIDE]+fx*bank[i+SIDE+1]);
+        for(let m=0;m<planes.length;m++) planes[m][py*fit.width+px]+=flux[m][j]*k;
+      }
+    }
+  }
+  return planes;
 }
 function seeds(mean: Float32Array, w: number, h: number, frames: number, kernel: Float32Array) {
   const bg = quantile(mean, 0.015),
@@ -492,6 +513,8 @@ export async function fitMovie(
     !stack && shapes.length >= 3
       ? await fitMovieShapes(dev, model, s.diameterNm, shapes, observe)
       : undefined;
+  const pupilDiagnostics={coarse:Array.from(model.zcoef),completeCycles:Math.floor(t.n/period),usedCycles:cycles?.frames.length??0,passes:[] as DiversityDiagnostic[]};
+  const recordPupil=(pass:DiversityDiagnostic)=>{pupilDiagnostics.passes.push(pass);};
   let trackedFocus: number[] | undefined;
   let diversityScores: {cost:number; alternative:number; constantCost:number} | undefined;
   if(cycles?.frames.length && shapeTrace){
@@ -502,7 +525,7 @@ export async function fitMovie(
       return shapeTrace![j]+a*(shapeTrace![k]-shapeTrace![j]);
     });
     log('Refining signed pupil across illumination cycles');
-    let optical = await refineDiversePupil(dev,model,s.diameterNm,cycles,seed,observe);
+    let optical = await refineDiversePupil(dev,model,s.diameterNm,cycles,seed,observe,undefined,recordPupil);
     if(optical){
       model.zcoef=optical.coefficients;
       trackedFocus = await exposureFocus(dev,model,s.diameterNm,frameSpectra,period,cycles.frames,optical.focus);
@@ -513,7 +536,7 @@ export async function fitMovie(
           const mean=group.reduce((a,b)=>a+b,0)/period;
           return group.map(z=>z-mean);
         });
-        const blurred=await refineDiversePupil(dev,model,s.diameterNm,cycles,optical.focus,observe,offsets);
+        const blurred=await refineDiversePupil(dev,model,s.diameterNm,cycles,optical.focus,observe,offsets,recordPupil);
         if(blurred){
           const candidate={...model,zcoef:blurred.coefficients};
           const refined=await exposureFocus(dev,candidate,s.diameterNm,frameSpectra,period,cycles.frames,blurred.focus);
@@ -850,6 +873,7 @@ export async function fitMovie(
       ...(primaryScan ? {nominalFocusNm:trackedFocus!.map(z=>z*1000),backgroundSlopes} : {}),
       exposureFocusTracked: !!trackedFocus,
       diversityScores,
+      pupilDiagnostics:stack ? undefined : pupilDiagnostics,
       boundaryFrames: 0, // Retained for earlier consumers. Axial motion is no longer clipped.
       focusWindowShifts,
     } satisfies MovieFit;
