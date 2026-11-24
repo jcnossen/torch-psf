@@ -101,7 +101,7 @@ function checkAxis(m: TiffMovie, stack: boolean) {
       stack ? 'Supply a single-channel ZYX calibration stack.' : 'Supply a single-channel TYX movie.',
     );
 }
-async function calibrate(
+export async function calibrate(
   dev: GPUDevice,
   file: File,
   s: Settings,

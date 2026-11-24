@@ -21,6 +21,7 @@ export function mount(
   finish?: (fit: MovieFit, el: HTMLElement) => Promise<void>,
   live?: {
     start(): void;
+    status?(message: string): void;
     period?: () => number;
     update: MovieObserver;
     frame?: MovieFrameObserver;
@@ -94,6 +95,7 @@ export function mount(
     out.replaceChildren();
     const log = (s: string) => {
       status.textContent = s;
+      live?.status?.(s);
     };
     try {
       live?.start();
