@@ -9,6 +9,8 @@ export interface GelScan {
     stage: number[];
     scanIndex: number[];
     estimateFocus?: boolean;
+    /** Numerical PSF sampling recorded by the acquisition or simulator. */
+    sampling?: 'compact' | 'wide';
 }
 export interface Bead {
     x: number;
@@ -387,6 +389,30 @@ function referenceDrift(scan: GelScan, means: Float32Array) {
     const first = motion[0].slice();
     return motion.map(v => v.map((x, i) => x - first[i]));
 }
+/** Offset of the strongest smoothed PSF spot from the emitter's model coordinates. */
+function detectorPeak(bank: Float32Array) {
+    const size = 25, center = 12;
+    const stamp = new Float32Array(size * size);
+    let best = -Infinity, peak = [0, 0, 0];
+    for (let iz = -127; iz <= 127; iz++) {
+        const z = iz * .1;
+        stamp.fill(0);
+        footprint(size, size, bank, center, center, z, (p, value) => { stamp[p] = value; });
+        for (let y = 2; y < size - 2; y++) {
+            for (let x = 2; x < size - 2; x++) {
+                const p = y * size + x;
+                const core = 4 * stamp[p] + 2 * (stamp[p-1] + stamp[p+1] + stamp[p-size] + stamp[p+size])
+                    + stamp[p-size-1] + stamp[p-size+1] + stamp[p+size-1] + stamp[p+size+1];
+                if (core > best) {
+                    best = core;
+                    peak = [x-center, y-center, z];
+                }
+            }
+        }
+    }
+    return peak;
+}
+
 /** Blind pupil seed from the median of independently centred through-focus patches. */
 async function initialPupil(device: GPUDevice, scan: GelScan, means: Float32Array, beads: Bead[], settings: GelOptics) {
     const { width: w, height: h } = scan, R = 13, r = 6, depth = 11, mid = 5;
@@ -422,6 +448,12 @@ async function initialPupil(device: GPUDevice, scan: GelScan, means: Float32Arra
     const fitter = new BeadFitter(device, [stack], [{ stack: 0, x0: 0, y0: 0 }], [data], { optics: settings.optics, roisize: R,
         npupil: 48, oversample: 2, sign: 1, dz_um: spacing, ze_um: 5, fitDz: false, fitDrift: false, holdout: [], maxIter: 28, zernike_noll: modes });
     try {
+        // A registered patch is centered on peak contrast. Express its starting
+        // optical focus in the same coordinate system as the vectorial model.
+        if (scan.sampling === 'compact') {
+            const flatBank = await compactModel.opticalBank(device, settings, modes.map(() => 0));
+            fitter.st.zoff[0] -= detectorPeak(flatBank)[2];
+        }
         const v = Array.from((await fitter.fit()).state.zcoef);
         return v.every(x => Number.isFinite(x) && Math.abs(x) < .45) ? v : modes.map(() => 0);
     }
@@ -448,7 +480,8 @@ export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOpti
     const span = Math.max(...stage)-Math.min(...stage);
     const beamVolume = Math.PI*(1.22*wavelength_um/NA)**2*(2*n_med*wavelength_um/NA**2);
     const crowded = meanPeaks.length*beamVolume > w*h*pixel_um**2*span;
-    const {opticalBank,gpuScene}=wideModel;
+    const compact = scan.sampling === 'compact';
+    const {opticalBank,gpuScene} = compact ? compactModel : wideModel;
     let beads = meanPeaks;
     if (beads.length < 8)
         throw Error('Fewer than eight 3D bead candidates. Check the scan spacing and photon calibration.');
@@ -457,16 +490,19 @@ export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOpti
     let coeff = initialCoefficients?.slice() ?? await initialPupil(device, scan, means, beads, settings);
     const snapshot=()=>observe?.(coeff,stage.map((z,t)=>z+drift[t][2]));
     snapshot();
+    // The scan focus at maximum contrast can differ substantially from bead Z
+    // under index mismatch. Locate the corresponding peak in the current PSF.
+    let bank = await opticalBank(device,settings,coeff);
+    let peak = compact ? detectorPeak(bank) : [0,0,0];
     function register(seed: Bead) {
         const t = stage.findIndex((z, i) => scan.scanIndex[i] >= 0 && z === seed.z);
-        seed.x -= drift[t][0];
-        seed.y -= drift[t][1];
-        seed.z += drift[t][2];
+        seed.x -= drift[t][0]+peak[0];
+        seed.y -= drift[t][1]+peak[1];
+        seed.z += drift[t][2]-peak[2];
         return seed;
     }
     beads.forEach(register);
     const separated = (a:Bead,b:Bead) => Math.hypot((a.x-b.x)*pixel_um,(a.y-b.y)*pixel_um,.65*(a.z-b.z)) > .21;
-    let bank = await opticalBank(device,settings,coeff);
     const scene = gpuScene(device, scan);
     const render = (kernel: Float32Array, background = true) => scene(kernel, beads, drift, bg, background);
     const objective = (mu: Float32Array) => {
@@ -560,7 +596,8 @@ export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOpti
         }
     };
     let rounds = crowded ? 9 : 4;
-    for (let round = 0; round < rounds; round++) {
+    const extraRounds = scan.estimateFocus && !crowded && !compact ? 2 : 0;
+    for (let round = 0; round < rounds + extraRounds; round++) {
         // Estimate the pupil and drift on the 3D difference-of-Gaussians peaks first. An inaccurate
         // initial transfer function displaces or duplicates sideband peaks.
         if (round === 3 && crowded && propose) {
@@ -570,7 +607,7 @@ export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOpti
                 for(const b of peaks) if(beads.every(other=>separated(b,other))) beads.push(b);
             }
         }
-        progress('Refining ' + beads.length + ' overlapping beads and XYZ drift · ' + (round + 1) + '/' + rounds);
+        progress('Refining ' + beads.length + ' overlapping beads and XYZ drift · ' + (round + 1) + '/' + (rounds + extraRounds));
         await geometry(round === 0 ? 20 : rounds > 4 ? 24 : 12);
         snapshot();
         if (round === 1 || (crowded && round === 4) || (!crowded && rounds > 4 && round === 3)) {
@@ -594,9 +631,9 @@ export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOpti
             });
             if(kept.length>=8) beads=kept;
         }
-        if (round === rounds - 1)
+        if (round === rounds + extraRounds - 1)
             break;
-        progress('Fitting shared pupil · Noll 5–11 · ' + (round + 1) + '/' + (rounds - 1));
+        progress('Fitting shared pupil · Noll 5–11 · ' + (round + 1) + '/' + (rounds + extraRounds - 1));
         const mu = await render(bank), cols: Float32Array[] = [];
         for (let m = 0; m < modes.length; m++) {
             const pert = coeff.slice();
@@ -629,6 +666,7 @@ export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOpti
             if (loss < old) {
                 bank = candidate;
                 coeff = next;
+                if (compact) peak = detectorPeak(bank);
                 snapshot();
                 history.push(loss);
                 break;
