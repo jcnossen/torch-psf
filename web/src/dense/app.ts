@@ -28,6 +28,7 @@ export function mount(
     photometry?: (snapshot: PhotometrySnapshot) => void;
     end(): void;
   },
+  selectedInput?: ()=>{file?:File; framesPerStep?:number},
 ) {
   const root = document.querySelector('main')!;
   root.innerHTML =
@@ -85,7 +86,9 @@ export function mount(
     out = root.querySelector('article')!;
   form.onsubmit = async (e) => {
     e.preventDefault();
-    if (!files[0]) {
+    const sourceInput=selectedInput?.();
+    const movieFile=sourceInput ? sourceInput.file : files[0];
+    if (!movieFile) {
       status.textContent = 'Select a movie TIFF.';
       return;
     }
@@ -105,8 +108,7 @@ export function mount(
       log('Opening WebGPU device');
       const { device } = await getDevice();
       const renderPupil = moviePupilReport(out);
-      const movieFile = files[0],
-        stackFile = files[1];
+      const stackFile = selectedInput ? null : files[1];
       const r = await fitMovie(
         device,
         movieFile,
@@ -114,6 +116,7 @@ export function mount(
         {
           optics: { pixel_um: px / 1000, NA, wavelength_um: wl / 1000, n_imm: ni, n_med: ns },
           diameterNm,
+          framesPerStep:sourceInput?.framesPerStep,
           stepNm,
           offset,
           gain,

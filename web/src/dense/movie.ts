@@ -17,6 +17,7 @@ export interface Settings {
   offset: number;
   gain: number;
   period?: number;
+  framesPerStep?: number; // Primary planar Z scan with a known signed step.
 }
 export interface MovieFit {
   width: number;
@@ -107,13 +108,23 @@ export async function calibrate(
   s: Settings,
   m: VectorialModel,
   observe?: MovieObserver,
+  setScanOrigin?: (offsetUm:number)=>void,
 ) {
   const t = await TiffMovie.open([file]);
-  checkAxis(t, true);
+  if(s.framesPerStep === undefined) checkAxis(t, true);
   const dz = s.stepNm || stackStepNm(t.description);
-  if (!Number.isFinite(dz) || !dz || t.n < 3)
+  const repeats=s.framesPerStep ?? 1, nz=t.n/repeats;
+  if(!Number.isInteger(repeats) || repeats<1 || !Number.isInteger(nz))
+    throw Error('The frame count must be divisible by the positive integer frames per step.');
+  if (!Number.isFinite(dz) || !dz || nz < 3)
     throw Error('Calibration requires at least three planes and a signed Z step in nm.');
-  const stack = { name: file.name, nz: t.n, H: t.H, W: t.W, data: photons(await t.read(0, t.n), s) };
+  const area=t.W*t.H;
+  const data=repeats===1 ? photons(await t.read(0,t.n),s) : new Float32Array(nz*area);
+  if(repeats>1) for(let z=0;z<nz;z++){
+    const frames=photons(await t.read(z*repeats,(z+1)*repeats),s);
+    for(let j=0;j<frames.length;j++) data[z*area+j%area]+=frames[j]/repeats;
+  }
+  const stack = { name: file.name, nz, H: t.H, W: t.W, data };
   const beads = findBeads(stack, R, 0.12)
     .slice(0, 48)
     .map((b) => ({ ...b, stack: 0 }));
@@ -156,13 +167,17 @@ export async function calibrate(
           }
         : undefined,
     );
+    if(setScanOrigin){
+      const offsets=Array.from(result.state.zoff).sort((a,b)=>a-b);
+      setScanOrigin((offsets[Math.floor((offsets.length-1)/2)]+offsets[Math.floor(offsets.length/2)])/2);
+    }
     m.zcoef = Array.from(result.state.zcoef);
     if (!Array.from(m.zcoef).every(Number.isFinite))
       throw Error('Calibration failed to fit finite pupil coefficients.');
   } finally {
     fit.destroy();
   }
-  return (Math.abs(dz) * (t.n - 1)) / 2000;
+  return (Math.abs(dz) * (nz - 1)) / 2000;
 }
 // Pixel-integrated vectorial PSFs, sampled at subpixel shifts. The six sphere
 // points reproduce the three second moments of a uniformly fluorescent bead.
@@ -411,7 +426,12 @@ export async function fitMovie(
   photometry?: (snapshot: PhotometrySnapshot) => void,
 ) {
   const t = await TiffMovie.open([file]);
-  checkAxis(t, false);
+  const primaryScan=s.framesPerStep !== undefined;
+  if(primaryScan){
+    if(/SizeC="(?:[2-9]|\d{2,})"|^channels=(?:[2-9]|\d{2,})$/m.test(t.description))
+      throw Error('Supply a single-channel bead slide Z stack.');
+    stack=file;
+  } else checkAxis(t, false);
   if (t.n < 2) throw Error('A movie requires multiple frames.');
   const model: VectorialModel = {
     optics: s.optics,
@@ -455,7 +475,8 @@ export async function fitMovie(
     }
   }
   log('Calibrating optics');
-  const half = stack ? await calibrate(dev, stack, s, model, observe) : 0.35;
+  let scanOrigin=0;
+  const half = stack ? await calibrate(dev, stack, s, model, observe,primaryScan ? v=>{scanOrigin=v;} : undefined) : 0.35;
   model.z_range_um = [-half, half];
   const dz = (2 * half) / (NZ - 1);
   let shapeTrace =
@@ -496,7 +517,11 @@ export async function fitMovie(
     }
   }
   const shapeFocus = shapeTrace?.[0];
-  const initialCenter = trackedFocus?.[0] ?? shapeFocus ?? 0;
+  if(primaryScan){
+    const repeats=s.framesPerStep!, step=(s.stepNm || stackStepNm(t.description))/1000;
+    trackedFocus=Array.from({length:t.n},(_,i)=>(Math.floor(i/repeats)-(t.n/repeats-1)/2)*step-scanOrigin);
+  }
+  const initialCenter = primaryScan ? -scanOrigin : trackedFocus?.[0] ?? shapeFocus ?? 0;
   let lut = await table(dev, model, s.diameterNm, half, initialCenter);
   const xy = seeds(mean, t.W, t.H, t.n, lut);
   const bins = new Map<number, number[][]>();

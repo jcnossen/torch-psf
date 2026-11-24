@@ -18,6 +18,8 @@ export interface CloudOptions {
   blurNm: number;          // fixed mode: sigma (nm); precision mode: minimum sigma
   capNm: number;           // precision mode: maximum sigma (nm)
   maxCrlbNm: number;       // drop localizations with crlb_x > this (0 = keep all)
+  orbitOnDrag?: boolean;
+  peakPerPixel?: number; // Fixed display scale for sparse point catalogs.
   colorZ: boolean;
   zlo: number; zhi: number; // colour range (um)
   zExag: number;           // z exaggeration in tilted views
@@ -61,7 +63,7 @@ export class PointCloudView {
       this.scale *= f; this.request();
     });
     cv.addEventListener('pointerdown', (e) => {
-      if (!last) last = { x: e.clientX, y: e.clientY, orbit: e.shiftKey || e.button === 2, id: e.pointerId };
+      if (!last) last = { x: e.clientX, y: e.clientY, orbit: !!this.opts().orbitOnDrag || e.shiftKey || e.button === 2, id: e.pointerId };
       cv.setPointerCapture(e.pointerId);
     });
     cv.addEventListener('pointermove', (e) => {
@@ -157,7 +159,7 @@ export class PointCloudView {
     const W = Math.max(16, Math.round(this.cv.clientWidth * dpr)), H = Math.max(16, Math.round(this.cv.clientHeight * dpr));
     if (this.cv.width !== W || this.cv.height !== H) { this.cv.width = W; this.cv.height = H; }
     if (!this.scale) this.scale = Math.max(g.W * g.pixel_nm / W, g.H * g.pixel_nm / H) * 1.02;
-    const vmaxPx = this.displayMax() * this.scale * this.scale;
+    const vmaxPx = o.peakPerPixel ?? this.displayMax() * this.scale * this.scale;
     this.gpu.draw({ W, H, scale: this.scale, cx: this.cx, cy: this.cy, X0: g.W * g.pixel_nm / 2, Y0: g.H * g.pixel_nm / 2, Z0: 500 * (o.zlo + o.zhi),
       tilt: this.tilt, rot: this.rot, zExag: o.zExag, mode: o.mode, blur: o.blurNm, cap: o.capNm, keep: this.maxPoints,
       vmaxPx, colorZ: o.colorZ, zlo: o.zlo, zhi: o.zhi });

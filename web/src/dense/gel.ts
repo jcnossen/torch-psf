@@ -463,7 +463,7 @@ async function initialPupil(device: GPUDevice, scan: GelScan, means: Float32Arra
 }
 export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOptics, progress: (s: string) => void,
     propose?: (scan:GelScan, settings:GelOptics, seeds:Bead[], drift:number[][], bank:Float32Array)=>Bead[]|null, initialCoefficients?: number[],
-    observe?: (coefficients:number[],focus:number[])=>void, onPlane?: (index:number)=>void) {
+    observe?: (coefficients:number[],focus:number[],beads:Bead[],driftPx:number[][],bank:Float32Array)=>void, onPlane?: (index:number)=>void) {
     const { width: w, height: h, stage } = scan, n = w * h, T = stage.length;
     const period = scan.frames.length / (T*n);
     if (!Number.isInteger(period) || period < 1) throw Error('Incomplete illumination cycles.');
@@ -488,8 +488,7 @@ export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOpti
     const drift = referenceDrift(scan, means);
     progress('Calibrating the initial pupil from registered through-focus patches');
     let coeff = initialCoefficients?.slice() ?? await initialPupil(device, scan, means, beads, settings);
-    const snapshot=()=>observe?.(coeff,stage.map((z,t)=>z+drift[t][2]));
-    snapshot();
+    const snapshot=()=>observe?.(coeff,stage.map((z,t)=>z+drift[t][2]),beads,drift,bank);
     // The scan focus at maximum contrast can differ substantially from bead Z
     // under index mismatch. Locate the corresponding peak in the current PSF.
     let bank = await opticalBank(device,settings,coeff);
@@ -502,6 +501,7 @@ export async function fitGel(device: GPUDevice, scan: GelScan, settings: GelOpti
         return seed;
     }
     beads.forEach(register);
+    snapshot();
     const separated = (a:Bead,b:Bead) => Math.hypot((a.x-b.x)*pixel_um,(a.y-b.y)*pixel_um,.65*(a.z-b.z)) > .21;
     const scene = gpuScene(device, scan);
     const render = (kernel: Float32Array, background = true) => scene(kernel, beads, drift, bg, background);
