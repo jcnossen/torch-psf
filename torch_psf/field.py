@@ -462,7 +462,7 @@ class TiledSplinePSF(FieldPSF):
         if blend not in ('nearest', 'bilinear'):
             raise ValueError("blend must be 'nearest' or 'bilinear'")
         self.blend = blend
-        self.indexed = None
+        self.indexed = None          # IndexedSplines over the tabulated tiles, built on the first render
         self.source = field_psf
         self.base, self.field = field_psf.base, field_psf.field
         self.spline_grid = field_psf.spline_grid
@@ -583,6 +583,8 @@ class TiledSplinePSF(FieldPSF):
             raise ValueError('expected one field position per emitter')
         for t in ids.unique().tolist():
             self.spline(t)
+        # The tabulated tiles share one knot bank (IndexedSplines, rebuilt when new tiles were added) so that every
+        # emitter's tile renders in one call; _tile_rows maps a tile number to its member index in that bank.
         if self.indexed is None or len(self._splines) != len(self.indexed.members):
             self.indexed = IndexedSplines(list(self._splines.values()), 'tile')
             self._splines = dict(zip(self._splines, self.indexed.members))

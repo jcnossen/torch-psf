@@ -107,6 +107,10 @@ class SplinePSF(PSF):
     Pixel splines interpolate measured pixel values. Density splines integrate
     the interpolant over each pixel. The separable and grouped-convolution
     backends share coordinate, weight and gather code.
+
+    This is one model. Several SplinePSF models on the same grid (the channels of
+    a ChannelsPSF, the field tiles of a TiledSplinePSF) are stacked into one bank
+    by IndexedSplines, so that they render in one call.
     """
     BASIS = 'cubic_bspline'
     FILE_TYPES = ('cubic_spline', 'spline_table', 'integrated_spline', 'spline')   # 'spline_table': read only (0.5 files)
@@ -794,18 +798,42 @@ class SplinePSF(PSF):
 
 
 class IndexedSplines:
-    """One coefficient bank for a channel or tile axis. Each member keeps its own angle and default response."""
+    """Several SplinePSF models stacked into one knot bank, so that all of them render in one batched call.
+
+    This is not a PSF model. A SplinePSF is one model: one bank of knot volumes on one grid, organised along its
+    spline_index axes (component, dipole, pattern angle, 4Pi phase / channel). IndexedSplines adds one more axis across
+    separate models: 'channel' for the channels of a ChannelsPSF (e.g. biplane), or 'tile' for the field tiles of a
+    TiledSplinePSF. evaluate(pos, member) takes a member index per emitter (and channel) and gathers every image from
+    the combined bank in one evaluate_splines call, instead of a Python loop with one render per model.
+
+    Only models on the identical grid can be stacked (compatible(): same roisize, oversampling, z grid, kernel,
+    integration, dtype and device). Callers check that first and otherwise keep their per-model loop, which gives the
+    same images, only slower.
+
+    Attributes:
+        spline   a shallow copy of the first member whose knots are the concatenated bank; only used for its grid and
+                 evaluate_splines, never rendered as a model of its own.
+        members  one view per input model (copy.copy) whose knots are a slice of that bank. They share its memory:
+                 in-place changes to a member's knots change the bank, but assigning a new knots tensor to a member
+                 does not. The callers therefore replace their models with these views (ChannelsPSF.models,
+                 TiledSplinePSF._splines) and rebuild the IndexedSplines after .to().
+        slices   each member's rows in the bank; starts: the first row of each member (a tensor).
+    Each member keeps its own pattern-angle volumes, default dipole response and component weights; evaluate applies
+    them per member.
+    """
 
     @staticmethod
     def compatible(models):
+        """True if the models can share one bank: all SplinePSF and identical in every grid / numeric setting."""
         if not models or not all(isinstance(m, SplinePSF) for m in models):
             return False
         keys = ('roisize', 'S', 'hz', 'z0', 'u0', 'nz', 'nv', 'xmax', 'kernel', 'integrated', 'dtype', 'dev')
         return all(all(getattr(m, k) == getattr(models[0], k) for k in keys) for m in models[1:])
 
     def __init__(self, models, axis):
+        """models: compatible SplinePSF (compatible()); axis: the name of the new member axis ('channel' / 'tile')."""
         self.spline = copy.copy(models[0])
-        self.spline.knots = torch.cat([m.knots for m in models])
+        self.spline.knots = torch.cat([m.knots for m in models])       # the combined bank [sum of T_m, nz, nv, nu]
         self.members = []
         self.slices = []
         start = 0
@@ -816,6 +844,8 @@ class IndexedSplines:
             self.members.append(view)
             start += len(m.knots)
         self.starts = self.spline.spline_index.new_tensor([0] + [len(m.knots) for m in models]).cumsum(0)[:-1]
+        # The bank's own spline_index: members with the same axes get the new member axis in front
+        # ([member, *axes], each member's indices shifted to its rows); otherwise a flat 'component' index of every row.
         if all(m.axes == models[0].axes and m.spline_index.shape == models[0].spline_index.shape for m in models):
             self.spline.axes = (axis, *models[0].axes)
             self.spline.spline_index = torch.stack([start + m.spline_index for start, m in zip(self.starts, models)])
@@ -826,7 +856,14 @@ class IndexedSplines:
                                           torch.arange(len(self.spline.knots), device=self.spline.dev))
 
     def evaluate(self, pos, member, grad=False, *, dipM=None, angle=None, basis=False):
-        """pos [N,L,3] and member indices broadcast over [N,L]."""
+        """Images of member[n, l] at pos[n, l]: pos [N, L, 3] (L = channels, or tile entries per emitter), member
+        [N, L] indices into self.members. Returns [N, L, P, P] (with grad: images, d/dx, d/dy, d/dz). dipM: emission
+        tensor [3, 3] or [N, 3, 3], contracted with each member's six dipole responses; basis=True: the six responses
+        [N, L, 6, P, P] uncontracted; angle: pattern angle, a scalar or one per emitter.
+
+        Each path below turns (member, that member's own spline_index / angle / dipole rows) into row numbers of the
+        combined bank and then makes a single evaluate_splines call."""
+        # 1) one pattern angle per emitter: each member's angle bank, its rows looked up per emitter
         if angle is not None and torch.as_tensor(angle).ndim:
             from torch_psf.vectorial import angle_indices
             dipole = basis or dipM is not None
@@ -850,6 +887,8 @@ class IndexedSplines:
             return self._contract(images, pos, dipM, grad)
 
         members = self.members if angle is None else [m.for_angle(angle) for m in self.members]
+        # 2) plain images: one bank row per member when every member is a single volume; otherwise each member's
+        #    default response (e.g. its calibrated dipole mix) is built per member first
         if not basis and dipM is None:
             if all(m.spline_index.numel() == 1 for m in members):
                 ids = self.starts + torch.stack([m.spline_index.reshape(()) for m in members])
@@ -857,6 +896,8 @@ class IndexedSplines:
             bank = torch.stack([m.default_volume(self.spline.knots[sl]) for m, sl in zip(members, self.slices)])
             return self.spline.evaluate_splines(pos, member, grad, bank)
 
+        # 3) dipole responses (basis, or contracted with dipM): the six rows of each member; a member with per-angle
+        #    dipole rows ([angles, 6]) and no angle given uses their mean over the angles
         ids = [m._basis_indices() for m in members]
         if all(i.ndim == 1 for i in ids):
             bank = self.spline.knots

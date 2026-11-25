@@ -594,6 +594,8 @@ class ChannelsPSF(MultiChannelPSF):
                                 all(isinstance(m, (SplinePSF, TiledSplinePSF)) for m in self.models))
         self._tile_models = {}
         self._tile_bank = None
+        # Channels that are all SplinePSF on the same grid share one knot bank (IndexedSplines) and render in one call;
+        # the channel models become views into that bank. Otherwise self.indexed is None and channels render one by one.
         self.indexed = IndexedSplines(self.models, 'channel') if IndexedSplines.compatible(self.models) else None
         if self.indexed is not None:
             self.models = self.indexed.members
@@ -667,6 +669,8 @@ class ChannelsPSF(MultiChannelPSF):
                 rows[indices == tile] = self._tile_models[key][0]
             ids.append(rows)
             weights.append(w)
+        # One IndexedSplines over the field tiles of all channels seen so far (rebuilt when new tiles were tabulated);
+        # tiles on different grids cannot share a bank: fall back to the per-channel path.
         if self._tile_bank is None or len(self._tile_bank.members) != len(self._tile_models):
             models = [m for _, m in self._tile_models.values()]
             if not IndexedSplines.compatible(models):
@@ -745,7 +749,7 @@ class ChannelsPSF(MultiChannelPSF):
         if self.indexed is not None:
             if focus is not None or xy is not None and not self.mapped:
                 raise ValueError('spline channels accept neither focus nor field xy')
-            ids = torch.arange(c, device=pos_c.device)
+            ids = torch.arange(c, device=pos_c.device)          # channel c renders member c of the shared bank
             return self.indexed.evaluate(pos_c, ids, grad, dipM=dipM, angle=angle, basis=basis)
         if self._tiled_channels:
             if focus is not None:
