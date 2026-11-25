@@ -327,7 +327,7 @@ class DenseBeadEstimator(Estimator):
         self.zernike_indices, self.npupil, self.oversample_pupil = zernike_indices, npupil, oversample_pupil
 
     @staticmethod
-    def fit_movie(movie, groups=None, *, optics=None, radius=7, calibration_stack=None, dz_um=None):
+    def fit_movie(movie, groups=None, *, optics=None, radius=7, calibration_stack=None, dz_um=None, field=False, frames_per_step=None):
         """Fit overlapping beads at a single fixed focus. Supply a TYX movie in photoelectrons.
         Optional groups are condition IDs, one per exposure. Returns a DenseMovieFit with
         the in-plane PSF, positions, per-frame bead photons, drift and background. This
@@ -336,10 +336,40 @@ class DenseBeadEstimator(Estimator):
         optics supplies the bead diameter and the nominal movie focus in micrometres.
         A repeated planar movie with optical settings and sufficient focus diversity
         estimates its pupil from XY-registered illumination cycles.
+        When field=True the movie must have stationary illumination. Fit affine spatial
+        Zernike coefficients from local focus diversity and select against a shared
+        pupil on reserved exposures. result.optical_psf is the point-emitter model
+        for psf.zip; photons use the corresponding finite-bead kernels. field_report
+        records the selection. For a primary signed Z scan specify dz_um and
+        frames_per_step; an ordinary drift movie needs neither.
         """
+        if frames_per_step is not None:
+            if calibration_stack is not None or dz_um is None or not np.isfinite(dz_um) or not dz_um:
+                raise ValueError("a primary scan needs a nonzero signed dz_um and no second stack")
+            if not isinstance(frames_per_step, (int, np.integer)) or frames_per_step < 1 or len(movie)%frames_per_step:
+                raise ValueError("frames_per_step must cover complete scan planes")
+            raw = movie.detach().cpu().numpy() if torch.is_tensor(movie) else np.asarray(movie)
+            calibration_stack = raw.reshape(-1, frames_per_step, *raw.shape[1:]).mean(1)
+        if field and (optics is None or 'diameter_um' not in optics):
+            raise ValueError("field fitting requires optical settings and diameter_um")
+        if field and groups is not None and np.unique(groups).size != 1:
+            raise ValueError("movie field calibration requires stationary illumination")
+        if groups is None and (field or frames_per_step is not None):
+            groups = np.zeros(len(movie), dtype=int)
+        def calibrated_movie(frames, settings):
+            from torch_psf.estimation.crowded_movie import fit_crowded_movie
+            result = fit_crowded_movie(frames, groups, settings, radius)
+            result.optical_psf = settings['calibrated_psf']
+            if field:
+                from torch_psf.estimation.movie_field import fit_movie_field, field_photometry
+                fitted, report = fit_movie_field(frames, result.drift,
+                    settings['focus_um']+result.axial_drift_um, settings)
+                result.optical_psf, result.field_report = fitted, report
+                if report['selected'] == 'field':
+                    field_photometry(frames, result, fitted, settings)
+            return result
         if calibration_stack is not None:
             from os import PathLike, fspath
-            from torch_psf.estimation.crowded_movie import fit_crowded_movie
             if optics is None or 'diameter_um' not in optics or 'focus_um' not in optics:
                 raise ValueError('stack-calibrated movies require optics with diameter_um and focus_um')
             if dz_um is None or not np.isfinite(dz_um) or dz_um == 0:
@@ -352,21 +382,29 @@ class DenseBeadEstimator(Estimator):
                 field_stop=False, npupil=32, oversample_pupil=2)
             psf = calibration.estimate(stack, abs(dz_um))
             settings = dict(optics, calibrated_psf=psf, focus_span_um=abs(dz_um)*(len(stack)-1)/2)
+            if frames_per_step is not None:
+                settings['frame_focus_offsets_um'] = (np.arange(len(movie))//frames_per_step-(len(stack)-1)/2)*dz_um
+                settings['focus_span_um'] += .1
             frames = movie.detach().cpu().numpy() if torch.is_tensor(movie) else np.asarray(movie)
             if frames.ndim != 3 or not len(frames) or not np.isfinite(frames).all():
                 raise ValueError('expected a finite TYX movie')
-            return fit_crowded_movie(frames, groups, settings, radius)
+            return calibrated_movie(frames, settings)
         if optics is not None and (groups is not None or optics.get('calibrated_psf') is not None):
             from torch_psf.estimation.cycle_pupil import movie_optics
-            from torch_psf.estimation.crowded_movie import fit_crowded_movie
             frames = movie.detach().cpu().numpy() if torch.is_tensor(movie) else np.asarray(movie)
             if frames.ndim != 3 or not len(frames) or not np.isfinite(frames).all():
                 raise ValueError('expected a finite TYX movie')
             calibrated = optics if optics.get('calibrated_psf') is not None else movie_optics(frames, groups, optics, radius)
             if calibrated is not None:
-                return fit_crowded_movie(frames, groups, calibrated, radius)
+                return calibrated_movie(frames, calibrated)
         from torch_psf.estimation.bead_movie import fit_bead_movie
-        return fit_bead_movie(movie, groups, optics=optics, radius=radius)
+        result = fit_bead_movie(movie, groups, optics=optics, radius=radius)
+        if field:
+            result.field_report = {"selected":"global", "reason":"Insufficient focus diversity for signed pupil calibration"}
+            result.optical_psf = result.psf.optic.model.resized(2*radius+1)
+            with torch.no_grad():
+                result.optical_psf.zcoef[0] += float(result.field_coeff[0])
+        return result
 
     def _stacks(self, stacks):
         if isinstance(stacks, (str, np.ndarray)) or torch.is_tensor(stacks):

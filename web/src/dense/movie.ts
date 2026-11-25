@@ -11,6 +11,8 @@ import type { Optics } from '../psf/vectorial';
 import { buildPsfZip } from '../psf/makezip';
 import { makeFitReport, pupilMaps, volumeSlices } from '../report/fromapp';
 import shader from './joint.wgsl?raw';
+import { fitMovieField, type MovieField } from './movie-field';
+import { beadKernels, eachPixel, fieldFlux } from './field-kernels';
 
 export interface Settings {
   optics: Optics;
@@ -19,9 +21,12 @@ export interface Settings {
   offset: number;
   gain: number;
   period?: number;
+  field?: boolean;
   framesPerStep?: number; // Primary planar Z scan with a known signed step.
 }
 export interface MovieFit {
+  field?: MovieField;
+  fieldReport?: Awaited<ReturnType<typeof fitMovieField>>;
   width: number;
   height: number;
   xy: number[][];
@@ -248,6 +253,16 @@ async function table(
 }
 /** Render independent flux predictions through one fitted finite-bead PSF plane. */
 export async function predictMovieFrame(dev:GPUDevice,fit:MovieFit,drift:number[],flux:number[][],background:number) {
+  if(fit.field){
+    const planes=flux.map(()=>new Float32Array(fit.width*fit.height).fill(background));
+    const size=fit.model.roisize;
+    await beadKernels(dev,fit.model,fit.field,fit.xy,drift,fit.settings.diameterNm,size,(j,x,y,kernel)=>{
+      eachPixel(x,y,size,fit.width,fit.height,(p,k)=>{
+        planes.forEach((image,i)=>{image[p]+=flux[i][j]*kernel[k];});
+      });
+    });
+    return planes;
+  }
   const center=(NZ-1)/2;
   const bank=await table(dev,fit.model,fit.settings.diameterNm,0,drift[2]/1000,center);
   const planes=flux.map(()=>new Float32Array(fit.width*fit.height).fill(background));
@@ -920,7 +935,7 @@ export async function fitMovie(
         emitterHeightUm: s.diameterNm / 2000,
         focusUm: model.focus_um,
       });
-    return {
+    const result:MovieFit = {
       width: t.W,
       height: t.H,
       xy: fittedXY,
@@ -936,7 +951,13 @@ export async function fitMovie(
       pupilDiagnostics:stack ? undefined : pupilDiagnostics,
       boundaryFrames: 0, // Retained for earlier consumers. Axial motion is no longer clipped.
       focusWindowShifts,
-    } satisfies MovieFit;
+    };
+    if(s.field){
+      if(period!==1)throw Error('Field calibration requires stationary illumination.');
+      result.fieldReport=await fitMovieField(dev,file,result,log);
+      if(result.field)await fieldFlux(dev,file,result,log);
+    }
+    return result;
   } finally {
     gpu.destroy();
   }
@@ -959,9 +980,11 @@ export async function exportMovieReport(dev: GPUDevice, r: MovieFit, source?: st
     frames: r.drift.length,
     'mean stage focus (nm)': 1000 * m.focus_um,
     focus_window_shifts: r.focusWindowShifts,
+    ...(r.fieldReport?{spatial_pupil:r.fieldReport.selected}:{}),
   };
   return buildPsfZip(dev, {
     vectorial: m,
+    field:r.field,
     report: { estimator: 'dense bead movie', settings, results },
     pdf: (volume) =>
       makeFitReport({

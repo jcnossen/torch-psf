@@ -9,6 +9,7 @@ import { CameraInfo, writePsfZip } from '../io/psfzip';
 
 export interface PsfZipRequest {
   vectorial: VectorialModel;
+  field?: import('../dense/movie-field').MovieField;
   /** write channel 0 as a spline (source = the vectorial model): its grid, and the knots (else tabulated) */
   spline?: { roisize: number; z_range: [number, number]; S: number; hz: number; zpad: number; xmax: number; knots?: Float32Array | null } | null;
   camera?: CameraInfo | null;
@@ -44,6 +45,6 @@ export async function buildPsfZip(dev: GPUDevice, r: Omit<PsfZipRequest,'pdf'> &
   const zs = spline ? splineZstack(spline, planes, k) : await vectorialZstack(dev, r.vectorial, planes, k);
   const png = await previewPng(zs, ['ch0'], r.title ?? `${spline ? 'spline' : 'vectorial'} PSF`);
   const pdf = typeof r.pdf === 'function' ? await r.pdf(zs) : r.pdf;
-  const archive = await writePsfZip({ vectorial: r.vectorial, spline, camera: r.camera, provenance: r.provenance, report: r.report, zstack: zs, png, pdf });
+  const archive = await writePsfZip({ vectorial: r.vectorial, field:r.field, spline, camera: r.camera, provenance: r.provenance, report: r.report, zstack: zs, png, pdf });
   return { ...archive, pdf };
 }

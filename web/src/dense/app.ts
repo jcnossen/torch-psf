@@ -9,6 +9,8 @@ import {
 } from './movie';
 import { moviePupilReport } from './report';
 import './dense.css';
+import {exampleMovie,fieldReport} from './field-example';
+import {movieInspector} from './movie-inspector';
 export function download(el: HTMLElement, name: string, data: BlobPart, type: string) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([data], { type }));
@@ -84,6 +86,25 @@ export function mount(
   const form = root.querySelector('form')!,
     status = root.querySelector('[role=status]')!,
     out = root.querySelector('article')!;
+  let exampleTruth:ReturnType<typeof exampleMovie>|undefined;
+  let fieldControl:HTMLInputElement|undefined,scanControl:HTMLInputElement|undefined,repeats:HTMLInputElement|undefined;
+  if(!finish){
+    const options=document.createElement('section');
+    options.innerHTML='<label><input class="field" type="checkbox" checked> Fit field-dependent aberrations</label><label><input class="scan" type="checkbox"> Input movie is a planar Z stack</label><label>Frames per Z step <input class="repeats" type="number" min="1" step="1" value="1" disabled></label>';
+    const inputsBox=root.querySelector<HTMLElement>('#inputs')!;inputsBox.after(options);
+    fieldControl=options.querySelector<HTMLInputElement>('.field')!;
+    scanControl=options.querySelector<HTMLInputElement>('.scan')!;
+    repeats=options.querySelector<HTMLInputElement>('.repeats')!;
+    scanControl.onchange=()=>{repeats!.disabled=!scanControl!.checked;};
+    exampleTruth=exampleMovie(options,()=>{
+      const [px,NA,wl,n_imm,n_med,diameterNm,stepNm,offset,gain]=inputs.map(i=>Number(i.value));
+      return {optics:{pixel_um:px/1000,NA,wavelength_um:wl/1000,n_imm,n_med},diameterNm,stepNm,offset,gain};
+    },file=>{
+      files[0]=file;inputsBox.querySelector('span')!.textContent=file.name;
+      files[1]=null;inputsBox.querySelectorAll('span')[1].textContent='Drop a TIFF or browse';
+      scanControl!.checked=false;repeats!.disabled=true;
+    });
+  }
   form.onsubmit = async (e) => {
     e.preventDefault();
     const sourceInput=selectedInput?.();
@@ -92,7 +113,7 @@ export function mount(
       status.textContent = 'Select a movie TIFF.';
       return;
     }
-    const button = form.querySelector('button')!;
+    const button = form.querySelector<HTMLButtonElement>('button:not([type=button])')!;
     button.disabled = true;
     for (const a of out.querySelectorAll('a')) URL.revokeObjectURL(a.href);
     out.replaceChildren();
@@ -108,6 +129,7 @@ export function mount(
       log('Opening WebGPU device');
       const { device } = await getDevice();
       const renderPupil = moviePupilReport(out);
+      const inspector=finish?undefined:movieInspector(out);
       const stackFile = selectedInput ? null : files[1];
       const r = await fitMovie(
         device,
@@ -116,7 +138,8 @@ export function mount(
         {
           optics: { pixel_um: px / 1000, NA, wavelength_um: wl / 1000, n_imm: ni, n_med: ns },
           diameterNm,
-          framesPerStep:sourceInput?.framesPerStep,
+          field:fieldControl?.checked,
+          framesPerStep:sourceInput?.framesPerStep ?? (scanControl?.checked?repeats!.valueAsNumber:undefined),
           stepNm,
           offset,
           gain,
@@ -127,9 +150,10 @@ export function mount(
           renderPupil(iteration.model);
           await live?.update(dev, iteration);
         },
-        live?.frame,
+        live?.frame ?? inspector?.frame,
         live?.photometry,
       );
+      if(inspector){ await inspector.finish(device,movieFile,r); renderPupil(r.model); fieldReport(out,r,exampleTruth?.(movieFile)); }
       log('Writing PSF archive');
       const source = stackFile ? movieFile.name + ' / calibration: ' + stackFile.name : movieFile.name;
       const { bytes, pdf } = await exportMovieReport(device, r, source);

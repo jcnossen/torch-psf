@@ -41,6 +41,7 @@ export function cameraBlock(c: CameraInfo): Record<string, unknown> {
 }
 
 export interface PsfZipParts {
+  field?: import('../dense/movie-field').MovieField;
   vectorial: VectorialModel;            // the model; the source of the spline when `spline` is given
   spline?: SplineModel | null;          // write channel 0 as this spline (type 'spline', source = the vectorial model)
   camera?: CameraInfo | null;
@@ -66,6 +67,7 @@ export function makePsfZipJson(p: PsfZipParts): { meta: Record<string, unknown>;
       source: { type: 'vectorial', model: vb, arrays: {} } };
   } else ch = { name, type: 'vectorial', model: vb, arrays: {} };
   ch.mapping = { type: 'identity' };
+  if(p.field)ch.field=p.field;
   ch.intensity_ratio = 1.0;
   const psf_type = p.spline ? 'spline' : 'vectorial';
   const meta: Record<string, unknown> = { format: FORMAT, version: ZIP_VERSION, psf_type, n_dims: 3, emitter_params: ['x', 'y', 'z', 'I', 'bg'], units: { ...UNITS } };

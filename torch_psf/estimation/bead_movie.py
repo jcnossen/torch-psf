@@ -43,6 +43,7 @@ class FiniteBeadRenderer:
 class PixelModel:
     """Columns are finite-bead vectorial PSFs. The final three columns form a background plane."""
     def __init__(self, optics, shape):
+        self.optic = optics
         self.shape = shape
         self.radius = optics.model.roisize // 2
         grid = np.linspace(-.52, .52, 7)
@@ -402,6 +403,8 @@ class DenseMovieFit:
     background: np.ndarray
     field_coeff: np.ndarray
     axial_drift_um: np.ndarray | None = None
+    optical_psf: object | None = None
+    field_report: dict | None = None
 
 
 def fit_bead_movie(movie, groups=None, *, optics=None, radius=7):
