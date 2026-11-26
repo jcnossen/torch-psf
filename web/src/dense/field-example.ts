@@ -1,6 +1,7 @@
 import { getDevice } from '../gpu/device';
 
 import { tiffStackBlob } from '../psfgrab/tiffstack';
+import { fieldSplineRenderer } from './field-spline';
 import { beadRenderer, eachPixel } from './field-kernels';
 import type { MovieField } from './movie-field';
 import type { Settings,MovieFit } from './movie';
@@ -35,7 +36,7 @@ export function plot(canvas: HTMLCanvasElement, image: Float32Array, w: number, 
 
 export function exampleMovie(parent:HTMLElement,settings:()=>Settings,select:(file:File)=>void){
   const el=document.createElement('details');
-  el.innerHTML='<summary>Example: randomly generated bead movie</summary><label>Frames <input class="frames" type="number" min="6" max="100" value="24"></label><label>Beads/µm² <input class="density" type="number" min=".01" max="10" step=".1" value=".9"></label><label>Field variation (mλ at edge) <input class="strength" type="number" min="0" max="150" value="70"></label><button type="button">Generate movie</button><p aria-live="polite"></p><canvas hidden></canvas><input type="range" aria-label="Example frame" hidden><a hidden download="dense-beads.tif">Download movie TIFF</a>';
+  el.innerHTML='<summary>Example: randomly generated bead movie</summary><label>Frames <input class="frames" type="number" min="6" max="100" value="24"></label><label>Beads/µm² <input class="density" type="number" min=".01" max="10" step=".1" value=".9"></label><label>Field variation (mλ at edge) <input class="strength" type="number" min="0" max="150" value="70"></label><label>Movie renderer <select class="renderer"><option value="spline">Field-interpolated B-spline</option><option value="direct">Vectorial</option></select></label><button type="button">Generate movie</button><p aria-live="polite"></p><canvas hidden></canvas><input type="range" aria-label="Example frame" hidden><a hidden download="dense-beads.tif">Download movie TIFF</a>';
   el.querySelectorAll('input').forEach(input=>input.setAttribute('form','generated-movie-options'));
   parent.after(el);
   const button=el.querySelector('button')!,msg=el.querySelector('p')!,view=el.querySelector('canvas')!,slider=el.querySelector<HTMLInputElement>('[type=range]')!,download=el.querySelector('a')!;
@@ -63,7 +64,12 @@ export function exampleMovie(parent:HTMLElement,settings:()=>Settings,select:(fi
       const frames=new Float32Array(n*size*size);
       const show=(t:number)=>plot(view,frames.subarray(t*size*size,(t+1)*size*size),size,size);
       view.hidden=false;slider.hidden=false;slider.min='0';slider.max='0';slider.oninput=()=>show(slider.valueAsNumber);
-      const renderer = beadRenderer(device, model, field, s.diameterNm, 19);
+      const useSpline = el.querySelector<HTMLSelectElement>('.renderer')!.value === 'spline';
+      msg.textContent = useSpline ? 'Building field B-spline tables�' : 'Preparing vectorial renderer�';
+      const focus = drift.map(row => row[2]/1000);
+      const renderer = useSpline
+        ? await fieldSplineRenderer(device, model, field, s.diameterNm, 19, [Math.min(...focus), Math.max(...focus)])
+        : beadRenderer(device, model, field, s.diameterNm, 19);
       try {
         for(let t=0;t<n;t++){
           msg.textContent='Rendering frame '+(t+1)+' / '+n;

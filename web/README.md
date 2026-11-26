@@ -279,3 +279,29 @@ with one spot minimum per occupied tile and no ridge penalty.
 Run `python test/run_tests.py --only "NAT:"` from `web/` for GPU parity and movie
 selection tests. Regenerate their checked-in CPU oracle with
 `python tests/make_web_nat_reference.py` from a Python environment using this checkout.
+
+### Field-dependent finite-bead movie rendering
+
+In the dense bead estimator, expand **Example: randomly generated bead movie** and choose
+**Field-interpolated B-spline** or **Vectorial**. The spline renderer samples the
+pixel-integrated finite-bead PSF across the camera field once per generated movie.
+It uses five nodes on each varying field axis, two lateral samples per pixel and
+40 nm objective-focus spacing. Each bead is rendered with cubic B-spline interpolation
+in local x, y and focus and bilinear interpolation between field nodes. Beyond the
+field box it uses the edge values. Movie noise is added after rendering. Building the
+tables has a startup cost, so the vectorial option can be faster for short, sparse movies.
+
+The corresponding PyTorch renderer accepts a calibrated `FieldPSF`, including one
+built from NAT. Positions include lateral drift in camera pixels. Focus displacement
+is in micrometres relative to focus at the bead centre.
+
+```python
+from torch_psf.estimation import FieldBeadSpline
+
+renderer = FieldBeadSpline(field_psf, diameter_um=0.1, focus_range_um=(-0.325, 0.325))
+stamps = renderer.render(xy_px, focus_um=0.017)
+```
+
+This cache samples fixed optics. Rebuild it when the pupil or bead diameter changes.
+The ordinary emitter spline uses emitter height as its axial coordinate. The finite-bead
+movie spline moves the objective while the bead stays on the coverslip.

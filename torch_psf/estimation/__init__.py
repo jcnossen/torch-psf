@@ -20,3 +20,4 @@ from torch_psf.estimation.multichannel_beads import (fit_multichannel_beads, mul
                                                      build_multichannel_beads, detect_channels, register_channels,
                                                      channel_stop_mask, simulate_multichannel_beads)
 from torch_psf.estimation.nat import fit_nat, nat_field, nat_polynomial
+from torch_psf.estimation.field_bead_spline import FieldBeadSpline

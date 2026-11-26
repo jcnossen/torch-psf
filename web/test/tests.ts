@@ -2,6 +2,7 @@ import { runAll } from './harness';
 import { getDevice, describeGpu } from '../src/gpu/device';
 import './test_forward';
 import './test_nat';
+import './test_field_spline';
 import './test_cloud';
 import './test_tiff';
 import './test_fit';
