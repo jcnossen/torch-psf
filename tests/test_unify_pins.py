@@ -67,7 +67,13 @@ def test_orientation_pin(models):
     mu, jac, theta = pins.orientation()
     check_image(mu, REF['orientation']['mu'])
     check_image(jac, REF['orientation']['jac'])
-    np.testing.assert_allclose(theta, REF['orientation']['theta'], rtol=TOL, atol=1e-8)
+    ref = np.asarray(REF['orientation']['theta'])
+    # z is in micrometres relative to an arbitrary origin. A Windows/Linux
+    # float32 fit differed by 3.15e-6 um despite matching pixel and Jacobian pins.
+    z_atol = 1e-8 if os.environ.get('TORCH_PSF_PINS_STRICT') == '1' else 5e-6
+    np.testing.assert_allclose(theta[:, 2], ref[:, 2], rtol=TOL, atol=z_atol)
+    other = [0, 1, 3, 4, 5, 6, 7, 8]
+    np.testing.assert_allclose(theta[:, other], ref[:, other], rtol=TOL, atol=1e-8)
 
 
 def test_sofi_grid_pin(models):

@@ -7,6 +7,16 @@ from torch_psf import VectorialPSF, InSituEstimator
 from torch_psf.estimation import fit_nat, nat_polynomial
 
 
+@pytest.fixture
+def single_thread():
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        yield
+    finally:
+        torch.set_num_threads(previous)
+
+
 def test_native_field_grid():
     fixture = Path(__file__).parents[1] / "method_comparison/droste/vectorfit_field_reference.csv"
     data = np.loadtxt(fixture, delimiter=",", skiprows=1)
@@ -45,8 +55,7 @@ def test_native_field_columns():
 
 
 @pytest.mark.parametrize("backend", ["direct", "bspline"])
-def test_fit_from_missing_defocus(backend):
-    torch.set_num_threads(1)
+def test_fit_from_missing_defocus(backend, single_thread):
     psf = VectorialPSF(
         9,
         npupil=16,
@@ -86,8 +95,7 @@ def test_fit_from_missing_defocus(backend):
     assert InSituEstimator(method="nat", device="cpu").field["model"] == "nat"
 
 
-def test_movie_nat_path():
-    torch.set_num_threads(1)
+def test_movie_nat_path(single_thread):
     psf = VectorialPSF(
         9,
         npupil=16,
