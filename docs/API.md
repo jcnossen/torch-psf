@@ -431,3 +431,7 @@ physical = fit_nat(base, rois, xy, norm=norm, var=var, backend="direct",
 
 The second stage evaluates each emitter at its camera position and refits its
 local parameters. Its iteration budget controls the accuracy of the refinement.
+
+For a nested comparison on identical data, set `field_varying=False` in
+`fit_nat`. This estimates the six constant Zernike coefficients while fixing
+the seven coefficients responsible for field dependence to zero.

@@ -96,6 +96,7 @@ def fit_nat(
     xy_limit=3.0,
     batch=96,
     gamma0=None,
+    field_varying=True,
     max_rois=None,
     log=None,
     stop=None,
@@ -111,6 +112,7 @@ def fit_nat(
     caps the calibration set by sampling evenly across occupied 10x10 field bins.
     Pass a matrix of initial pupils in gamma0 to fit independent starts and select
     the lowest final likelihood on the same calibration set.
+    With field_varying=False, fit only the six spatially constant pupil terms.
     """
     if backend not in ("direct", "bspline") or min(iters, global_iters, loc_iters, batch, zstarts) < 1:
         raise ValueError("expected direct/bspline and positive iteration counts and batch size")
@@ -172,6 +174,7 @@ def fit_nat(
                     xy_limit=xy_limit,
                     batch=batch,
                     gamma0=start,
+                    field_varying=field_varying,
                     log=log,
                     stop=stop,
                 )
@@ -193,6 +196,11 @@ def fit_nat(
     if gamma0 is not None:
         gamma = torch.as_tensor(gamma0, device=vec.dev, dtype=base.dtype).detach().clone()
     base[columns] = 0.0
+    bounds = None
+    if not field_varying:
+        varying = [1, 2, 3, 6, 7, 8, 11]
+        gamma[varying] = 0
+        bounds = [(0., 0.) if i in varying else (None, None) for i in range(13)]
 
     def update_model(g):
         coef = nat_polynomial(g)
@@ -281,6 +289,7 @@ def fit_nat(
             gamma.detach().cpu().double().numpy(),
             args=(indices, theta),
             method="L-BFGS-B",
+            bounds=bounds,
             jac=True,
             options=dict(maxiter=global_iters, maxls=20, ftol=1e-10),
         )
@@ -302,6 +311,7 @@ def fit_nat(
     out = update_model(gamma)
     report = dict(
         method="nat",
+        field_varying=field_varying,
         backend=backend,
         gamma=gamma.tolist(),
         norm=list(norm),

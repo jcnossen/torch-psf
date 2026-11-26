@@ -54,8 +54,8 @@ def test_native_field_columns():
     torch.testing.assert_close(paper, ref / norms, atol=1e-8, rtol=0)
 
 
-@pytest.mark.parametrize("backend", ["direct", "bspline"])
-def test_fit_from_missing_defocus(backend, single_thread):
+@pytest.mark.parametrize("backend, field_varying", [("direct", True), ("bspline", True), ("bspline", False)])
+def test_fit_from_missing_defocus(backend, field_varying, single_thread):
     psf = VectorialPSF(
         9,
         npupil=16,
@@ -77,6 +77,7 @@ def test_fit_from_missing_defocus(backend, single_thread):
         xy,
         norm=(16, 16, 16, 16),
         backend=backend,
+        field_varying=field_varying,
         tile=16,
         iters=2,
         global_iters=2,
@@ -92,6 +93,10 @@ def test_fit_from_missing_defocus(backend, single_thread):
     assert result["report"]["nll"] < result["history"][0]["local_nll"]
     assert result["theta"].shape == (16, 5)
     assert 4 in result["psf"].zidx
+    if not field_varying:
+        coef = result["psf"].zernikes_at(xy)
+        np.testing.assert_array_equal(coef, np.broadcast_to(coef[0], coef.shape))
+        assert np.any(coef[0] != 0)
     assert InSituEstimator(method="nat", device="cpu").field["model"] == "nat"
 
 
