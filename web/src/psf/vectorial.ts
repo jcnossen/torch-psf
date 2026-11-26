@@ -188,7 +188,7 @@ export function aberrationPhase(pd: PupilData, zcoef: ArrayLike<number>): Float6
 }
 
 /** Derivative directions of the GPU Jacobian. 'zern' expands to one direction per Zernike coefficient. */
-export type Direction = 'x' | 'y' | 'focus' | 'ze' | 'zern';
+export type Direction = 'x' | 'y' | 'focus' | 'ze' | 'zern' | { zernikeIndex: number };
 
 /** The pupil multipliers G_theta (complex, [D, N*N]) such that dPb/dtheta = G_theta Pb; G_0 = 1 (the value). */
 export function directionMultipliers(cfg: VectorialConfig, pd: PupilData, dirs: Direction[]): { G: Float32Array; names: string[] } {
@@ -201,7 +201,12 @@ export function directionMultipliers(cfg: VectorialConfig, pd: PupilData, dirs: 
     else if (d === 'focus') { names.push('focus'); rows.push((k) => [0, -pd.kzImm[k]]); }
     else if (d === 'ze') { names.push('ze'); rows.push((k) => [-pd.kzMed[2 * k + 1], pd.kzMed[2 * k]]); }
     else {
-      cfg.zernike_noll.forEach((j, z) => { names.push('noll' + j); rows.push((k) => [0, 2 * Math.PI * pd.Z[z * NN + k]]); });
+      const addMode = (z: number) => {
+        names.push('noll' + cfg.zernike_noll[z]);
+        rows.push((k) => [0, 2 * Math.PI * pd.Z[z * NN + k]]);
+      };
+      if (d === 'zern') cfg.zernike_noll.forEach((_, z) => addMode(z));
+      else addMode(d.zernikeIndex);
     }
   }
   const G = new Float32Array(rows.length * NN * 2);

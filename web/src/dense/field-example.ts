@@ -1,21 +1,36 @@
 import { getDevice } from '../gpu/device';
 
 import { tiffStackBlob } from '../psfgrab/tiffstack';
-import { beadKernels, eachPixel } from './field-kernels';
+import { beadRenderer, eachPixel } from './field-kernels';
 import type { MovieField } from './movie-field';
 import type { Settings,MovieFit } from './movie';
 
-export function plot(canvas:HTMLCanvasElement,image:Float32Array,w:number,h:number){
-  canvas.width=w;canvas.height=h;canvas.style.imageRendering='pixelated';canvas.style.width='min(100%, 320px)';
-  const ctx=canvas.getContext('2d')!,pixels=ctx.createImageData(w,h);
-  const stride=Math.max(1,Math.floor(image.length/4096));
-  const sorted=Float32Array.from({length:Math.ceil(image.length/stride)},(_,i)=>image[i*stride]).sort();
-  const lo=sorted[Math.floor(.01*sorted.length)],hi=sorted[Math.floor(.998*sorted.length)];
-  for(let i=0;i<image.length;i++){
-    const value=255*(image[i]-lo)/Math.max(1,hi-lo);
-    pixels.data.set([value,value,value,255],4*i);
+const frameBuffers = new WeakMap<HTMLCanvasElement, ImageData>();
+
+export function plot(canvas: HTMLCanvasElement, image: Float32Array, w: number, h: number) {
+  const ctx = canvas.getContext('2d')!;
+  let pixels = frameBuffers.get(canvas);
+  if (!pixels || pixels.width !== w || pixels.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.imageRendering = 'pixelated';
+    canvas.style.width = 'min(100%, 320px)';
+    pixels = ctx.createImageData(w, h);
+    frameBuffers.set(canvas, pixels);
   }
-  ctx.putImageData(pixels,0,0);
+  const stride = Math.max(1, Math.floor(image.length / 4096));
+  const sorted = new Float32Array(Math.ceil(image.length / stride));
+  for (let i = 0; i < sorted.length; i++) sorted[i] = image[i * stride];
+  sorted.sort();
+  const lo = sorted[Math.floor(.01 * sorted.length)];
+  const range = Math.max(1, sorted[Math.floor(.998 * sorted.length)] - lo);
+  const rgba = pixels.data;
+  for (let i = 0, k = 0; i < image.length; i++, k += 4) {
+    rgba[k] = 255 * (image[i] - lo) / range;
+    rgba[k + 1] = rgba[k + 2] = rgba[k];
+    rgba[k + 3] = 255;
+  }
+  ctx.putImageData(pixels, 0, 0);
 }
 
 export function exampleMovie(parent:HTMLElement,settings:()=>Settings,select:(file:File)=>void){
@@ -48,17 +63,22 @@ export function exampleMovie(parent:HTMLElement,settings:()=>Settings,select:(fi
       const frames=new Float32Array(n*size*size);
       const show=(t:number)=>plot(view,frames.subarray(t*size*size,(t+1)*size*size),size,size);
       view.hidden=false;slider.hidden=false;slider.min='0';slider.max='0';slider.oninput=()=>show(slider.valueAsNumber);
-      for(let t=0;t<n;t++){
-        msg.textContent='Rendering frame '+(t+1)+' / '+n;
-        const image=frames.subarray(t*size*size,(t+1)*size*size);image.fill(8);
-        await beadKernels(device,model,field,xy,drift[t],s.diameterNm,19,(j,x,y,stamp)=>eachPixel(x,y,19,size,size,(p,k)=>{image[p]+=flux[j]*stamp[k];}));
-        for(let p=0;p<image.length;p++){
-          const mean=image[p];let counts=0;
-          if(mean<30){let prod=Math.random();while(prod>Math.exp(-mean)){counts++;prod*=Math.random();}}
-          else counts=Math.max(0,Math.round(mean+Math.sqrt(mean)*normal()));
-          image[p]=counts/s.gain+s.offset;
+      const renderer = beadRenderer(device, model, field, s.diameterNm, 19);
+      try {
+        for(let t=0;t<n;t++){
+          msg.textContent='Rendering frame '+(t+1)+' / '+n;
+          const image=frames.subarray(t*size*size,(t+1)*size*size);image.fill(8);
+          await renderer.render(xy,drift[t],(j,x,y,stamp)=>eachPixel(x,y,19,size,size,(p,k)=>{image[p]+=flux[j]*stamp[k];}));
+          for(let p=0;p<image.length;p++){
+            const mean=image[p];let counts=0;
+            if(mean<30){let prod=Math.random();while(prod>Math.exp(-mean)){counts++;prod*=Math.random();}}
+            else counts=Math.max(0,Math.round(mean+Math.sqrt(mean)*normal()));
+            image[p]=counts/s.gain+s.offset;
+          }
+          slider.max=String(t);slider.value=String(t);show(t);
         }
-        slider.max=String(t);slider.value=String(t);show(t);
+      } finally {
+        renderer.destroy();
       }
       const planes=Array.from({length:n},(_,t)=>frames.subarray(t*size*size,(t+1)*size*size));
       const file=new File([tiffStackBlob(planes,n,1,size,size,{axis:'frames'})],'dense-beads.tif',{type:'image/tiff'});

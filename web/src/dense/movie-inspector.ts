@@ -8,11 +8,25 @@ export function movieInspector(out:HTMLElement){
   el.innerHTML='<p>Movie frame <output></output></p><canvas></canvas><input type="range" min="1" aria-label="Movie frame" hidden><progress aria-label="Frames processed"></progress>';
   const canvas=el.querySelector('canvas')!,slider=el.querySelector('input')!,label=el.querySelector('output')!,progress=el.querySelector('progress')!;
   out.prepend(el);
-  const frame:MovieFrameObserver=(pixels,w,h,i,n,stage)=>{
-    plot(canvas,pixels,w,h);label.value=i+' / '+n;progress.max=n;progress.value=i;
-    progress.setAttribute('aria-label',stage==='fit'?'Frames fitted':'Frames read');
+  let pending: Parameters<MovieFrameObserver> | undefined;
+  let animation = 0;
+  const frame: MovieFrameObserver = (...args) => {
+    pending = args;
+    if (animation) return;
+    animation = requestAnimationFrame(() => {
+      animation = 0;
+      const [pixels, w, h, i, n, stage] = pending!;
+      pending = undefined;
+      plot(canvas, pixels, w, h);
+      label.value = i + ' / ' + n;
+      progress.max = n;
+      progress.value = i;
+      progress.setAttribute('aria-label', stage === 'fit' ? 'Frames fitted' : 'Frames read');
+    });
   };
   async function finish(dev:GPUDevice,file:File,fit:MovieFit){
+    cancelAnimationFrame(animation);
+    pending = undefined;
     const movie=await TiffMovie.open([file]),w=fit.width,h=fit.height;
     progress.hidden=true;slider.hidden=false;slider.max=String(movie.n);slider.value='1';
     const caption=document.createElement('p');
