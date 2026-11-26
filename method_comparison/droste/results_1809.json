@@ -1,0 +1,252 @@
+[
+  {
+    "angle": 0,
+    "train": 647,
+    "held": 676,
+    "fit": {
+      "method": "nat",
+      "backend": "bspline",
+      "gamma": [
+        0.0181060042232275,
+        0.009927663952112198,
+        0.004104409832507372,
+        -0.009160974062979221,
+        0.008758040145039558,
+        0.003843853482976556,
+        0.008603489026427269,
+        0.00042328497511334717,
+        0.002678090473636985,
+        0.010394356213510036,
+        0.002300482941791415,
+        0.0024111876264214516,
+        0.004633331671357155
+      ],
+      "norm": [
+        59.5,
+        59.5,
+        59.5,
+        59.5
+      ],
+      "n_emitters": 647,
+      "n_tiles": 4,
+      "iterations": 10,
+      "nll": -750205.5,
+      "seconds": 120.5
+    },
+    "steps": [
+      {
+        "it": 0,
+        "local_nll": -749831.375,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 27.327999999994063
+      },
+      {
+        "it": 1,
+        "local_nll": -750001.0,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 37.25
+      },
+      {
+        "it": 2,
+        "local_nll": -750054.0,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 46.59399999999732
+      },
+      {
+        "it": 3,
+        "local_nll": -750085.8125,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 56.437999999994645
+      },
+      {
+        "it": 4,
+        "local_nll": -750110.5,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 67.26600000000326
+      },
+      {
+        "it": 5,
+        "local_nll": -750131.125,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 77.93799999999464
+      },
+      {
+        "it": 6,
+        "local_nll": -750157.5,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 87.96899999999732
+      },
+      {
+        "it": 7,
+        "local_nll": -750171.8125,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 97.0
+      },
+      {
+        "it": 8,
+        "local_nll": -750184.0,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 106.86000000000058
+      },
+      {
+        "it": 9,
+        "local_nll": -750193.875,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 116.45299999999406
+      }
+    ],
+    "mean_delta_nll": -0.6061381697654724,
+    "se_delta_nll": 0.26482426203214204,
+    "fraction_nat_better": 0.5088757396449705,
+    "mean_z_shift_nm": 27.470699310302734,
+    "normalized_shape_relative_l2": [
+      0.21608805656433105,
+      0.19537168741226196,
+      0.11028379201889038,
+      0.03711020201444626,
+      0.10464675724506378
+    ],
+    "spline_minus_direct_nll": 1.8758453130722046,
+    "spline_direct_z_rms_nm": 79.80329895019531,
+    "seconds": {
+      "v4": 166.98500000000058,
+      "nat_direct": 189.0460000000021,
+      "nat_tiled_cold": 36.89100000000326
+    }
+  },
+  {
+    "angle": 1,
+    "train": 700,
+    "held": 647,
+    "fit": {
+      "method": "nat",
+      "backend": "bspline",
+      "gamma": [
+        0.020758377388119698,
+        0.0006139369215816259,
+        -0.00441397400572896,
+        -0.011150244623422623,
+        0.007829258218407631,
+        0.009863493964076042,
+        -0.0017946342704817653,
+        0.0024341284297406673,
+        0.013999780640006065,
+        0.013556474819779396,
+        -0.0036027166061103344,
+        0.005780303850769997,
+        0.0068025668151676655
+      ],
+      "norm": [
+        59.5,
+        59.5,
+        59.5,
+        59.5
+      ],
+      "n_emitters": 700,
+      "n_tiles": 4,
+      "iterations": 10,
+      "nll": -710139.0,
+      "seconds": 114.96899999999732
+    },
+    "steps": [
+      {
+        "it": 0,
+        "local_nll": -709760.3125,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 20.531000000002678
+      },
+      {
+        "it": 1,
+        "local_nll": -709938.5625,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 30.078000000008615
+      },
+      {
+        "it": 2,
+        "local_nll": -710000.0,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 40.125
+      },
+      {
+        "it": 3,
+        "local_nll": -710033.4375,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 50.75
+      },
+      {
+        "it": 4,
+        "local_nll": -710056.3125,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 61.875
+      },
+      {
+        "it": 5,
+        "local_nll": -710075.875,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 72.09399999999732
+      },
+      {
+        "it": 6,
+        "local_nll": -710093.0625,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 81.68700000000536
+      },
+      {
+        "it": 7,
+        "local_nll": -710105.625,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 91.81200000000536
+      },
+      {
+        "it": 8,
+        "local_nll": -710118.0625,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 101.59399999999732
+      },
+      {
+        "it": 9,
+        "local_nll": -710127.375,
+        "global_status": 1,
+        "global_message": "STOP: TOTAL NO. OF ITERATIONS REACHED LIMIT",
+        "seconds": 111.09399999999732
+      }
+    ],
+    "mean_delta_nll": -0.3263391852378845,
+    "se_delta_nll": 0.1688115846343094,
+    "fraction_nat_better": 0.5054095826893354,
+    "mean_z_shift_nm": 35.310733795166016,
+    "normalized_shape_relative_l2": [
+      0.22882691025733948,
+      0.21312648057937622,
+      0.12060314416885376,
+      0.03573299199342728,
+      0.10858321189880371
+    ],
+    "spline_minus_direct_nll": 1.3934599161148071,
+    "spline_direct_z_rms_nm": 83.50078582763672,
+    "seconds": {
+      "v4": 177.51499999999942,
+      "nat_direct": 191.40700000000652,
+      "nat_tiled_cold": 36.40600000000268
+    }
+  }
+]

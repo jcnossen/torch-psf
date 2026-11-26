@@ -1,0 +1,22 @@
+[
+  {
+    "angle": 0,
+    "n": 48,
+    "spline_z_rms_nm": 11.303301811218262,
+    "polished_z_rms_nm": 36.306121826171875,
+    "mean_polished_minus_cold_nll": -0.02318318746984005,
+    "mean_best_of_both_minus_cold_nll": -0.031653087586164474,
+    "polished_improves_by_point_one": 2,
+    "cold_improves_by_point_one": 2
+  },
+  {
+    "angle": 1,
+    "n": 48,
+    "spline_z_rms_nm": 84.00483703613281,
+    "polished_z_rms_nm": 91.19095611572266,
+    "mean_polished_minus_cold_nll": -0.0051708221435546875,
+    "mean_best_of_both_minus_cold_nll": -0.01413472555577755,
+    "polished_improves_by_point_one": 2,
+    "cold_improves_by_point_one": 3
+  }
+]

@@ -1,0 +1,24 @@
+[
+  {
+    "angle": 0,
+    "center": {
+      "relative_l2_mean": 3.239617217332125e-05,
+      "relative_l2_max": 4.1110288293566555e-05
+    },
+    "offcenter": {
+      "relative_l2_mean": 0.028655681759119034,
+      "relative_l2_max": 0.13719472289085388
+    }
+  },
+  {
+    "angle": 1,
+    "center": {
+      "relative_l2_mean": 3.231005393899977e-05,
+      "relative_l2_max": 4.0890616219257936e-05
+    },
+    "offcenter": {
+      "relative_l2_mean": 0.03621762990951538,
+      "relative_l2_max": 0.14650754630565643
+    }
+  }
+]

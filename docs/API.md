@@ -387,3 +387,47 @@ Z5 0.02, Z11 0.03 waves, focus 0.4 um, z 0 ... 0.8 um; tetrapod = Z6 0.20, Z12 -
 optics 0.108 um pixels, NA 1.49, 0.68 um, n 1.518 / 1.33. Returns dict(movie_adu uint16 [T, H, W], truth [n, 6] =
 (frame, x, y, z, photons, site), psf, camera, params). Deterministic for a given seed and device (CPU and CUDA random
 streams differ).
+
+### First-order nodal aberration theory for in-situ calibration
+
+`InSituEstimator(method="nat", field={"backend": "bspline", "tile": 64})`
+fits a global starting pupil using the existing selection and rejection workflow,
+then alternates emitter localization and a shared first-order NAT field update.
+The held-out checkerboard decides whether to retain the field. The estimator's
+`iters` controls the global prefit; `field["iters"]` controls NAT outer updates.
+
+For already cropped data use `estimation.fit_nat(vectorial, rois, xy, norm=(cx,cy,sx,sy))`.
+ROIs are in photons; xy are their fixed camera centers in pixels. Use the actual
+FOV center and half-widths when comparing coefficients across datasets. The
+13 parameters use Vectorfit 0.3.4's first-order field expansion with Zernike
+outputs in torch-psf RMS waves. For coefficients copied from Supplement Eqs. S43/S58, use
+`nat_polynomial(gamma_in_waves, convention="paper")` to convert the pupil
+normalization and the published quadratic astigmatism scale. The fit returns a
+serializable continuous FieldPSF, local emitter estimates, and the update history.
+`nat_field(vectorial, gamma, norm)` restores the field with the same starting optics.
+Other input modes remain fixed. Initialization uses the supplied pupil. Pass
+multiple 13-vectors in gamma0 for independent starts. The lowest final NLL wins.
+Use max_rois to balance a smaller sample across 10 by 10 field bins, and fraction
+to resample the global update (the supplement used 0.2).
+
+The direct backend evaluates the physical pupil at each emitter. The bspline
+backend builds one pixel-integrated cubic B-spline per occupied tile, sums the
+Poisson gradient on its knots, and propagates it through the spline prefilter
+and vectorial model to the 13 global parameters. Tile size controls field
+approximation; oversample and dz_um control interpolation at each tile.
+Validate the selected grid against direct held-out predictions. Vectorfit and
+torch-psf use different optical renderers and numerical optimizers.
+
+For a physical-objective refinement, initialize the direct path from the cached fit
+and keep the same observations, camera variance, optics, and field normalization.
+
+```python
+from torch_psf.estimation import fit_nat
+
+cached = fit_nat(base, rois, xy, norm=norm, var=var, backend="bspline")
+physical = fit_nat(base, rois, xy, norm=norm, var=var, backend="direct",
+                   gamma0=cached["report"]["gamma"])
+```
+
+The second stage evaluates each emitter at its camera position and refits its
+local parameters. Its iteration budget controls the accuracy of the refinement.

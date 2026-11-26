@@ -574,6 +574,11 @@ class InSituEstimator(Estimator):
         self.start, self.optics, self.camera, self.focus_um = start, optics, _camera(camera), focus_um
         self.detector, self.zstarts, self.field = detector, int(zstarts), field
         self.roisize, self.z_range, self.nspots, self.nheldout = roisize, tuple(z_range), nspots, nheldout
+        if method == 'nat':
+            self.field = dict(field or {})
+            if self.field.get('model', 'nat') != 'nat':
+                raise ValueError("method='nat' requires the first-order NAT field")
+            self.field['model'] = 'nat'
         self.method, self.iters, self.reject_overlap, self.deviance_k = method, iters, reject_overlap, deviance_k
         self.warn_rejected = warn_rejected
         self.refine, self.refine_lam_ref, self.refine_lam_s, self.refine_outer = (refine, refine_lam_ref,
@@ -585,8 +590,8 @@ class InSituEstimator(Estimator):
         self.scan_focus_um, self.scan_wavelength_um, self.scan_iters = scan_focus_um, scan_wavelength_um, scan_iters
 
     def _fit(self, spline, rois, vec, iters, stage, var=None):
-        fn = fit_zernike_knots if self.method == 'zernike' else fit_pupil_knots
-        if self.method not in ('zernike', 'pupil'):
+        fn = fit_pupil_knots if self.method == 'pupil' else fit_zernike_knots
+        if self.method not in ('zernike', 'pupil', 'nat'):
             raise ValueError(self.method)
         loc = None
         if self.zstarts != 5:
@@ -722,15 +727,31 @@ class InSituEstimator(Estimator):
             xy_all = sp.corner.float() + h
             xy_tr = xy_all[torch.as_tensor(tr_kept, device=xy_all.device)]
             xy_te = xy_all[torch.as_tensor(te, device=xy_all.device)]
-            fz, fkw = field_from_spec(spec, vec.zidx, xy_tr)
-            rf = fit_field_knots(SplinePSF(R, zr, device=self.dev, **self.grid), rois, xy_tr, vec, fz,
-                                 tile=fkw['tile'], iters=fkw['iters'], lr=fkw['lr'], zstarts=zs, var=var,
-                                 log=self._log('field'), stop=self.stop)
-            fres = dict(psf=rf['psf'], tiled=rf['psf'].to_tiled(tile=fkw['score_tile'], roisize=R, z_range=zr,
-                                                                **self.grid))
+            if spec.get('model') == 'nat':
+                from torch_psf.estimation import fit_nat
+                spec.pop('model')
+                tile = spec.pop('tile', 64.)
+                score_tile = spec.pop('score_tile', tile)
+                height, width = mv.shape
+                spec.setdefault('norm', ((width-1)/2, (height-1)/2,
+                                         max((width-1)/2, 1), max((height-1)/2, 1)))
+                spec.setdefault('zstarts', zs)
+                rf = fit_nat(vec, rois, xy_tr, tile=tile, var=var, log=self._log('nat'),
+                             stop=self.stop, **spec)
+                score_grid = dict(kernel='bspline', integrated=True, oversample=spec.get('oversample', 3),
+                                  dz_um=spec.get('dz_um', .025), xy_limit=spec.get('xy_limit', 3.), zpad=4)
+            else:
+                fz, fkw = field_from_spec(spec, vec.zidx, xy_tr)
+                rf = fit_field_knots(SplinePSF(R, zr, device=self.dev, **self.grid), rois, xy_tr, vec, fz,
+                                     tile=fkw['tile'], iters=fkw['iters'], lr=fkw['lr'], zstarts=zs, var=var,
+                                     log=self._log('field'), stop=self.stop)
+                score_tile, score_grid = fkw['score_tile'], self.grid
+            fz = rf['psf'].field
+            fres = dict(psf=rf['psf'], tiled=rf['psf'].to_tiled(tile=score_tile, roisize=R, z_range=zr,
+                                                                **score_grid))
             cands['field'] = fres['tiled']
             self.report['field'] = dict(rf['report'], modes=fz.noll, orders=fz.orders, feats_norm=list(fz.norm),
-                                        block=rf['psf'].field_block(), score_tile=fkw['score_tile'])
+                                        block=rf['psf'].field_block(), score_tile=score_tile)
         if self.refine and not self._stopped():
             s_ref = vec.to_spline(R, zr, **self.grid)          # a separate grid object: the fit overwrites its knots
             K_vec = s_ref.knots[0].clone()
