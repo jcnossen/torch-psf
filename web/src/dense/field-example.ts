@@ -1,6 +1,6 @@
 import { getDevice } from '../gpu/device';
 
-import { tiffStackBlob } from '../psfgrab/tiffstack';
+import { floatMovieBlob } from '../psfgrab/tiffstack';
 import { fieldSplineRenderer } from './field-spline';
 import { beadRenderer, eachPixel } from './field-kernels';
 import type { MovieField } from './movie-field';
@@ -36,44 +36,68 @@ export function plot(canvas: HTMLCanvasElement, image: Float32Array, w: number, 
 
 export function exampleMovie(parent:HTMLElement,settings:()=>Settings,select:(file:File)=>void){
   const el=document.createElement('details');
-  el.innerHTML='<summary>Example: randomly generated bead movie</summary><label>Frames <input class="frames" type="number" min="6" max="100" value="24"></label><label>Beads/µm² <input class="density" type="number" min=".01" max="10" step=".1" value=".9"></label><label>Field variation (mλ at edge) <input class="strength" type="number" min="0" max="150" value="70"></label><label>Movie renderer <select class="renderer"><option value="spline">Field-interpolated B-spline</option><option value="direct">Vectorial</option></select></label><button type="button">Generate movie</button><p aria-live="polite"></p><canvas hidden></canvas><input type="range" aria-label="Example frame" hidden><a hidden download="dense-beads.tif">Download movie TIFF</a>';
+  el.innerHTML='<summary>Example: randomly generated bead movie</summary><label>Frames <input class="frames" type="number" min="1" value="24"></label><label>Beads/µm² <input class="density" type="number" min=".01" max="10" step=".1" value=".9"></label><label>Field variation (mλ at edge) <input class="strength" type="number" min="0" max="150" value="70"></label><label>Movie renderer <select class="renderer"><option value="spline">Field-interpolated B-spline</option><option value="direct">Vectorial</option></select></label><button type="button">Generate movie</button><p aria-live="polite"></p><canvas hidden></canvas><input type="range" aria-label="Example frame" hidden><a hidden download="dense-beads.tif">Download movie TIFF</a>';
   el.querySelectorAll('input').forEach(input=>input.setAttribute('form','generated-movie-options'));
   parent.after(el);
   const button=el.querySelector('button')!,msg=el.querySelector('p')!,view=el.querySelector('canvas')!,slider=el.querySelector<HTMLInputElement>('[type=range]')!,download=el.querySelector('a')!;
+  let previewRequest = 0;
   let truth: {file:File;field:MovieField;drift:number[][]}|undefined;
   button.onclick=async()=>{
     const read=(name:string)=>el.querySelector<HTMLInputElement>(name)!.valueAsNumber;
     const n=read('.frames'),density=read('.density'),strength=read('.strength')/1000;
-    if(!Number.isInteger(n)||n<6||n>100||!(density>=.01&&density<=10&&strength>=0&&strength<=.15)){msg.textContent='Check the example settings.';return;}
+    if(!Number.isSafeInteger(n)||n<1||!(density>=.01&&density<=10&&strength>=0&&strength<=.15)){msg.textContent='Check the example settings.';return;}
     button.disabled=true;
+    const previousPreview = slider.oninput, previousMax = slider.max, previousFrame = slider.value;
+    const previewHidden = slider.hidden;
     try{
-      const s=settings(),size=160,c=(size-1)/2,{device}=await getDevice();
+      const s=settings(),size=160,c=(size-1)/2;
       if(!(s.optics.pixel_um>0&&s.optics.NA>0&&s.optics.NA<=s.optics.n_imm&&s.gain>0&&s.diameterNm>=0))throw Error('Check acquisition settings.');
       const zcoef=[.04,.09,-.035,.025,.02,-.015,.04],noll=[5,6,7,8,9,10,11];
       const model={optics:s.optics,roisize:19,npupil:32,oversample:2,noll,zcoef,focus_um:s.diameterNm/2000,z_range_um:[-.4,.4] as [number,number]};
       const field:MovieField={type:'zernike_poly',order:1,zernike_noll:noll,coef:zcoef.map((v,j)=>[v,j===1?strength:0,j===0?strength:0]),feats_norm:{cx:c,cy:c,sx:c,sy:c}};
       const beads=Math.max(1,Math.round(density*(size*s.optics.pixel_um)**2));
+      // Reserve renderer workspace, the previous selection, bead coordinates and drift.
+      // Allow a second copy of the new movie while the browser assembles its TIFF.
+      const budget = 2 * 2**30;
+      const fixed = 256 * 2**20 + (truth?.file.size ?? 0) + (truth?.drift.length ?? 0)*256 + beads*256;
+      const bytesPerFrame = 2*size*size*Float32Array.BYTES_PER_ELEMENT + 1024;
+      const maxFrames = Math.max(0, Math.floor((budget-fixed)/bytesPerFrame));
+      if (n > maxFrames) {
+        msg.textContent = 'The 2 GiB generator budget allows up to '+maxFrames.toLocaleString()+' frames with these settings.';
+        return;
+      }
+      const {device} = await getDevice();
       const xy=Array.from({length:beads},()=>[Math.random()*size,Math.random()*size]);
       const flux=xy.map(()=>3500+3000*Math.random());
       const normal=()=>Math.sqrt(-2*Math.log(Math.max(1e-12,Math.random())))*Math.cos(2*Math.PI*Math.random());
       const axes=[1.4,1.1,650].map(span=>{
         let x=0;const walk=Array.from({length:n},()=>x+=normal()),mean=walk.reduce((a,b)=>a+b)/n;
-        return walk.map(v=>(v-mean)*span/(Math.max(...walk)-Math.min(...walk)));
+        const range = walk.reduce((hi,v)=>Math.max(hi,v),-Infinity) - walk.reduce((lo,v)=>Math.min(lo,v),Infinity);
+        return walk.map(v=>range ? (v-mean)*span/range : 0);
       });
       const drift=Array.from({length:n},(_,t)=>axes.map(axis=>axis[t]));
-      const frames=new Float32Array(n*size*size);
-      const show=(t:number)=>plot(view,frames.subarray(t*size*size,(t+1)*size*size),size,size);
-      view.hidden=false;slider.hidden=false;slider.min='0';slider.max='0';slider.oninput=()=>show(slider.valueAsNumber);
+      const planes: Blob[] = [];
+      const image = new Float32Array(size*size);
       const useSpline = el.querySelector<HTMLSelectElement>('.renderer')!.value === 'spline';
       msg.textContent = useSpline ? 'Building field B-spline tables�' : 'Preparing vectorial renderer�';
       const focus = drift.map(row => row[2]/1000);
       const renderer = useSpline
         ? await fieldSplineRenderer(device, model, field, s.diameterNm, 19, [Math.min(...focus), Math.max(...focus)])
         : beadRenderer(device, model, field, s.diameterNm, 19);
+      ++previewRequest;
+      view.hidden=false;slider.hidden=false;slider.min='0';slider.max='0';slider.value='0';
+      slider.oninput = async () => {
+        const id = ++previewRequest, plane = planes[slider.valueAsNumber];
+        if (!plane) return;
+        try {
+          const bytes = await plane.arrayBuffer();
+          if (id === previewRequest) plot(view,new Float32Array(bytes),size,size);
+        } catch (e) { if (id === previewRequest) msg.textContent = String(e); }
+      };
       try {
         for(let t=0;t<n;t++){
           msg.textContent='Rendering frame '+(t+1)+' / '+n;
-          const image=frames.subarray(t*size*size,(t+1)*size*size);image.fill(8);
+          image.fill(8);
           await renderer.render(xy,drift[t],(j,x,y,stamp)=>eachPixel(x,y,19,size,size,(p,k)=>{image[p]+=flux[j]*stamp[k];}));
           for(let p=0;p<image.length;p++){
             const mean=image[p];let counts=0;
@@ -81,17 +105,23 @@ export function exampleMovie(parent:HTMLElement,settings:()=>Settings,select:(fi
             else counts=Math.max(0,Math.round(mean+Math.sqrt(mean)*normal()));
             image[p]=counts/s.gain+s.offset;
           }
-          slider.max=String(t);slider.value=String(t);show(t);
+          planes.push(new Blob([image]));
+          ++previewRequest;slider.max=String(t);slider.value=String(t);plot(view,image,size,size);
         }
       } finally {
         renderer.destroy();
       }
-      const planes=Array.from({length:n},(_,t)=>frames.subarray(t*size*size,(t+1)*size*size));
-      const file=new File([tiffStackBlob(planes,n,1,size,size,{axis:'frames'})],'dense-beads.tif',{type:'image/tiff'});
+      const file=new File([floatMovieBlob(planes,size,size)],'dense-beads.tif',{type:'image/tiff'});
       if(download.href)URL.revokeObjectURL(download.href);
       download.href=URL.createObjectURL(file);download.hidden=false;
       truth={file,drift,field};select(file);msg.textContent=beads+' beads · ready to fit';button.textContent='Regenerate';
-    }catch(e){msg.textContent=String(e);}finally{button.disabled=false;}
+    } catch(e) {
+      ++previewRequest;
+      slider.oninput = previousPreview; slider.max = previousMax; slider.value = previousFrame;
+      view.hidden = slider.hidden = previewHidden;
+      if (!previewHidden) slider.dispatchEvent(new Event('input'));
+      msg.textContent = String(e);
+    } finally { button.disabled=false; }
   };
   return (file:File)=>truth?.file===file?truth:undefined;
 }

@@ -27,11 +27,21 @@ export function tiffStackBlob(planes: (Uint8Array | Float32Array)[], N: number, 
   const n = N * C;
   if (planes.length !== n) throw new Error(`tiffStackBlob: ${planes.length} planes for N=${N} x C=${C}`);
   const f32 = planes[0] instanceof Float32Array;
-  const bps = f32 ? 32 : 8, fmt = f32 ? 3 : 1;
-  const frameBytes = H * W * bps / 8;
   for (const p of planes) {
     if ((p instanceof Float32Array) !== f32 || p.length !== H * W) throw new Error('tiffStackBlob: planes differ in type or size');
   }
+  return stackBlob(planes, N, C, H, W, opts, f32);
+}
+
+/** Immutable little-endian float32 planes, snapshotted as each frame was rendered. */
+export function floatMovieBlob(planes: Blob[], H: number, W: number): Blob {
+  if (!planes.length || planes.some(p => p.size !== H*W*4)) throw Error('Invalid float32 movie planes');
+  return stackBlob(planes, planes.length, 1, H, W, {axis: 'frames'}, true);
+}
+
+function stackBlob(planes: BlobPart[], N: number, C: number, H: number, W: number, opts: StackOpts, f32: boolean) {
+  const n = N*C, bps = f32 ? 32 : 8, fmt = f32 ? 3 : 1;
+  const frameBytes = H * W * bps / 8;
   const descB = new TextEncoder().encode(imagejDescription(N, C, opts) + '\0');
   const descOff = 8, dataOff = Math.ceil((descOff + descB.length) / 16) * 16;
   const nent = 10, nent0 = 11;                      // page 0 also has the ImageDescription
