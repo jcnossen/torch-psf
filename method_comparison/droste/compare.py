@@ -120,7 +120,7 @@ def report(rows):
     ink, teal = '#193342', '#00696b'
     def page(title, subtitle, number):
         fig = plt.figure(figsize=(8.27,11.69))
-        fig.text(.08,.95,'SIMCODE   /   METHODS',color=teal,weight='bold',size=10)
+        fig.text(.08,.95,'TorchPSF   /   METHODS',color=teal,weight='bold',size=10)
         fig.text(.08,.903,title,size=22,color=ink,weight='bold')
         fig.text(.08,.872,subtitle,size=10,color=ink)
         fig.text(.08,.039,'Droste et al. and torch_psf   /   Method comparison',size=9,color=ink)
@@ -382,8 +382,8 @@ def report(rows):
         f.text(.08,.083,'Vectorfit Python release and authors’ demo instructions',color=teal,size=10,url='https://pypi.org/project/vectorfit-py/0.3.4/')
         pdf.savefig(f); plt.close(f)
         import json
-        measured=json.loads(Path(__file__).with_name('results_1809.json').read_text())
-        f=page('How close is NAT to the 1809 v4 PSF?', 'Experimental DNA-PAINT  /  1809 cover 1, acquisition 2',14)
+        measured=json.loads(Path(__file__).with_name('dna_paint_fit.json').read_text())
+        f=page('How close is NAT to the DNA-PAINT v4 PSF?', 'Experimental DNA-PAINT  /  two illumination axes',14)
         body(f,.826,'We sampled 2,670 isolated 15 × 15 spots across six acquisition windows and fitted each illumination axis separately. Alternating fits used camera-corrected intensities and per-pixel read variance. The NAT pupil started at zero aberration with the v4 optical geometry, focus and axis-specific dipole model. A 16-pixel checkerboard separated training and scoring locations.')
         entries=[[r['angle'],r['train'],r['held'],f"{r['mean_delta_nll']:+.2f}",f"{r['fraction_nat_better']:.1%}",f"{r['mean_z_shift_nm']:+.1f}"] for r in measured]
         table(f,[.075,.598,.85,.092],['Axis','Train','Held out','ΔNLL/ROI','NAT wins','Δz (nm)'],entries,[.1,.12,.15,.23,.2,.2])
@@ -393,8 +393,8 @@ def report(rows):
         body(f,.349,'Relative image L2 difference at equal xyz, normalized to unit ROI flux and averaged over 16 field positions. Training shared an integrated cubic spline per 60-pixel tile. On held-out ROIs, 30-pixel spline tiles gave RMS z differences of '+ ' and '.join(f"{r['spline_direct_z_rms_nm']:.1f} nm" for r in measured)+' versus the continuous NAT renderer for axes 0 and 1.')
         body(f,.192,'For in-situ fitting, use the spline for repeated emitter updates and rescore the chosen solution with the continuous pupil. Compare multiple initial pupils and inspect through-focus residuals before retraining. Independent reference heights or a registered bead stack would distinguish axial bias from a change of coordinate origin.')
         pdf.savefig(f); plt.close(f)
-        f=page('Where does the spline lose accuracy?', '1809  /  forward pixels at fixed position and fitted emitter heights',15)
-        diagnostic=json.loads(Path(__file__).with_name('spline_1809.json').read_text())
+        f=page('Where does the spline lose accuracy?', 'DNA-PAINT  /  forward pixels at fixed position and fitted emitter heights',15)
+        diagnostic=json.loads(Path(__file__).with_name('field_tile_errors.json').read_text())
         body(f,.827,'The spline cache shares one vectorial pupil across each 30-pixel field tile. We evaluated the resulting spline at each of the 16 tile centres, then 8 pixels away in both field coordinates in all four diagonal directions. Each comparison used the same subpixel position, five heights from 0 to 400 nm, and images normalized to unit flux.')
         table(f,[.075,.60,.85,.095],['Axis','At centre','Off centre','Off-centre max','Δz RMS'],
               [[r['angle'],f"{s['center']['relative_l2_mean']:.4%}",f"{s['offcenter']['relative_l2_mean']:.2%}",f"{s['offcenter']['relative_l2_max']:.1%}",f"{r['spline_direct_z_rms_nm']:.1f} nm"] for r,s in zip(measured,diagnostic)],
@@ -403,7 +403,7 @@ def report(rows):
         table(f,[.075,.389,.85,.092],['Axis','Direct time','Spline time','Speed ratio','Spline ΔNLL/ROI'],
               [[r['angle'],f"{r['seconds']['nat_direct']:.1f} s",f"{r['seconds']['nat_tiled_cold']:.1f} s",f"{r['seconds']['nat_direct']/r['seconds']['nat_tiled_cold']:.1f}×",f"{r['spline_minus_direct_nll']:+.2f}"] for r in measured],[.10,.2,.2,.21,.29])
         body(f,.362,'Timing includes lazy spline construction on a local RTX 4060 Laptop GPU. Positive ΔNLL means the tiled model fit the data worse. These measurements use three axial starts and 25 localization iterations. The 60-pixel training grid used ten alternating updates, each limited to three global steps. Every inner solve reached that budget.')
-        polished=json.loads(Path(__file__).with_name('polish_1809.json').read_text())
+        polished=json.loads(Path(__file__).with_name('initialization_comparison.json').read_text())
         body(f,.204,'Matched-bound check. We sampled 48 held-out spots per axis and constrained both paths to ±3 pixels laterally. Direct refinement from the spline solution versus three direct starts gave RMS height differences of '+ ' and '.join(f"{r['polished_z_rms_nm']:.0f} nm" for r in polished)+'. Their mean direct NLL differences were '+ ' and '.join(f"{r['mean_polished_minus_cold_nll']:+.3f}" for r in polished)+' per spot. Both initializations won individual spots. Keep both starts when likelihood matters, and use independent axial references when judging height accuracy.')
         pdf.savefig(f); plt.close(f)
         f=page('Does the spline preserve the gradient?', 'Fixed emitter coordinates  /  all 13 NAT derivatives',16)
@@ -411,9 +411,21 @@ def report(rows):
         body(f,.826,'Write K(g) for the prefiltered spline coefficients built from the optical model at NAT parameters g, and B for evaluation at fixed emitter coordinates. The predicted image is B K(g). The gradient of its likelihood is the transpose of the knot Jacobian applied to Bᵀ times the pixel likelihood gradient. Multiple emitters may accumulate into one knot adjoint before the optical backward pass.')
         table(f,[.075,.594,.85,.101],['Field point','Cached vs spline AD','Cached vs direct','Direction cosine¹'],
               [[('Tile centre' if r['offset_px_per_axis']==0 else '8 px on both axes'),f"{r['cached_vs_spline_autograd']:.2e}",f"{r['cached_vs_direct']:.2e}",f"{np.dot(r['direct'],r['cached'])/(np.linalg.norm(r['direct'])*np.linalg.norm(r['cached'])):.3f}"] for r in gradients],[.26,.25,.25,.24])
-        body(f,.56,'Errors are Euclidean gradient differences divided by the reference gradient norm. ¹ Cosine between cached and direct 13-vectors. We used axis 0 of the fitted 1809 field, five fixed emitter heights, 2,000 photons, background 8, and a seeded Poisson draw at each of two positions. These are two numerical checks on synthetic counts, not uncertainty estimates for the 1809 experiment.')
+        body(f,.56,'Errors are Euclidean gradient differences divided by the reference gradient norm. ¹ Cosine between cached and direct 13-vectors. We used axis 0 of the fitted DNA-PAINT field, five fixed emitter heights, 2,000 photons, background 8, and a seeded Poisson draw at each of two positions. These are two numerical checks on synthetic counts, not uncertainty estimates for the DNA-PAINT experiment.')
         body(f,.395,'The cached backward pass agrees with automatic differentiation through the entire spline build. Agreement with the direct gradient requires agreement of the image and its parameter Jacobian. Even when pixel interpolation is accurate, rounding a field position to its tile centre changes both the pupil and the derivative of the pupil with respect to each NAT parameter.')
         body(f,.224,'To optimize the exact physical objective, use the spline for proposals or as a preconditioner and evaluate direct loss and gradient for the final refinement and stopping check. Identical stationary conditions still allow distinct local minima. Exact sharing is possible for identical evaluation geometry, or with a representation that exactly spans the direct forward model and its parameter derivatives.')
+        pdf.savefig(f); plt.close(f)
+        f=page('What does the speed ratio measure?', 'TorchPSF  /  integrated cubic B-splines, DNA-PAINT axis 0',17)
+        b=json.loads(Path(__file__).with_name('spline_timing.json').read_text())
+        body(f,.823,'The original 5.1× ratio on axis 0 compares whole localization jobs. It includes table construction for the spline, three axial starts, 25 optimizer iterations per start, camera variance and small field-tile batches. The vectorial path also runs on the GPU.')
+        entries=[]
+        for label,key in [('Render pixels','forward'),('Pixels and x, y, z derivatives','jacobian')]:
+            direct, spl=b[f'vectorial_{key}_ms'],b[f'spline_{key}_ms']
+            entries.append([label,f'{direct:.1f} ms',f'{spl:.1f} ms',f'{direct/spl:.1f}×'])
+        table(f,[.075,.60,.85,.105],['Batch of 48 emitters','Vectorial','Cached spline','Ratio'],entries,[.43,.20,.23,.14])
+        body(f,.568,'These warm timings use identical subpixel positions and a single physical pupil at the centre of one tile. Each entry is the median of five synchronized runs of ten calls on an RTX 4060 Laptop GPU. The Torch implementation integrates the spline over each pixel with separable tensor contractions. A fused evaluator or larger batch would require a separate benchmark.')
+        body(f,.407,f"In a separate axis-0 rerun, building {b['occupied_tiles']} occupied tables took {b['build_s']:.1f} s. Localizing all {b['held']} spots with those tables already cached took {b['warm_fit_s']:.1f} s. The earlier cold timing was 36.9 s. Run-to-run variation precludes subtracting the timings to infer construction cost.")
+        body(f,.236,'Retraining decision. The v4 trained estimator already uses an integrated cubic spline of the axis-specific calibration. Retain those weights while validating the NAT pupil. A paired frozen-weight test should use identical emitter coordinates, photon levels, backgrounds and camera settings under both pupils. Measure detection recall, axial bias and RMSE through depth and across field positions. Independent known-height data can establish which axial calibration transfers to the experiment.')
         pdf.savefig(f); plt.close(f)
 if __name__ == '__main__':
     values = compare()

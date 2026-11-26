@@ -1,4 +1,4 @@
-"""Paired 1809 localization check with equal lateral bounds and a physical refinement."""
+"""Paired DNA-PAINT localization check with equal lateral bounds and a physical refinement."""
 import argparse
 import json
 from pathlib import Path

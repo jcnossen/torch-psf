@@ -1,4 +1,4 @@
-"""Compare first-order NAT against the 1809 v4 PSF on separate field tiles."""
+"""Compare first-order NAT against the DNA-PAINT v4 PSF on separate field tiles."""
 import argparse
 import json
 import time

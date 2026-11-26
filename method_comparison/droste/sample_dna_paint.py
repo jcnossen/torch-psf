@@ -1,4 +1,4 @@
-"""Extract isolated single-frame 1809 spot ROIs on CPU using existing SIMCODE detections."""
+"""Extract isolated single-frame DNA-PAINT spot ROIs on CPU using existing SIMCODE detections."""
 from pathlib import Path
 import argparse
 import numpy as np

@@ -1,0 +1,14 @@
+{
+  "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+  "torch_version": "2.5.1",
+  "held": 676,
+  "axis": 0,
+  "occupied_tiles": 15,
+  "build_s": 7.048796599992784,
+  "warm_fit_s": 43.95676909999747,
+  "batch": 48,
+  "vectorial_forward_ms": 23.376800000551157,
+  "vectorial_jacobian_ms": 190.75754999939818,
+  "spline_forward_ms": 18.307390001427848,
+  "spline_jacobian_ms": 26.26477000012528
+}
