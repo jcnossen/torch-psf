@@ -254,3 +254,28 @@ fits in about 1.5 s.
 `.github/workflows/pages.yml` builds `web/` with `BASE=/torch-psf/` and deploys `web/dist` to
 https://jcnossen.github.io/torch-psf/. Pages must be enabled once in the repository settings (Settings -> Pages ->
 Source: GitHub Actions).
+### In-situ pupil models
+
+The **Fit PSF** panel offers a global Zernike pupil, an independent polynomial field
+(25 coefficients), and first-order NAT (13 coefficients). Both field fits start from
+the global fit and reuse its overlap-filtered training spots. They fit Noll modes
+4, 5, 6, 7, 8 and 11. Other fitted global modes stay fixed during the field update.
+Held-out ROIs are scored at their own camera locations. The lowest-scoring fitted
+candidate supplies the PSF for movie localization and export. With no held-out
+spots the selected field is retained.
+
+Each occupied tile shares a pixel-value cubic spline of a vectorial pupil. Tile
+width is the smaller of 64 pixels and one third of the shorter field span.
+The archive stores the continuous field polynomial, with its z-stack preview at
+the field centre. The NAT reference is [Droste et al., Optica (2025)](https://doi.org/10.1364/OPTICA.560721).
+
+For a matched PyTorch NAT comparison use `fit_nat(..., backend="web", oversample=2,
+dz_um=.04)` with the same tile width, camera normalization, ROI split, midpoint
+optics and starting pupil. This profile mirrors the browser's pixel spline and
+Adam updates. The default PyTorch integrated B-spline/L-BFGS path is a separate
+numerical configuration. The independent comparison uses `fit_field_knots`
+with one spot minimum per occupied tile and no ridge penalty.
+
+Run `python test/run_tests.py --only "NAT:"` from `web/` for GPU parity and movie
+selection tests. Regenerate their checked-in CPU oracle with
+`python tests/make_web_nat_reference.py` from a Python environment using this checkout.

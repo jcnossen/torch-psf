@@ -5,6 +5,8 @@
 // (k = 3), then a second pass with 3/4 of the iterations starts from the first-pass result; held-out check =
 // compare_heldout of the start and the fitted spline; z_scale of the fitted knots against the start knots; fraction of
 // fitted spots at the offset limit).
+import { fitPupilField, localizePupilField } from './field-fit';
+import { fieldPupil, NAT_MODES, PupilField } from './field-model';
 import { Detector, extractRois } from '../gpu/detect';
 import { SplineLocalizer, splineGrid } from '../gpu/spline_lm';
 import { StopToken, Eta, Progress } from '../core/task';
@@ -16,6 +18,7 @@ import { fitFreeKnots } from './refine';
 import { QualityRange, QualityRoi, qualityBands, median } from '../report/quality';
 
 export interface InsituReport {
+  fieldFit?: { model: PupilField; iterations: number; kept: boolean; heldout: number | null; global: number | null };
   zcoef: number[]; zcoef_start: number[]; noll: number[]; iterations: number; partial: boolean; seconds: number;
   n_spots: number; n_train: number; n_test: number; n_rejected: number; deviance_threshold: number | null;
   frames_read: number; frames_total: number;
@@ -91,6 +94,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   }
   if (tr.length < 50) throw new Error(`only ${tr.length} spots for the fit; lower the threshold or use more frames`);
   const take = (idx: number[]) => { const a = new Float32Array(idx.length * P2); idx.forEach((k, q) => a.set(all.subarray(k * P2, (k + 1) * P2), q * P2)); return a; };
+  let keptIds = tr;
   const dTr = take(tr), dTe = take(te);
   // 3. fit (route K) on the InSituEstimator grid
   const g = splineGrid(P, form.zlo, form.zhi, 2, 0.04, 5, 3.0) as KnotGridFull;
@@ -127,6 +131,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     quality = qualitySpots(dTr, dv, th1, thr, K1a, g, (i) => cf[ord[tr[i]]], k);
     const dKeep = new Float32Array(keep.length * P2);
     keep.forEach((i, q) => dKeep.set(dTr.subarray(i * P2, (i + 1) * P2), q * P2));
+    keptIds = keep.map(i => tr[i]);
     dFit = dKeep;
     const fit2 = await fitZernikeKnots(dev, dKeep, keep.length, cfg, fit.zcoef, g, form.focus_um, { iters: it2, tok, log: logFit(form.iters, keep.length, 'fit (overlaps rejected)'), var: rvar });
     partial = partial || fit2.history.length < it2;
@@ -138,7 +143,7 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
   for (let i = 0; i < nFit; i++) if (Math.max(Math.abs(fit.theta[i * 5]), Math.abs(fit.theta[i * 5 + 1])) > g.xmax - 0.06) lim++;
   progress({ stage: 'report', done: 0, total: 2 });
   const K1 = await vectorialKnots(dev, cfg, fit.zcoef.map(Math.fround), g, form.focus_um);
-  const zs = await zScale(dev, K1, fit.K0, g);
+  let zs = await zScale(dev, K1, fit.K0, g);
   // optional refinement: free knots from the vectorial spline, on the (kept) training spots
   let refine: InsituReport['refine'] = null;
   if (form.refine && !tok.stopEarly) {
@@ -148,6 +153,20 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
       log: (h) => progress({ stage: 'refine', done: h.it + 1, total: outer, info: { loss: h.loss }, elapsed_s: h.seconds }) });
     const zr = await zScale(dev, rr.knots, K1, g);
     refine = { kept: false, heldout_refined: null, z_scale_vs_vectorial: zr.scale, z_offset_um_vs_vectorial: zr.offset, outer: rr.history.length, seconds: rr.seconds, knots: rr.knots };
+  }
+  let fieldFit: InsituReport['fieldFit'];
+  const noll = [...form.noll], center = [...fit.zcoef], start = [...form.zcoef];
+  if ((form.method === 'nat' || form.method === 'independent') && !tok.stopEarly) {
+    for (const j of NAT_MODES) if (!noll.includes(j)) { noll.push(j); center.push(0); start.push(0); }
+    cfg.zernike_noll = noll;
+    let iterations = 0;
+    const model = await fitPupilField(dev, cfg, center, g, form.focus_um, dFit,
+      keptIds.map(i => cx[i]), keptIds.map(i => cy[i]), mv.W, mv.H, rvar, tok, done => {
+        iterations = done;
+        progress({stage: 'Field fit', done, total: 10});
+      }, 10, form.method);
+    fieldFit = {model, iterations, kept: te.length === 0, heldout: null, global: null};
+    partial ||= iterations < 10;
   }
   let heldout: InsituReport['heldout'] = null, heldoutChi2: number | null = null;
   if (te.length) {
@@ -161,10 +180,27 @@ export async function estimateInsitu(dev: GPUDevice, source: File[] | MovieSourc
     heldout = { start: a, fitted: b, diff: b - a };
     let chosen = chi2s[1];
     if (refine) { refine.heldout_refined = await nllPx(refine.knots!); refine.kept = refine.heldout_refined < b; if (refine.kept) chosen = chi2s[2]; }
+    if (fieldFit) {
+      const cache = new Map<number,SplineLocalizer>();
+      try {
+        const r = await localizePupilField(dev,fieldFit.model,cfg,center,g,form.focus_um,dTe,te.map(i=>cx[i]),te.map(i=>cy[i]),rvar,tok,cache);
+        fieldFit.heldout = r.nll.reduce((s,v)=>s+v,0)/te.length/P2;
+        fieldFit.global = b;
+        fieldFit.kept = fieldFit.heldout < (refine?.kept ? refine.heldout_refined! : b);
+        if (fieldFit.kept) {
+          chosen = r.chi2;
+          heldout.fitted = fieldFit.heldout;
+          heldout.diff = fieldFit.heldout - a;
+          if (refine) refine.kept = false;
+        }
+      } finally { for (const loc of cache.values()) loc.destroy(); }
+    }
     heldoutChi2 = median(chosen);                       // the held-out spots fitted with the returned PSF
     if (!(heldoutChi2 > 0.7 && heldoutChi2 < 1.4)) warnings.push(`held-out median chi2 per px ${heldoutChi2.toFixed(2)} (about 1 expected): check the camera gain / offset / excess noise`);
   }
-  return { zcoef: fit.zcoef, zcoef_start: [...form.zcoef], noll: form.noll, iterations: history.length, partial,
+  const zcoef = fieldFit?.kept ? fieldPupil(fieldFit.model,noll,center,fieldFit.model.norm.cx,fieldFit.model.norm.cy) : center;
+  if (fieldFit?.kept) zs = await zScale(dev, await vectorialKnots(dev,cfg,zcoef,g,form.focus_um), fit.K0, g);
+  return { fieldFit, zcoef, zcoef_start: start, noll, iterations: history.length, partial,
     seconds: (performance.now() - tFit0) / 1000,
     n_spots: n, n_train: tr.length, n_test: te.length, n_rejected: nRej, deviance_threshold: thr, frames_read: done, frames_total: mv.n, heldout,
     z_scale: zs.scale, z_offset_um: zs.offset, at_limit: lim / Math.max(1, nFit), history, refine, grid: { zpad: 5 },

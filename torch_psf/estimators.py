@@ -730,16 +730,21 @@ class InSituEstimator(Estimator):
             if spec.get('model') == 'nat':
                 from torch_psf.estimation import fit_nat
                 spec.pop('model')
-                tile = spec.pop('tile', 64.)
-                score_tile = spec.pop('score_tile', tile)
+                web = spec.get('backend') == 'web'
                 height, width = mv.shape
+                if web:
+                    spec.setdefault('oversample', 2)
+                    spec.setdefault('dz_um', .04)
+                tile = spec.pop('tile', min(64., max(2, min(width, height)-1)/3) if web else 64.)
+                score_tile = spec.pop('score_tile', tile)
                 spec.setdefault('norm', ((width-1)/2, (height-1)/2,
                                          max((width-1)/2, 1), max((height-1)/2, 1)))
                 spec.setdefault('zstarts', zs)
                 rf = fit_nat(vec, rois, xy_tr, tile=tile, var=var, log=self._log('nat'),
                              stop=self.stop, **spec)
-                score_grid = dict(kernel='bspline', integrated=True, oversample=spec.get('oversample', 3),
-                                  dz_um=spec.get('dz_um', .025), xy_limit=spec.get('xy_limit', 3.), zpad=4)
+                score_grid = dict(kernel='catmull' if web else 'bspline', integrated=not web,
+                                  oversample=spec.get('oversample', 3), dz_um=spec.get('dz_um', .025),
+                                  xy_limit=spec.get('xy_limit', 3.), zpad=5 if web else 4)
             else:
                 fz, fkw = field_from_spec(spec, vec.zidx, xy_tr)
                 rf = fit_field_knots(SplinePSF(R, zr, device=self.dev, **self.grid), rois, xy_tr, vec, fz,

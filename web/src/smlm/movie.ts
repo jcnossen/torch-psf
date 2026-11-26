@@ -2,6 +2,7 @@
 // vectorial PSF (torch_psf CubicSplinePSF.from_vectorial grid defaults). Per chunk of frames: ADU -> photons
 // (camera.to_photons: (adu - offset) x gain), detect_spots (+ extract_spots border rule (P - 1) / 2 + 2), extract_rois,
 // localize (zstarts 5, 30 iterations), crlb, chi2, at_limit -> rows of the localization table (torch_psf.table).
+import { localizePupilField } from './field-fit';
 import { TiffMovie } from '../io/tiff';
 import { Detector } from '../gpu/detect';
 import { extractRois } from '../gpu/detect';
@@ -43,9 +44,11 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
   const zpad = form.zpad ?? 2;
   const grid = splineGrid(P, form.zlo, form.zhi, 2, 0.04, zpad, 3.0);
   progress({ stage: 'spline', done: 0, total: 1 });
-  const knots = form.knots ?? (await buildKnots(device, { ...form.optics, roisize: 0, npupil: form.npupil, oversample: form.oversample, zernike_noll: form.noll },
+  const knots = form.pupilField ? null : form.knots ?? (await buildKnots(device, { ...form.optics, roisize: 0, npupil: form.npupil, oversample: form.oversample, zernike_noll: form.noll },
     form.zcoef, { roisize: P, focus_um: form.focus_um, zmin: form.zlo, zmax: form.zhi, S: grid.S, hz: grid.hz, zpad, xmax: grid.xmax }, () => tok.check())).knots;
-  const loc = new SplineLocalizer(device, grid, knots);
+  const loc = knots ? new SplineLocalizer(device, grid, knots) : null;
+  const fieldCache = new Map<number,SplineLocalizer>();
+  const cfg = {...form.optics, roisize:P, npupil:form.npupil, oversample:form.oversample, zernike_noll:form.noll};
   const chunk = Math.max(1, Math.min(form.chunk, nFrames));
   const det = new Detector(device, mv.H, mv.W, chunk, { threshold: form.threshold, border: h + 2, isolation: form.isolation > 0 ? form.isolation : null });
   const eta = new Eta();
@@ -80,7 +83,8 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
         const rois = extractRois(fr, mv.H, mv.W, f0, d, P, a, M);
         timing_ms.extract += performance.now() - started;
         started = performance.now();
-        const r = await loc.localize(rois, M, { var: varE });
+        const r = form.pupilField ? await localizePupilField(device,form.pupilField,cfg,form.zcoef,grid,form.focus_um,rois,d.x.slice(a,b),d.y.slice(a,b),varE,tok,fieldCache)
+          : await loc!.localize(rois, M, { var: varE });
         timing_ms.localize += performance.now() - started;
         const rows = new Float32Array(M * NCOL);
         for (let k = 0; k < M; k++) {
@@ -103,7 +107,7 @@ export async function localizeMovie(device: GPUDevice, source: File[] | MovieSou
       done = f1;
       progress({ stage: 'localize', done, total: nFrames, info: { localizations: n }, ...eta.update(done, nFrames) });
     }
-  } finally { det.destroy(); loc.destroy(); }
+  } finally { det.destroy(); loc?.destroy(); for(const tile of fieldCache.values()) tile.destroy(); }
   const seconds = (performance.now() - t0) / 1000;
   return { n_locs: n, frames_read: done, frames_total: mv.n, partial, seconds, H: mv.H, W: mv.W, spots_per_s: n / Math.max(seconds, 1e-9), at_limit_fraction: n ? nLimit / n : 0, timing_ms };
 }

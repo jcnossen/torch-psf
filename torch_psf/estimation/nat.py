@@ -113,9 +113,13 @@ def fit_nat(
     Pass a matrix of initial pupils in gamma0 to fit independent starts and select
     the lowest final likelihood on the same calibration set.
     With field_varying=False, fit only the six spatially constant pupil terms.
+    backend="web" uses the browser's pixel-value Catmull-Rom table and one Adam
+    update per outer iteration. Match the browser's midpoint optics, oversample=2,
+    dz_um=.04, tile and field normalization for cross-runtime comparisons.
     """
-    if backend not in ("direct", "bspline") or min(iters, global_iters, loc_iters, batch, zstarts) < 1:
-        raise ValueError("expected direct/bspline and positive iteration counts and batch size")
+    web = backend == "web"
+    if backend not in ("direct", "bspline", "web") or min(iters, global_iters, loc_iters, batch, zstarts) < 1:
+        raise ValueError("expected direct/bspline/web and positive iteration counts and batch size")
     if not (0 < fraction <= 1) or tile <= 0:
         raise ValueError("expected fraction in (0,1] and positive tile size")
     d = torch.as_tensor(rois, device=vectorial.dev, dtype=vectorial.dtype)
@@ -211,24 +215,24 @@ def fit_nat(
         return psf
 
     grid = dict(
-        kernel="bspline",
-        integrated=True,
+        kernel="catmull" if web else "bspline",
+        integrated=not web,
         oversample=oversample,
         dz_um=dz_um,
         xy_limit=xy_limit,
-        zpad=4,
+        zpad=5 if web else 4,
     )
     cx, cy, sx, sy = norm
     extent = (cx - sx, cy - sy, cx + sx, cy + sy)
     bins, nx, _, _ = tile_assign(xy, tile, extent)
     spl = big = None
-    if backend == "bspline":
+    if backend != "direct":
         spl = SplinePSF(
             vec.roisize,
             vec.z_range,
             device=vec.dev,
             pixel_um=vec.pixel_um,
-            **dict(grid, xy_limit=xy_limit + 1),
+            **dict(grid, xy_limit=xy_limit + int(not web)),
         )
         spl.xmax = min(xy_limit, spl.xmax)
         big = vec.resized(spl.Pl)
@@ -275,31 +279,37 @@ def fit_nat(
 
     def local(g, initial, steps):
         psf = update_model(g)
-        if backend == "bspline":
+        if backend != "direct":
             psf = psf.to_tiled(tile=tile, extent=extent, **grid)
         with torch.no_grad():
             return localize_field(psf, d, xy, var, initial, iters=steps, zstarts=zstarts, batch=batch)
 
+    if web:
+        gamma.requires_grad_(True)
+        adam = torch.optim.Adam([gamma], lr=.002, eps=1e-12)
     for it in range(iters):
         theta, nll = local(gamma, theta, 30 if theta is None else loc_iters)
         count = max(1, round(len(d) * fraction))
         indices = torch.as_tensor(rng.choice(len(d), count, replace=False), device=vec.dev)
-        opt = minimize(
-            global_loss,
-            gamma.detach().cpu().double().numpy(),
-            args=(indices, theta),
-            method="L-BFGS-B",
-            bounds=bounds,
-            jac=True,
-            options=dict(maxiter=global_iters, maxls=20, ftol=1e-10),
-        )
-        gamma = base.new_tensor(opt.x)
+        x = gamma.detach().cpu().double().numpy()
+        if web:
+            _, gradient = global_loss(x, indices, theta)
+            gamma.grad = base.new_tensor(gradient)
+            if not field_varying:
+                gamma.grad[varying] = 0
+            adam.step()
+            status, message = 0, "Adam update"
+        else:
+            opt = minimize(global_loss, x, args=(indices, theta), method="L-BFGS-B", bounds=bounds, jac=True,
+                           options=dict(maxiter=global_iters, maxls=20, ftol=1e-10))
+            gamma = base.new_tensor(opt.x)
+            status, message = int(opt.status), str(opt.message)
         history.append(
             dict(
                 it=it,
                 local_nll=float(nll.sum()),
-                global_status=int(opt.status),
-                global_message=str(opt.message),
+                global_status=status,
+                global_message=message,
                 seconds=time.monotonic() - tic,
             )
         )
@@ -316,7 +326,7 @@ def fit_nat(
         gamma=gamma.tolist(),
         norm=list(norm),
         n_emitters=len(d),
-        n_tiles=len(np.unique(bins)) if backend == "bspline" else None,
+        n_tiles=len(np.unique(bins)) if backend != "direct" else None,
         iterations=len(history),
         nll=float(nll.sum()),
         seconds=time.monotonic() - tic,

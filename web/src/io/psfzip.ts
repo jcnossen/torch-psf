@@ -2,6 +2,7 @@
 // Read channel 0 and referenced arrays. Integrated splines render from their own coefficients even without a source.
 import { integratedRenderer, vectorialRenderer, type ImportedRenderer } from '../psf/imported';
 import { splineRender } from '../psf/zstack';
+import { readPupilField, type PupilField } from '../smlm/field-model';
 import type { Optics } from '../psf/vectorial';
 import type { SplineModel, VectorialModel, ZStack } from '../psf/zstack';
 import { NdArray, parseNpy, writeNpy } from './npy';
@@ -125,6 +126,7 @@ export async function writePsfZip(p: PsfZipParts): Promise<{ bytes: Uint8Array; 
 
 // ------------------------------------------------------------------------------------------------ reading
 export interface PsfFileInfo {
+  pupilField?: PupilField;
   kind: 'psf.zip';
   renderer?: ImportedRenderer;
   optics?: Optics; noll: number[]; zcoef: number[]; focus_um: number;
@@ -230,11 +232,12 @@ export function psfFromMeta(meta: Record<string, any>, arrays: Record<string, Nd
     for (const k of Object.keys(blk.arrays ?? {})) notes.push(`pupil map ${k} is not used by the web app`);
   }
   if ((m.apod ?? []).some((v: number) => v !== 0) || (m.saf ?? []).some((v: number) => v !== 0)) notes.push('apod / saf terms are kept for rendering only');
-  if (ch.field) notes.push(`field dependence (${ch.field.type}) is not used: the Zernikes at the reference point`);
+  const pupilField = renderer ? undefined : readPupilField(ch.field);
+  if (ch.field && !pupilField) notes.push(`field dependence (${ch.field.type}) is not used: the Zernikes at the reference point`);
   return {
     optics, noll: m.zernike_noll.map(Number), zcoef: m.zernike_waves.map(Number), focus_um: Number(m.focus_um ?? 0),
     roisize: m.roisize, npupil: m.npupil, oversample: m.oversample, z_range_um: m.z_range_um ?? null,
-    ...common, spline, renderer,
+    ...common, spline, renderer, pupilField,
   };
 }
 

@@ -34,12 +34,14 @@ export interface MovieForm {
   focus_um: number; zlo: number; zhi: number;            // focal plane during the acquisition; emitter heights (um)
   roisize: number; threshold: number; isolation: number; chunk: number; maxFrames: number;
   npupil: number; oversample: number; noll: number[]; zcoef: number[];   // the PSF used for localization
+  pupilField?: import('../smlm/field-model').PupilField;
   zpad?: number;                                          // spline knot planes beyond the z range (default 2)
   excessNoise?: number;                                   // Camera.excess_noise (F^2; EMCCD 2): photons / F^2, read-noise variance / F^4
   knots?: Float32Array;                                   // use these knots (grid of zpad) instead of the vectorial PSF
 }
 
 export interface InsituForm extends MovieForm {
+  method?: 'zernike' | 'nat' | 'independent';
   nspots: number; nheldout: number; iters: number; tile: number;
   rejectOverlap?: boolean; devianceK?: number;            // torch_psf InSituEstimator(reject_overlap=True, deviance_k=3)
   refine?: boolean; refineOuter?: number;                 // InSituEstimator(refine=False, refine_outer=12)

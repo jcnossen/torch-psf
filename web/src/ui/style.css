@@ -186,3 +186,5 @@ sup.cite a { color: var(--acc); } sup.cite a + a::before { content: ','; color: 
 .refs li a { word-break: break-all; }
 @media (max-width: 900px) { .refs { margin: 8px 16px 0; } .refs ol { columns: 1; } }
 .refs li { scroll-margin-top: 72px; } .chk sup.cite { margin-left: -6px; align-self: flex-start; margin-top: 2px; }
+.pupil-method { display: grid; gap: .4rem; border: 0; margin: .5rem 0; padding: 0; }
+.pupil-method legend { padding: 0; margin-bottom: .3rem; }

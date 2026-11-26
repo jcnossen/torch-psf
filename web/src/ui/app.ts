@@ -205,7 +205,7 @@ export function startApp(root: HTMLElement) {
   let movieLoading = false;
   let player: { n: number; H: number; W: number; frame: (t: number) => Promise<Float32Array> } | null = null;
   let recon: Recon | null = null;
-  let psfJson: { noll: number[]; zcoef: number[]; name: string } | null = null;
+  let psfJson: { noll: number[]; zcoef: number[]; name: string; pupilField?: MovieForm['pupilField'] } | null = null;
 
   let loadSeq = 0;      // a movie opened while the demo is still being simulated wins
   async function loadDemo() {
@@ -502,7 +502,7 @@ export function startApp(root: HTMLElement) {
         return;
       }
       if (!Array.isArray(j.noll) || !Array.isArray(j.zcoef)) throw new Error('no zernike_noll / zernike_waves');
-      psfJson = { noll: j.noll.map(Number), zcoef: j.zcoef.map(Number), name: f.name };
+      psfJson = { noll: j.noll.map(Number), zcoef: j.zcoef.map(Number), name: f.name, pupilField: j.pupilField };
       $('m-psfinfo').textContent = `${f.name} (${j.kind}): ${fmtZ(psfJson.noll, psfJson.zcoef)}` + (j.notes.length ? ` [${j.notes.join('; ')}]` : '');
     } catch (err) { if (seq !== importSeq) return; psfJson = null; $('m-psfinfo').textContent = 'Could not open PSF: ' + (err as Error).message; }
   };
@@ -516,6 +516,7 @@ export function startApp(root: HTMLElement) {
     optics: optics(), gain: n('o-gain'), offset: n('o-offset'), readnoise_e: n('o-rn'), focus_um: n('m-focus'), zlo: n('m-zlo'), zhi: n('m-zhi'),
     roisize: Math.round(n('m-roi')), threshold: n('m-thr'), isolation: Math.round(n('m-iso')), chunk: Math.round(n('m-chunk')), maxFrames: Math.round(n('m-frames')),
     npupil: 64, oversample: 3, noll: psf.noll, zcoef: psf.zcoef, nspots: Math.round(n('m-nspots')), nheldout: Math.round(n('m-nheld')), iters: Math.round(n('m-iters')), tile: 16,
+    method: $<HTMLInputElement>('m-method-nat').checked ? 'nat' : $<HTMLInputElement>('m-method-field').checked ? 'independent' : 'zernike',
     rejectOverlap: n('m-devk') > 0, devianceK: n('m-devk'), refine: $<HTMLInputElement>('m-refine').checked, refineOuter: 12,
     sampleChunk: Math.round(n('m-schunk')), excessNoise: n('o-excess'),
   });
@@ -658,6 +659,14 @@ export function startApp(root: HTMLElement) {
     const psf = kind === 'localize' && psfSel.value === 'guess' && insitu ? { noll: insitu.noll, zcoef: insitu.zcoef } : startPsf();
     if (!psf) { $('mtext').textContent = 'Choose the start PSF first (Fit PSF step).'; return; }
     const form = movieForm(psf);
+    if (kind === 'localize' && psfSel.value === 'json' && psfJson?.pupilField) {
+      form.pupilField = psfJson.pupilField;
+      form.zpad = 5;
+    }
+    if (kind === 'localize' && (psfSel.value === 'insitu' || psfSel.value === 'guess') && insitu?.fieldFit?.kept) {
+      form.pupilField = insitu.fieldFit.model;
+      form.zpad = 5;
+    }
     if (form.roisize % 2 !== 1 || form.roisize < 5) { $('mtext').textContent = 'The ROI size must be odd (>= 5).'; return; }
     running = 'movie'; busy(true);
     startZ = kind === 'estimate' ? [...psf.zcoef] : null;
@@ -728,7 +737,7 @@ export function startApp(root: HTMLElement) {
     ];
     if (r.warnings.length) kv.push(['Warnings', String(r.warnings.length), 'warn']);
     if (truthZ) {
-      const t = DEFAULT_NOLL.map((j) => truthZ![j] ?? 0);
+      const t = r.noll.map((j) => truthZ![j] ?? 0);
       const e = Math.sqrt(r.zcoef.reduce((s, v, i) => s + (v - t[i]) ** 2, 0) / t.length);
       kv.push(['Error vs demo truth', `${(1000 * e).toFixed(1)} mλ rms`, e < 0.01 ? 'ok' : 'warn']);
     }
@@ -738,9 +747,11 @@ export function startApp(root: HTMLElement) {
       ['overlapping spots rejected', !r.deviance ? 'off' : `${r.n_rejected} (${(100 * r.deviance.rejected_fraction).toFixed(0)} %; deviance per pixel > ${r.deviance.threshold.toFixed(3)} = median ${r.deviance.median.toFixed(3)} + k x ${r.deviance.scale.toFixed(3)}), then a second pass`],
       ['held-out median chi2 per px', chi === null ? 'n/a' : `${chi.toFixed(3)} (about 1 if the camera gain / offset / excess noise are right)`],
       ['iterations', `${r.iterations}${r.partial ? ' (stopped early)' : ''}, ${r.seconds.toFixed(1)} s`],
-      ['z scale vs the start PSF', `${r.z_scale.toFixed(3)} (offset ${(1000 * r.z_offset_um).toFixed(0)} nm)`],
+      [r.fieldFit?.kept ? 'Field-centre z scale vs the start PSF' : 'z scale vs the start PSF', `${r.z_scale.toFixed(3)} (offset ${(1000 * r.z_offset_um).toFixed(0)} nm)`],
       ['Zernikes (waves rms)', fmtZ(r.noll, r.zcoef)],
     ];
+    if (r.fieldFit) rows.push([r.fieldFit.model.method === 'nat' ? 'NAT field' : 'Independent Zernike field', r.fieldFit.global === null ? 'Selected without held-out spots' :
+      `${r.fieldFit.kept ? 'Selected' : 'Alternative retained'} · held-out NLL/spot versus global ${((r.fieldFit.heldout! - r.fieldFit.global) * insituForm!.roisize ** 2).toFixed(3)}`]);
     if (r.warnings.length) rows.push(['warnings', r.warnings.join('; ')]);
     if (r.refine) {
       const f = r.refine;
@@ -748,18 +759,18 @@ export function startApp(root: HTMLElement) {
         (f.kept ? '. The movie is localized with the refined spline. ' + FREE_KNOT_WARNING : '. The refined spline can still be viewed: PSF menu, "In-situ refined spline (not kept)".')]);
     }
     if (truthZ) {
-      const t = DEFAULT_NOLL.map((j) => truthZ![j] ?? 0);
+      const t = r.noll.map((j) => truthZ![j] ?? 0);
       const e = (a: number[]) => Math.sqrt(a.reduce((s, v, i) => s + (v - t[i]) ** 2, 0) / t.length);
-      rows.push(['vs the demo truth (rms over Noll 5-21)', `start ${e(r.zcoef_start).toFixed(4)} w, fitted ${e(r.zcoef).toFixed(4)} w`]);
+      rows.push(['vs the demo truth (RMS over fitted modes)', `start ${e(r.zcoef_start).toFixed(4)} w, fitted ${e(r.zcoef).toFixed(4)} w`]);
     }
     $('i-table').innerHTML = kvRows(rows);
     insituRows = rows;
-    drawZernikeBars(r.zcoef, r.zcoef_start);
+    drawZernikeBars(r.zcoef, r.zcoef_start, r.noll);
   }
-  function drawZernikeBars(z: number[], start: number[] | null) {
-    const truth = truthZ ? DEFAULT_NOLL.map((j) => truthZ![j] ?? 0) : null;
+  function drawZernikeBars(z: number[], start: number[] | null, modes = DEFAULT_NOLL) {
+    const truth = truthZ ? modes.map((j) => truthZ![j] ?? 0) : null;
     $('p-insitu').hidden = false; $('i-empty').hidden = true;
-    drawZernikeSets($('i-zern') as HTMLCanvasElement, DEFAULT_NOLL, [
+    drawZernikeSets($('i-zern') as HTMLCanvasElement, modes, [
       ...(start ? [{ z: start, color: '#c3cad2', label: 'start' }] : []),
       { z, color: '#2f6feb', label: 'fitted' },
       ...(truth ? [{ z: truth, color: '#1a7f37', label: 'truth (demo)' }] : []),
@@ -995,6 +1006,7 @@ function overlay(ctx: CanvasRenderingContext2D, W: number, H: number, scale: num
 // ---------------------------------------------------------------- references (numbered list at the bottom of the page;
 // cite('key') puts a superscript number next to the control that uses the method)
 const REFS: { key: string; text: string; url: string }[] = [
+  { key: 'droste', text: 'I. Droste et al. Calibration-free estimation of field-dependent aberrations for single-molecule localization microscopy across large fields of view. Optica 12, 1220–1229 (2025).', url: 'https://doi.org/10.1364/OPTICA.560721' },
   { key: 'torchpsf', text: 'torch-psf: vectorial and spline PSF models, in-situ PSF estimation and localization in PyTorch (the Python reference implementation; every step of this app is a port of it and tested against it).', url: 'https://github.com/jcnossen/torch-psf' },
   { key: 'thunderstorm', text: 'M. Ovesný, P. Křížek, J. Borkovec, Z. Švindrych, G. M. Hagen. ThunderSTORM: a comprehensive ImageJ plug-in for PALM and STORM data analysis and super-resolution imaging. Bioinformatics 30, 2389–2390 (2014).', url: 'https://doi.org/10.1093/bioinformatics/btu202' },
   { key: 'picasso', text: 'J. Schnitzbauer, M. T. Strauss, T. Schlichthaerle, F. Schueder, R. Jungmann. Super-resolution microscopy with DNA-PAINT. Nature Protocols 12, 1198–1228 (2017).', url: 'https://doi.org/10.1038/nprot.2017.024' },
@@ -1015,7 +1027,7 @@ const REFS: { key: string; text: string; url: string }[] = [
 const cite = (...keys: string[]) => `<sup class="cite">${keys.map((k) => {
   const i = REFS.findIndex((r) => r.key === k);
   if (i < 0) throw new Error('unknown reference ' + k);
-  return `<a href="#ref-${i + 1}" title="${REFS[i].text.replace(/"/g, '&quot;')}">${i + 1}</a>`;
+  return `<a href="#ref-${i + 1}" title="${REFS[i].text.replace(/"/g, '&quot;')}">[${i + 1}]</a>`;
 }).join('')}</sup>`;
 const REF_LIST = `<section class="refs" id="references"><h3>References</h3><p class="note">The methods behind the numbers next to the controls.</p><ol>${REFS.map((r, i) =>
   `<li id="ref-${i + 1}">${r.text} <a href="${r.url}" target="_blank" rel="noopener">${r.url.replace(/^https:\/\/(doi\.org\/)?/, '')}</a></li>`).join('')}</ol></section>`;
@@ -1110,6 +1122,11 @@ const TEMPLATE = `
       <canvas id="m-psfpreview" width="128" height="128" aria-label="Imported PSF"></canvas>
       <label>Emitter height <input id="m-preview-z" type="range" step="any"></label>
       <select id="m-preview-angle" aria-label="Pattern angle"></select></div>
+    <fieldset class="pupil-method"><legend>Pupil model</legend>
+      <label><input type="radio" name="m-method" value="zernike" checked> TorchPSF global Zernike</label>
+      <label><input type="radio" name="m-method" id="m-method-field" value="independent"> TorchPSF independent field Zernikes</label>
+      <span><label><input type="radio" name="m-method" id="m-method-nat" value="nat"> Nodal aberration theory (NAT)</label>${cite('droste')}</span>
+    </fieldset>
     ${check('m-refine', 'Spline refinement' + cite('torchpsf', 'lbfgs'), false, 'free spline knots regularised towards the fitted vectorial PSF; kept only if they predict independent test spots better')}
     <details class="adv" data-key="adv-fit"><summary>Advanced <span class="dim">spot counts, iterations, overlaps</span></summary>
       ${field('m-nspots', 'Spots for the fit', 8000, '', '1')}${field('m-nheld', 'Held-out spots', 4000, '', '1')}${field('m-iters', 'Iterations' + cite('adam'), 80, '', '1')}

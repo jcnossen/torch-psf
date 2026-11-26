@@ -5,7 +5,7 @@ import { solve } from '../fit/linalg';
 import type { MovieFit } from './movie';
 
 export interface MovieField {
-  type:'zernike_poly'; order:1; zernike_noll:number[]; coef:number[][];
+  type:'zernike_poly'; order:1|2; zernike_noll:number[]; coef:number[][];
   feats_norm:{cx:number;cy:number;sx:number;sy:number};
 }
 

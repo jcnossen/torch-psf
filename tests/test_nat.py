@@ -27,6 +27,18 @@ def test_native_field_grid():
         torch.testing.assert_close(basis @ nat_polynomial(g).T, torch.from_numpy(rows[:, 3:]), rtol=0, atol=2e-14)
 
 
+def test_web_reference(single_thread):
+    import json
+    from make_web_nat_reference import reference
+
+    recorded = json.loads((Path(__file__).parents[1] / "web/test/nat_reference.json").read_text())
+    current = reference(recorded["data"])
+    for key in ("expected", "independent"):
+        np.testing.assert_allclose(current[key], recorded[key], rtol=0, atol=3e-4)
+    np.testing.assert_allclose(current["nll"], recorded["nll"], rtol=1e-5)
+    np.testing.assert_allclose(current["pixels"], recorded["pixels"], rtol=1e-4, atol=1e-7)
+
+
 def test_native_field_columns():
     # Vectorfit 0.3.4 compute_xy_gamma_legendre at u=.4, v=-.7, mode order
     # (2,0),(2,-2),(2,2),(3,-1),(3,1),(4,0), for unit gamma_1 ... gamma_13.
