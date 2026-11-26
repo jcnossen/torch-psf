@@ -427,6 +427,49 @@ def report(rows):
         body(f,.407,f"In a separate axis-0 rerun, building {b['occupied_tiles']} occupied tables took {b['build_s']:.1f} s. Localizing all {b['held']} spots with those tables already cached took {b['warm_fit_s']:.1f} s. The earlier cold timing was 36.9 s. Run-to-run variation precludes subtracting the timings to infer construction cost.")
         body(f,.236,'Retraining decision. The v4 trained estimator already uses an integrated cubic spline of the axis-specific calibration. Retain those weights while validating the NAT pupil. A paired frozen-weight test should use identical emitter coordinates, photon levels, backgrounds and camera settings under both pupils. Measure detection recall, axial bias and RMSE through depth and across field positions. Independent known-height data can establish which axial calibration transfers to the experiment.')
         pdf.savefig(f); plt.close(f)
+        f=page('Does field dependence help?', 'Two-axis DNA-PAINT  /  matched constant and field-varying pupil fits',18)
+        spatial=json.loads(Path(__file__).with_name('field_vs_constant.json').read_text())
+        temporal=json.loads(Path(__file__).with_name('field_validation.json').read_text())
+        body(f,.823,'We fitted each illumination axis separately on alternate 16-pixel field tiles. Both models learned the same six base Zernikes from the same ROIs, with identical starting optics, camera variance and iteration budgets. NAT could also learn seven field terms. We froze both pupils and refitted xyz, flux and background with the continuous vectorial renderer on every scored ROI.')
+        entries=[]
+        for dataset,rs in [('Withheld tiles',spatial),('Fresh windows',temporal)]:
+            for r in rs:
+                lo,hi=r['tile_bootstrap_95']
+                entries.append([dataset,r['axis'],r.get('n',r.get('held')),f"{r['mean_delta_nll']:+.2f}",
+                                f"[{lo:+.2f}, {hi:+.2f}]",f"{r['fraction_better']:.1%}"])
+        table(f,[.07,.536,.86,.146],['Test','Axis','ROIs','ΔNLL','95% interval','NAT wins'],entries,[.25,.08,.12,.13,.24,.18])
+        body(f,.509,'ΔNLL is NAT minus constant per ROI. Negative values favour field dependence. Intervals resample whole occupied 16-pixel tiles, preserving paired observations. They condition on these pupils and this acquisition. The fresh test uses 64 spots per axis from each of six disjoint exposure windows spanning the same field.')
+        table(f,[.07,.304,.86,.084],['Peak-to-peak waves','Z4','Z5','Z6','Z7','Z8'],
+              [[f"Axis {r['axis']}"]+[f"{r['field_peak_to_peak_waves'][str(j)]:.3f}" for j in (4,5,6,7,8)] for r in spatial],
+              [.32,.136,.136,.136,.136,.136])
+        body(f,.28,'Field ranges span a 4 × 4 grid of camera positions. Four spline tiles per axis were used during calibration, limiting the ability to separate field curvature from mean defocus. These data test pixel prediction; independent known heights are needed to establish absolute axial accuracy.')
+        body(f,.15,'The mean fresh-window score favoured NAT in '+ ' and '.join(f"{sum(v<0 for v in r['window_means'])}/6 windows on axis {r['axis']}" for r in temporal)+'. All fitting and scoring ran on the laptop GPU. This experiment assessed the optical models independently of the trained network.')
+        pdf.savefig(f); plt.close(f)
+        from torch_psf.estimation import nat_polynomial
+        f=page('How does the fitted pupil vary?', 'Two-axis DNA-PAINT  /  camera coordinates in pixels',19)
+        body(f,.828,'Each map shows a fitted Zernike coefficient relative to its value at the field centre, in RMS waves. The displayed region spans the 16 field positions summarized on page 18. Increasing camera row runs downward.')
+        px=np.linspace(15,105,91)
+        xx,yy=np.meshgrid(px,px)
+        maps=[]
+        for r in spatial:
+            cx,cy,sx,sy=r['field_fit']['norm']
+            u,v=(xx-cx)/sx,(yy-cy)/sy
+            basis=np.stack([np.zeros_like(u),v,v*v,u,u*v,u*u])
+            poly=nat_polynomial(torch.tensor(r['field_fit']['gamma'],dtype=torch.float64)).numpy()
+            maps.append(np.einsum('jk,kxy->jxy',poly[:3],basis))
+        vmax=np.max(np.abs(maps))
+        for i,group in enumerate(maps):
+            for j,title in enumerate(('Z4  defocus','Z5  astigmatism','Z6  astigmatism')):
+                ax=f.add_axes([.105+.295*j,.525-.218*i,.218,.168])
+                im=ax.imshow(group[j],extent=[14.5,105.5,105.5,14.5],vmin=-vmax,vmax=vmax,cmap='RdBu_r')
+                ax.set_xticks([15,60,105]); ax.set_yticks([15,60,105]); ax.tick_params(labelsize=8)
+                if i==0: ax.set_title(title,fontsize=11)
+                if j==0: ax.set_ylabel(f'Axis {i}   /   row',fontsize=10)
+                if i==1: ax.set_xlabel('Column',fontsize=9)
+        cb=f.colorbar(im,cax=f.add_axes([.24,.239,.52,.014]),orientation='horizontal')
+        cb.set_label('Change from field centre (RMS waves)',fontsize=9); cb.ax.tick_params(labelsize=8)
+        body(f,.157,'The maps are predictions from the fitted polynomial. Only four tile centres per axis entered the calibration update. Agreement with experimental pixels at other positions is tested by the held-out scores on page 18.')
+        pdf.savefig(f); plt.close(f)
 if __name__ == '__main__':
     values = compare()
     for row in values:

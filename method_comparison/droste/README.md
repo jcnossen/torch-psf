@@ -17,6 +17,9 @@ python check_field_tiles.py v4_axis.json dna_paint_fit.json field_tile_errors.js
 python compare_initializations.py sample.npz camera_maps.npz v4_axis.json dna_paint_fit.json initialization_comparison.json
 python gradient_check.py v4_axis.json dna_paint_fit.json gradient_check.json
 python benchmark_spline.py sample.npz camera_maps.npz v4_axis.json dna_paint_fit.json spline_timing.json
+python compare_constant_field.py sample.npz camera_maps.npz v4_axis.json dna_paint_fit.json field_vs_constant.json --export fitted_pupils
+python sample_dna_paint.py movie.tif detection_cache validation.npz --starts 3000 9000 15000 21000 27000 28200
+python compare_constant_field.py validation.npz camera_maps.npz v4_axis.json field_vs_constant.json field_validation.json --validate
 python compare.py
 ```
 

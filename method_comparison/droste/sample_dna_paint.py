@@ -6,11 +6,11 @@ import tifffile
 from scipy.spatial import cKDTree
 
 
-def sample(movie, cache, output):
+def sample(movie, cache, output, starts=(0, 6000, 12000, 18000, 24000, 29400)):
     rng = np.random.default_rng(1809)
     images, positions, frames = [], [], []
     with tifffile.TiffFile(movie) as tif:
-        for start in (0, 6000, 12000, 18000, 24000, 29400):
+        for start in starts:
             locs = np.load(cache / f"spots_{start}.npz")["locs"]
             absolute = locs["frame"].astype(int)
             if absolute.max() < 600:
@@ -47,4 +47,5 @@ if __name__ == "__main__":
     p.add_argument("movie", type=Path)
     p.add_argument("cache", type=Path)
     p.add_argument("output", type=Path)
+    p.add_argument("--starts", type=int, nargs="+", default=(0, 6000, 12000, 18000, 24000, 29400))
     sample(**vars(p.parse_args()))
