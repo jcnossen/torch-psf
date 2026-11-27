@@ -4,6 +4,10 @@
   python -m torch_psf insitu movie.tif --psf beads.json --focus-um 0.4 -o insitu.json
   python -m torch_psf localize movie.tif --psf psf.json -o locs.csv
   python -m torch_psf view [psf.json] [--port 8000]
+  python -m torch_psf nn train config.json                  (neural-network localizer, docs/nn.md)
+  python -m torch_psf nn localize movie.tif --model MODEL_DIR -o locs.hdf5
+  python -m torch_psf nn calibrate MODEL_DIR [--bn] [--sigma] -o NEW_MODEL_DIR
+  python -m torch_psf nn convert --run run.json --args args.json [--weights v1net.pt] -o OUT   (SIMCODE files)
 
 Camera: --camera calib.json (its camera block), or --gain (e-/ADU) --offset (ADU) --readnoise (e-); without either the
 data are taken as photons. Run `python -m torch_psf <command> -h` for all options.
@@ -82,6 +86,53 @@ def _print_report(est):
     print(json.dumps(_jsonable(est.report), indent=1, default=str))
 
 
+def _nn(a):
+    import os
+    import torch_psf.nn as tn
+    if a.nn_cmd == 'train':
+        print('run directory:', tn.train_model(a.config, out=a.out, steps=a.steps))
+    elif a.nn_cmd == 'localize':
+        cam = 'model' if a.camera == 'model' else _camera(a)
+        L = tn.localize_movie(a.movie, a.model, cam, frames=_frames(a.frames), batch=a.batch, device=a.device,
+                              rule=a.rule, p_min=a.p_min, calibrate=not a.no_calibration,
+                              progress=lambda d, t, n: print(f'  {d}/{t} frames, {n} localizations', flush=True)
+                              if d % 1000 < a.batch or d == t else None)
+        L.save(a.out)
+        print(f'{len(L)} localizations -> {a.out}')
+    elif a.nn_cmd == 'calibrate':
+        from torch_psf.nn import calibrate as C, files
+        net, meta, cal = tn.load_model(a.model, a.device)
+        cfg = tn.load_config(a.config or os.path.join(a.model, (meta.get('training') or {}).get('config') or 'config.json'))
+        dev = next(net.parameters()).device
+        S = tn.Scenes(cfg['scenes'], cfg['batch'], cfg['size'], cfg['halo'], dev)
+        meta = dict(meta, source=dict(meta.get('source') or {}, calibrated_from=os.path.abspath(a.model)))
+        if a.bn:
+            net, info = C.bn_recalibrate(net, S, n_scenes=a.bn_scenes)
+            meta['source']['bn_recal'] = info
+            print('BatchNorm:', info)
+        if a.sigma:
+            cal = C.fit_calibration(net, S, a.batches, p_min=a.p_min, method=a.method, pixel_nm=meta['pixel_nm'],
+                                    pixel_nm_y=meta.get('pixel_nm_y'))
+            print(json.dumps(cal['check'].get('all', cal['check']), indent=1))
+        files.save_model(a.out, net, dict(meta, calibration=None), cal)
+        with open(os.path.join(a.out, 'config.json'), 'w') as f:
+            json.dump(cfg, f, indent=1)
+        print('model ->', a.out)
+    elif a.nn_cmd == 'convert':
+        cfg = tn.convert_simcode_config(a.run, a.args, psf=a.psf)
+        if a.weights is None:
+            with open(a.out, 'w') as f:
+                json.dump(cfg, f, indent=1)
+            print('config ->', a.out)
+        else:
+            os.makedirs(a.out, exist_ok=True)
+            cp = os.path.join(a.out, 'config.json')
+            with open(cp, 'w') as f:
+                json.dump(cfg, f, indent=1)
+            tn.convert_simcode_model(a.weights, a.out, meta=a.meta, sigma_scale=a.sigma_scale, config=cp)
+            print('model ->', a.out)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog='python -m torch_psf', description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -127,6 +178,43 @@ def main(argv=None):
     p.add_argument('-o', '--out', required=True, help='.hdf5 (Dataset) or .csv (ThunderSTORM)')
     _camera_args(p); _common(p)
 
+    p = sub.add_parser('nn', help='neural-network localizer (torch_psf.nn, docs/nn.md)')
+    nsub = p.add_subparsers(dest='nn_cmd', required=True)
+    q = nsub.add_parser('train', help='train a network on simulated scenes (config: torch_psf.nn.train)')
+    q.add_argument('config', help='training config json')
+    q.add_argument('--out', default=None, help='run directory (default: the out of the config)')
+    q.add_argument('--steps', type=int, default=None, help='override of the config steps')
+    q = nsub.add_parser('localize', help='movie -> localizations (.hdf5 Dataset, .csv, .smlm)')
+    q.add_argument('movie')
+    q.add_argument('--model', required=True, help='model directory (weights.pt, model.json)')
+    q.add_argument('--frames', default='', help='a:b')
+    q.add_argument('--batch', type=int, default=8, help='windows per forward')
+    q.add_argument('--rule', default='merge', choices=['merge', 'nms'])
+    q.add_argument('--p-min', type=float, default=0.2, help='lower bound of the merged p')
+    q.add_argument('--no-calibration', action='store_true', help='raw network sigmas')
+    q.add_argument('-o', '--out', required=True)
+    _camera_args(q)
+    _common(q)
+    q = nsub.add_parser('calibrate', help='BatchNorm and / or sigma calibration of a model on its training scenes')
+    q.add_argument('model', help='model directory')
+    q.add_argument('--config', default=None, help='training config (default: config.json of the model directory)')
+    q.add_argument('--bn', action='store_true', help='recalibrate the BatchNorm statistics')
+    q.add_argument('--bn-scenes', type=int, default=256)
+    q.add_argument('--sigma', action='store_true', help='fit the sigma calibration')
+    q.add_argument('--batches', type=int, default=150, help='scene batches per set (fit and check)')
+    q.add_argument('--p-min', type=float, default=0.5)
+    q.add_argument('--method', default='quantile', choices=['quantile', 'rms'])
+    q.add_argument('-o', '--out', required=True, help='new model directory')
+    _common(q)
+    q = nsub.add_parser('convert', help='SIMCODE plain-SMLM V1Net files -> torch_psf.nn config / model directory')
+    q.add_argument('--run', required=True, help="SIMCODE run.json (simcode.v1net.train)")
+    q.add_argument('--args', required=True, help="args.json of the stage the run's scenes come from")
+    q.add_argument('--psf', nargs='+', default=None, help='local PSF file(s) replacing the stored paths')
+    q.add_argument('--weights', default=None, help='v1net.pt (then also writes the model directory)')
+    q.add_argument('--meta', default=None, help='v1net.json (default: next to the weights)')
+    q.add_argument('--sigma-scale', default=None, help='sigma_scale json of the model')
+    q.add_argument('-o', '--out', required=True, help='config json (no --weights) or model directory')
+
     p = sub.add_parser('view', help='interactive PSF viewer in the browser')
     p.add_argument('psf', nargs='?', default=None)
     p.add_argument('--port', type=int, default=8000)
@@ -160,6 +248,8 @@ def main(argv=None):
             raise SystemExit('the PSF has no pixel size: write .hdf5 (ThunderSTORM csv needs nm)')
         L.save(a.out)
         print(f'{len(L)} localizations -> {a.out}')
+    elif a.cmd == 'nn':
+        _nn(a)
     elif a.cmd == 'view':
         serve(a.psf, port=a.port, device=a.device, open_browser=not a.no_browser)
     return 0
