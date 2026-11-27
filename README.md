@@ -204,6 +204,18 @@ python -m torch_psf localize movie.tif --psf insitu.json --gain 0.5 --offset 100
 pixel images, gradients, CRLB vs z; API in [docs/VIEWER_API.md](docs/VIEWER_API.md)). The page itself is built from
 the `web/` project (`scripts/build_viewer.sh`).
 
+**Neural-network localization** ([docs/nn.md](docs/nn.md)): `torch_psf.nn` is the SIMCODE v1 detection network in
+its plain-SMLM form, a DECODE-style network (Speiser et al. 2021). It takes 3-frame windows and gives p, x, y, z,
+photons and bg with sigmas, optionally with a full x, y, z covariance. The package also has its Gaussian-mixture
+loss, the offset-aware merge, the training-scene simulator, the trainer and the BatchNorm / sigma calibrations. On
+Tubulin-A647-3D the full-covariance network gave FRC 16.3 / 17.3 / 18.1 nm at 5 / 20 / 52 localizations per frame,
+against DECODE's 17.6 / 17.7 / 18.8 nm. These are SIMCODE-side results, still to be reproduced with torch_psf.nn.
+
+```bash
+python -m torch_psf nn train config.json                                   # config: docs/nn.md
+python -m torch_psf nn localize movie.tif --model RUN --camera model -o locs.hdf5
+```
+
 **Lower level**: `tp.extract_spots(movie, roisize, camera)` (detection + ROIs), `torch_psf.fit` (`localize`,
 `crlb`, `lm_poisson` for any model with an analytic Jacobian), `torch_psf.estimation` (`fit_beads`, `fit_zernike_knots`,
 `fit_pupil_knots`, `fit_free_knots`, `fit_tracks` with variable projection, held-out checks, `z_scale`),
@@ -234,6 +246,7 @@ the `web/` project (`scripts/build_viewer.sh`).
 | `camera.py` | `Camera` (scalars or per-pixel maps; `excess_noise` for EMCCDs); `photon_transfer`: camera offset and gain from the background pixels of a movie; `white_photon_transfer`: the gain from the spatially white (beyond-OTF) part of the background noise of frame differences, robust to sample fluctuations, a patterned illumination and the offset fixed pattern; `maps_from_movie`: per-pixel sCMOS offset and read-noise maps from a sparse SMLM movie without dark frames (optionally the read noise of a reference recording at another sensor-ROI position). |
 | `movie.py`, `io.py` | movie readers (TIFF incl. ImageJ > 4 GB and multi-part, memory-mapped), PSF files. |
 | `psfzip.py`, `psfreport.py` | the psf.zip writer / reader (channels, mappings, field dependence, z-stack, preview) and its fit report. |
+| `nn/` | `torch_psf.nn`: the neural-network localizer (`SMLMNet`, `GMMLoss`, merge, `Scenes`, training, calibrations, `localize_movie`, model directories; docs/nn.md). |
 | `__main__.py`, `viewer.py` | the command line, the viewer server. |
 
 **PSF file**: `psf.zip` (`torch_psf.io.save_zip(path, psf, camera=..., report=estimator)`; specification in
